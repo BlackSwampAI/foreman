@@ -1,0 +1,258 @@
+{
+  "schemaVersion": 1,
+  "proofType": "live_automatic_controller_smoke",
+  "date": "2026-09-23",
+  "runId": "run_f18b066c-a7f1-467c-a16b-05b294fb61c9",
+  "pinnedBaseCommit": "12a4c2821c60a1173f7232312e91b483a49bd147",
+  "workspaceId": "ws_5e6215ca-3956-4fed-a460-d6632a1b7815",
+  "controller": {
+    "startedAt": "2026-09-23T12:28:16.897Z",
+    "active": false,
+    "phase": "awaiting_approval",
+    "budgets": {
+      "roleTurns": {
+        "planner": 1,
+        "orchestrator": 1,
+        "worker": 1,
+        "reviewer": 1
+      },
+      "workerAttempts": 1
+    }
+  },
+  "result": {
+    "status": "awaiting_approval",
+    "successfulRoleTurns": 4,
+    "roleOrder": [
+      "planner",
+      "orchestrator",
+      "worker",
+      "reviewer"
+    ],
+    "approval": null,
+    "promotion": null
+  },
+  "assignments": [
+    {
+      "role": "planner",
+      "assignmentId": "asgn_c24e611e-34e4-4f96-8263-d665b4e00d71",
+      "status": "succeeded",
+      "selected": {
+        "harnessId": "codex-cli",
+        "model": "gpt-6-sol"
+      },
+      "observed": null,
+      "actualModelStatus": "unavailable",
+      "responseId": "resp_2f1db5fe-afde-4c04-a402-c53d5f4fa595",
+      "sessionId": "01a0ce3a-377d-7261-a1ca-c734ac771ca7",
+      "usage": {
+        "inputTokens": 13861,
+        "outputTokens": 163,
+        "cachedInputTokens": 11776,
+        "measured": true,
+        "runtimeMs": 9942
+      }
+    },
+    {
+      "role": "orchestrator",
+      "assignmentId": "asgn_58dd3d30-cd39-403a-9220-413d525da783",
+      "status": "succeeded",
+      "selected": {
+        "harnessId": "codex-cli",
+        "model": "gpt-6-sol"
+      },
+      "observed": null,
+      "actualModelStatus": "unavailable",
+      "responseId": "resp_ca2074fd-ad04-42aa-9a90-4a606d29fa73",
+      "sessionId": "01a0ce3d-0046-76f3-9842-bb206fdc78ab",
+      "usage": {
+        "inputTokens": 14021,
+        "outputTokens": 57,
+        "cachedInputTokens": 11776,
+        "measured": true,
+        "runtimeMs": 6429
+      }
+    },
+    {
+      "role": "worker",
+      "assignmentId": "asgn_f8fb2e17-85c3-4ff6-8861-aceac16c246f",
+      "status": "succeeded",
+      "selected": {
+        "harnessId": "antigravity-cli",
+        "model": "gemini-3.8-flash-low"
+      },
+      "observed": {
+        "harnessId": "antigravity-cli",
+        "model": "gemini-3.8-flash-low"
+      },
+      "actualModelStatus": "observed",
+      "responseId": "resp_e43983b7-dd56-47db-b0d0-8aa5b89d0a20",
+      "sessionId": "87f6e616-aadb-48fc-9dfa-5ee8edafa027",
+      "usage": {
+        "inputTokens": 99794,
+        "outputTokens": 9882,
+        "totalTokens": 109676,
+        "thinkingTokens": 9191,
+        "cachedInputTokens": 0,
+        "measured": true,
+        "runtimeMs": 51070
+      }
+    },
+    {
+      "role": "reviewer",
+      "assignmentId": "asgn_7f0494c1-6a96-4582-997a-7aa225cdc481",
+      "status": "succeeded",
+      "selected": {
+        "harnessId": "claude-code",
+        "model": "sonnet"
+      },
+      "observed": {
+        "harnessId": "claude-code",
+        "model": "claude-sonnet-5"
+      },
+      "actualModelStatus": "observed",
+      "responseId": "resp_7ac8c26a-a8b4-4a0f-a1b7-170413e9db05",
+      "sessionId": "b3eacadf-0819-42fc-a4d2-ba838a7b0aa3",
+      "usage": {
+        "inputTokens": 2,
+        "outputTokens": 934,
+        "cachedInputTokens": 3397,
+        "measured": true,
+        "runtimeMs": 11740
+      }
+    }
+  ],
+  "usageByHarness": {
+    "codex-cli": {
+      "successfulTurns": 2,
+      "inputTokens": 27882,
+      "outputTokens": 220,
+      "cachedInputTokens": 23552,
+      "actualModel": "unavailable"
+    },
+    "antigravity-cli": {
+      "successfulTurns": 1,
+      "inputTokens": 99794,
+      "outputTokens": 9882,
+      "totalTokens": 109676,
+      "thinkingTokens": 9191,
+      "cachedInputTokens": 0,
+      "observedModel": "gemini-3.8-flash-low"
+    },
+    "claude-code": {
+      "successfulTurns": 1,
+      "inputTokens": 2,
+      "outputTokens": 934,
+      "cachedInputTokens": 3397,
+      "actualModel": "claude-sonnet-5"
+    }
+  },
+  "underlyingProviderRequestCount": "unavailable",
+  "cost": "unavailable",
+  "worker": {
+    "proposalId": "wprop_13c9a809-67a3-4b48-8ae2-eb03407f3a77",
+    "proposal": "Append the exact sentence \"AGY Flash completed this automatic-path smoke.\" as a new line at the end of README.md, preserving all existing content. Edit only README.md.",
+    "completeSnapshot": {
+      "reportedComplete": true,
+      "reportedErrors": 0,
+      "entryCount": 1
+    },
+    "scopeVerified": true,
+    "allowedScope": [
+      "README.md"
+    ],
+    "responseId": "resp_e43983b7-dd56-47db-b0d0-8aa5b89d0a20",
+    "orchestratorReceipt": {
+      "id": "oinbox_ca6abacf-d08c-4dc4-b113-b57816693eff",
+      "sessionId": "01a0ce3d-0046-76f3-9842-bb206fdc78ab",
+      "workerResponseId": "resp_e43983b7-dd56-47db-b0d0-8aa5b89d0a20",
+      "evidenceDigest": "34370b4b04653a2f1c0224208517c6a12fe9000d90c2713589907547197b855c"
+    },
+    "diff": "### modify: README.md\n- mode 100644, 88 bytes, sha256 aa0ae29c5470c3f42d7bc406ebe5cfe2af3c047701786ddf3d1ed7dfd2066183\n+ mode 100644, 135 bytes, sha256 786ce9d51da87d808cb5233d8ea35af58b59ed3d6bc72c6e87ff545ba91a363b\n\n```diff\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,4 @@\n # Foreman automatic path smoke\n \n This disposable repository tests a single bounded edit.\n+AGY Flash completed this automatic-path smoke.\n```\n",
+    "validation": {
+      "status": "passed",
+      "policy": {
+        "requireAllChecksPass": true,
+        "configuredCheckCount": 1,
+        "commandDigest": "9866413f7497e956acb48658cabc43da82cb558997af4c22b18c41a010bac6bf"
+      },
+      "gitEvidence": {
+        "status": "verified",
+        "commit": "12a4c2821c60a1173f7232312e91b483a49bd147",
+        "changedPaths": [
+          "README.md"
+        ],
+        "submittedAt": "2026-09-23T12:29:16.156Z"
+      },
+      "observations": [
+        {
+          "name": "expected-line",
+          "command": "grep",
+          "args": [
+            "-Fx",
+            "AGY Flash completed this automatic-path smoke.",
+            "README.md"
+          ],
+          "exitCode": 0,
+          "timedOut": false,
+          "output": "AGY Flash completed this automatic-path smoke.\n",
+          "outputTruncated": false,
+          "startedAt": "2026-09-23T12:29:16.152Z",
+          "finishedAt": "2026-09-23T12:29:16.155Z",
+          "passed": true
+        }
+      ]
+    }
+  },
+  "reviewer": {
+    "recommendationId": "recommendation_927c5991-e842-480f-bbbc-727f558b65be",
+    "status": "proposed",
+    "harnessId": "claude-code",
+    "requestedModel": "sonnet",
+    "observedModel": "claude-sonnet-5",
+    "responseId": "resp_7ac8c26a-a8b4-4a0f-a1b7-170413e9db05",
+    "sessionId": "b3eacadf-0819-42fc-a4d2-ba838a7b0aa3",
+    "verdict": "recommend",
+    "reviewMode": "read_only",
+    "mutationAttempted": false,
+    "usage": {
+      "inputTokens": 2,
+      "outputTokens": 934,
+      "cachedInputTokens": 3397,
+      "measured": true,
+      "runtimeMs": 11740
+    }
+  },
+  "checks": {
+    "foreman": "77/77 passed",
+    "bridge": "37/37 passed",
+    "typecheck": "passed",
+    "build": "passed"
+  },
+  "notes": [
+    "Live CLI calls, not deterministic fixtures.",
+    "Exactly one successful assignment was recorded per role.",
+    "Human approval and Git promotion were not performed.",
+    "Codex observed model was unavailable.",
+    "Provider request count and cost were unavailable.",
+    "No provider credentials are included.",
+    "AGY reported 109,676 total tokens for its one Worker turn; sanitized diagnostics showed repeated allowed file-tool actions and one permission-denied initial view_file before a successful edit, but the cause of usage is unproven.",
+    "Read-only Chrome inspection showed the Planner conversation, awaiting_approval controller state, Reviewer recommendation, and pending human decision in the UI."
+  ],
+  "usageInterpretation": {
+    "reportedWorkerTotalTokens": 109676,
+    "turnCount": 1,
+    "observation": "The high reported token usage accompanied repeated allowed file-tool actions and one permission-denied initial view_file before a later successful edit, as seen in a sanitized bridge diagnostic.",
+    "cause": "unproven",
+    "cost": "unavailable; not inferred from token counts"
+  },
+  "uiInspection": {
+    "method": "read_only Chrome UI check",
+    "observed": [
+      "Planner conversation visible",
+      "Controller phase awaiting_approval visible",
+      "Reviewer recommendation visible",
+      "Pending human decision visible"
+    ],
+    "humanDecisionPerformed": false
+  }
+}

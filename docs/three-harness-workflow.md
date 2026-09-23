@@ -104,73 +104,95 @@ version before making another attempt.
 
 Wait for UHP discovery to complete. In the UI's **Roles and harnesses**
 section, select a discovered harness/model pair at Global, Project, or Run
-scope. Choices are discovered from the bridge; unavailable combinations are
-not guessed. Any of Claude Code, Codex CLI, or `antigravity-cli` can be chosen
-for Planner, Orchestrator, Worker, or Reviewer when the bridge advertises that
-pair. For ordinary use, leave Planner, Orchestrator, and Reviewer on Claude or
-Codex, and set Worker to `antigravity-cli / gemini-3.8-flash-low`. Other
-discovered AGY Flash models remain available as role and run overrides.
-Selections can be changed for each role and each run; changing the Worker
-draft alone does not dispatch work.
+scope. The practical defaults use Claude Code or Codex CLI for Planner,
+Orchestrator, and Reviewer, and `antigravity-cli / gemini-3.8-flash-low` for
+Worker when that Flash model is available. Any discovered pair can be selected
+for any role. Selections remain editable per role and per run.
 
-Create a disposable project, task, and run for a proof or small change. In the
-run view, enter the source repository's full Git commit SHA and click **Pin
-base & prepare Worker workspace**. Foreman pins the run to that commit and
-prepares an isolated Worker workspace from it. The Worker request does not
-accept an arbitrary host path. The allowed scope is enforced against Foreman's
-own comparison of the complete returned snapshot with the pinned base.
+Create a disposable project, task, and run for a small change. Start requires a
+successful Planner turn and queued guidance. You may pin a full Git commit SHA
+and prepare the Worker workspace in the run view first; otherwise **Start
+work** pins the configured source repository's current HEAD and seeds an
+isolated workspace. The Worker request does not accept an arbitrary host path.
+The allowed scope is enforced against Foreman's own comparison of the complete
+returned snapshot with the pinned Git base.
 
 ## Run the workflow
 
 1. **Human ↔ Planner.** Send a message in the Planner conversation surface.
-   Foreman stores it as ordered guidance and submits a Planner assignment for
-   each message. The Planner and Orchestrator have separate contexts. Planner
-   replies and their assignment/session metadata appear in the run. Foreman
-   keeps Planner and Orchestrator session identities separate for the run.
-2. **Orchestrator proposal.** In **Orchestrator plan & state**, submit a
-   separate instruction. Foreman sends it with the Planner context, guidance,
-   pinned base, and allowed paths. The Orchestrator must return one strict JSON
-   object containing `workerTask`. Foreman stores that text as a pending
-   proposal only if it is bound to a successful Orchestrator assignment.
-3. **Controller dispatch.** Inspect the stored proposal and click **Dispatch
-   through Foreman**. Agent prose cannot dispatch a task. The controller
-   checks proposal identity, status, pin, seeded workspace, and selected
-   Worker configuration before submitting the Worker assignment.
-4. **AGY Flash Worker.** The Worker edits only its isolated, pinned workspace.
-   After it succeeds, click **Verify Worker result**. The bridge returns a
-   complete snapshot; Foreman independently compares bytes, modes and paths
-   with its pinned Git base and enforces the configured allowed scope. Foreman
-   computes and displays the exact diff. Incomplete snapshots or out-of-scope
-   paths fail closed.
-5. **Foreman validation.** Foreman materializes the verified result in a
-   disposable validation workspace and runs every configured command with
-   time and output bounds. The UI records commands, exit status and captured
-   output. Checks supplied by an agent are not treated as validation.
-   The verified result also appears in the Orchestrator inbox with its exact
-   diff, Worker response ID, pinned base, scope, and validation observations.
-   A separate explicit follow-up turn can deliver that receipt to the same
-   Orchestrator context before review. This follow-up never dispatches work.
-6. **Independent Reviewer.** After verification and passing validation, click
-   **Request read-only Reviewer**. Foreman sends the exact verified diff,
-   pinned base, allowed scope and controller-observed validation evidence in a
-   fresh context without the Worker checkout. A Reviewer recommendation is
-   advisory and cannot edit the result or approve it. The UI records response
-   and session IDs, requested and observed model when available, and reported
-   usage fields: input, output, cached input, thinking, total tokens, runtime,
-   and request count when provided by the CLI. Missing fields stay unavailable;
-   the UI does not estimate usage. If the harness cannot establish the required
-   read-only and identity evidence, Foreman rejects the Reviewer result.
-7. **Human decision.** Inspect the diff, validation evidence, role calls, and
+   Foreman stores ordered guidance and submits one Planner turn. Planner
+   replies and assignment/session metadata appear in the run. Planner and
+   Orchestrator use separate continuing contexts.
+2. **Start the controller.** Click **Start work** and set the per-role turn
+   budgets and Worker attempt limit. Defaults are Planner 3, Orchestrator 2,
+   Worker 2, Reviewer 1, and two Worker attempts. The controller automatically
+   sends the recorded Planner request and guidance to Orchestrator. Orchestrator
+   must return a strict JSON object containing a bounded `workerTask`; only a
+   successful, bound proposal can advance the run.
+3. **Worker and evidence.** Foreman dispatches the proposal with the selected
+   Worker harness/model. The Worker edits only its isolated workspace seeded
+   from the pinned base. Foreman obtains and verifies the complete snapshot,
+   compares bytes, modes, and paths against the pinned Git base, enforces the
+   allowed scope, and computes the exact diff. Incomplete snapshots and
+   out-of-scope paths stop the run.
+4. **Validation and Reviewer.** Foreman runs every configured command in a
+   disposable validation workspace with time and output bounds. After
+   successful verification and validation, Foreman sends the exact verified
+   diff and validation evidence to a read-only Reviewer. The Reviewer
+   recommendation is advisory; it cannot edit the result or approve it. The
+   UI records selected harness/model, response and session IDs, observed model
+   when available, and usage fields reported by the CLI. Missing fields remain
+   unavailable.
+5. **Stop and recovery rules.** The controller enforces run budgets across
+   automatic and manual role assignments. It does not retry failed CLI
+   submissions, incomplete evidence, out-of-scope changes, or changed results
+   that fail validation. One bounded follow-up Worker attempt is available
+   only after a successful, complete, scope-verified Worker result fails
+   configured validation and budget remains. Orchestrator must provide a
+   distinct strict proposal; Foreman archives the prior proposal and evidence,
+   then seeds a fresh workspace from the same pinned base. This creates a new
+   Worker assignment and does not retry the prior proposal or Worker result. A
+   second validation failure stops for a human.
+   During automation, Planner messages queue as steering and the controller
+   offers them to Orchestrator at the next safe checkpoint. Stop reasons and
+   role budgets are visible in the run.
+6. **Human decision.** Inspect the diff, validation evidence, role calls, and
    Reviewer recommendation in **Evidence and approval**. Only the human's
    explicit approval or rejection records the final decision. Approval does
-   not change Git. Git promotion is a separate explicit UI action after
-   approval; do not click it when the desired endpoint is an unpromoted result.
+   not change Git. Promotion remains a separate explicit UI action after
+   approval.
 
 Agent text alone cannot dispatch work, satisfy Foreman's Git verification,
 pass controller validation, approve changes, or change Git. The controller
 owns those transitions and binds the evidence to the run's pinned base.
 
-## Proof record
+## Live automatic-path proof
+
+The automatic controller completed a live run on 2026-09-23 through all four
+roles, with one successful turn per role. Planner and Orchestrator used Codex
+CLI (`gpt-6-sol`); AGY Worker used `gemini-3.8-flash-low`; Claude Code Reviewer
+used `sonnet` and observed `claude-sonnet-5`. Both Codex observed-model values
+were unavailable. The run ended at `awaiting_approval`, with approval and
+promotion unset.
+
+Foreman verified the complete one-entry snapshot at pinned base
+`12a4c2821c60a1173f7232312e91b483a49bd147`; `README.md` was the only allowed
+and changed path. Foreman's exact `grep -Fx` validation passed. The Reviewer
+recommended the change in read-only mode. The live AGY report records 99,794
+input, 9,882 output, 109,676 total, and 9,191 thinking tokens. Cost and
+underlying provider request count are unavailable. Full role IDs, usage,
+diff, validation output, and receipt digest are in the
+[live automatic-path smoke report](automatic-path-smoke.md) and
+[machine-readable evidence](evidence/automatic-path-smoke-20260923.json).
+Reported checks were Foreman 77/77, bridge 37/37, typecheck, and build.
+
+## Historical manual live proof record
+
+This separate proof predates **Start work** and exercised the manual Planner →
+Orchestrator → Worker verification → Reviewer sequence. The live automatic
+proof above has its own run, turn count, role assignments, and evidence. Keep
+the following older IDs and usage scoped to this historical manual proof.
+
 
 The four-role live proof is complete through Reviewer on run
 `run_8931540b-d039-4f2d-a92b-e1a1b3658857`, pinned to disposable base

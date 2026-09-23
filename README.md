@@ -16,16 +16,17 @@ including any discovered AGY Flash model, with global, project, and run-level
 choices in the UI.
 
 Follow [the three-harness workflow guide](docs/three-harness-workflow.md) to
-start the local bridge, configure a pinned workspace and validation policy,
-and use the Planner → Orchestrator → Worker → Reviewer evidence flow. Live
-four-role proof is complete through Reviewer. The proof summary records 12
-session-confirmed live CLI turns including diagnostics (Codex 4, AGY 6, Claude
-2); one additional Claude submission has no session or execution-stage evidence
-and is not counted as a confirmed CLI start. Deterministic bridge fixtures are
-not live provider evidence. Current deterministic suites passed 72/72 Foreman
-tests and 37/37 bridge tests. Human approval and Git promotion remain for the
-operator in the UI. The guide records the role IDs, usage, verification, and
-validation evidence.
+start the local bridge and configure a validation policy. Talk with the Planner
+in the UI, then start the bounded controller run: Foreman carries the Planner
+guidance through Orchestrator, Worker, complete-snapshot verification,
+validation, and Reviewer. Human approval and Git promotion remain separate
+operator actions. The guide retains the earlier live four-role proof as a
+historical manual workflow record. A separate live automatic-path run completed
+one successful turn per role and stopped at human approval; see the
+[automatic-path smoke report](docs/automatic-path-smoke.md) and its
+[machine-readable evidence](docs/evidence/automatic-path-smoke-20260923.json).
+The smoke left approval and Git promotion for the operator. Earlier live-call
+IDs and usage remain in the guide's historical record.
 
 ## Run locally
 
