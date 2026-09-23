@@ -45,7 +45,7 @@ export interface UhpSubmitResult {
   reviewerExecution?: { mode?: string; mutationAttempted?: boolean; validation?: unknown };
 }
 
-export interface UhpUsage { inputTokens?: number; outputTokens?: number; totalTokens?: number; cachedInputTokens?: number; requestCount?: number }
+export interface UhpUsage { inputTokens?: number; outputTokens?: number; totalTokens?: number; thinkingTokens?: number; cachedInputTokens?: number; requestCount?: number }
 
 export interface UhpAdapter {
   submit(input: UhpSubmitInput): Promise<UhpSubmitResult>;
@@ -175,7 +175,7 @@ export class UhpClient implements UhpAdapter {
     const model = modelId ? discovery.harnessModels[harness.id]?.find((candidate) => candidate.id === modelId && candidate.available !== false) : undefined;
     if (!model) throw new UhpError(modelId ? `Configured UHP model '${modelId}' is unavailable for harness '${harness.id}'` : "UHP model must be explicitly configured for this submission");
 
-      const timeoutSeconds = boundedInteger(configNumber(input.config.timeoutSeconds, harness.timeoutSeconds, 300), 1, 600, "UHP timeoutSeconds");
+      const timeoutSeconds = boundedInteger(configNumber(input.config.timeoutSeconds, harness.timeoutSeconds, 120), 1, 600, "UHP timeoutSeconds");
     const timeoutMs = boundedInteger(this.options.timeoutMs ?? 10_000, 1_000, 120_000, "UHP request timeoutMs");
     const maxStep = optionalBounded(input.config.maxStep, harness.maxStep, 1000, "maxStep") ?? 100;
     const controller = new AbortController();
@@ -226,6 +226,8 @@ export class UhpClient implements UhpAdapter {
       const cliInvocation = invocationRecord && typeof invocationRecord.executable === "string" && Array.isArray(invocationArgs) && invocationArgs.every((arg: unknown) => typeof arg === "string")
         ? { executable: invocationRecord.executable, ...(typeof invocationRecord.host_executable === "string" ? { hostExecutable: invocationRecord.host_executable } : {}), args: [...invocationArgs] as string[] }
         : undefined;
+      const reportedHarnessId = responseMetadata.harness_id;
+      if (reportedHarnessId !== undefined && typeof reportedHarnessId !== "string") throw new UhpError("UHP response reported an invalid selected harness");
       const sessionId = getSessionId(final) ?? getSessionId(responseObject);
       const reviewerExecution = input.roleId === "reviewer" ? {
         mode: typeof responseMetadata.foreman_review_mode === "string" ? responseMetadata.foreman_review_mode : undefined,
@@ -248,14 +250,12 @@ export class UhpClient implements UhpAdapter {
         ...(Object.hasOwn(responseObject, "usage") ? { usage: normalizeUsage(responseObject.usage) } : {}),
       };
       const modelFallback = responseMetadata.model_fallback === true || (!!actualModel && reportedRequestedModel !== undefined && actualModel !== reportedRequestedModel);
-      const codexModelGap = input.roleId === "worker" && harness.id === "codex-cli" && !actualModel && actualModelStatus === "unavailable" && !!cliInvocation && reportedRequestedModel === model.id;
-      if (!actualModel && input.roleId !== "reviewer" && !codexModelGap) throw new UhpError("UHP response did not report the actual model");
+      const cliModelUnavailable = !actualModel && actualModelStatus === "unavailable" && !!cliInvocation && reportedRequestedModel === model.id && reportedHarnessId === harness.id && hasExplicitModelArgument(cliInvocation.args, model.id) && (harness.id === "antigravity-cli" || harness.id === "codex-cli");
+      if (!actualModel && !cliModelUnavailable) throw new UhpError("UHP response did not report the actual model or a bound unavailable-model report");
       if (actualModel && actualModel !== model.id && !modelFallback && input.roleId !== "reviewer") throw new UhpError(`UHP ran model '${actualModel}' although '${model.id}' was requested`);
       if (modelFallback && reportedRequestedModel !== model.id && input.roleId !== "reviewer") throw new UhpError(`UHP reported a model substitution inconsistent with request '${model.id}'`);
       if (modelFallback && actualModel === model.id && input.roleId !== "reviewer") throw new UhpError("UHP marked the requested model as substituted but returned that same model");
-      const reportedHarnessId = responseMetadata.harness_id;
-      if (reportedHarnessId !== undefined && typeof reportedHarnessId !== "string") throw new UhpError("UHP response reported an invalid selected harness");
-      if (typeof reportedHarnessId === "string" && reportedHarnessId !== harness.id && input.roleId !== "reviewer") throw new UhpError(`UHP ran harness '${reportedHarnessId}' although '${harness.id}' was requested`);
+      if (typeof reportedHarnessId === "string" && reportedHarnessId !== harness.id) throw new UhpError(`UHP ran harness '${reportedHarnessId}' although '${harness.id}' was requested`);
       if (!sessionId && input.roleId !== "reviewer") throw new UhpError("UHP response did not report its session id");
       const ignoredFields = Array.isArray(responseMetadata.ignored_fields) ? responseMetadata.ignored_fields.filter((field): field is string => typeof field === "string") : [];
       return {
@@ -424,10 +424,12 @@ function normalizeUsage(value: unknown): UhpUsage | null {
     ...(typeof usage.input_tokens === "number" ? { inputTokens: usage.input_tokens } : {}),
     ...(typeof usage.output_tokens === "number" ? { outputTokens: usage.output_tokens } : {}),
     ...(typeof usage.total_tokens === "number" ? { totalTokens: usage.total_tokens } : {}),
-    ...(typeof details.cached_tokens === "number" ? { cachedInputTokens: details.cached_tokens } : typeof usage.cached_input_tokens === "number" ? { cachedInputTokens: usage.cached_input_tokens } : {}),
+    ...(typeof usage.thinking_tokens === "number" ? { thinkingTokens: usage.thinking_tokens } : {}),
+    ...(typeof details.cached_tokens === "number" ? { cachedInputTokens: details.cached_tokens } : typeof usage.cached_input_tokens === "number" ? { cachedInputTokens: usage.cached_input_tokens } : typeof usage.cache_read_tokens === "number" ? { cachedInputTokens: usage.cache_read_tokens } : {}),
     ...(typeof usage.request_count === "number" ? { requestCount: usage.request_count } : typeof usage.requests === "number" ? { requestCount: usage.requests } : {}),
   };
 }
+function hasExplicitModelArgument(args:readonly string[],model:string):boolean {for(let i=0;i<args.length-1;i++)if((args[i]==='--model'||args[i]==='-m')&&args[i+1]===model)return true;return false;}
 function boundedInteger(value: number, min: number, max: number, name: string): number {
   if (!Number.isInteger(value) || value < min || value > max) throw new Error(`${name} must be an integer from ${min} to ${max}`);
   return value;

@@ -4,6 +4,24 @@ Foreman is a local, web-first engineering control plane for one operator. A Plan
 
 This repository began with a new Git root. No v1 code or Git history was migrated.
 
+## Three-harness workflow
+
+Foreman can use the host-side CLI bridge for Claude Code, Codex CLI, and
+Antigravity CLI (`agy`). Each harness uses its existing host sign-in; Foreman
+does not require a provider API key or copy credentials. The practical defaults
+are Claude Code or Codex CLI for Planner, Orchestrator, and Reviewer, and the
+explicit AGY model `gemini-3.8-flash-low` for Worker when `agy models` reports
+it on the host. Every role can select any discovered harness/model pair,
+including any discovered AGY Flash model, with global, project, and run-level
+choices in the UI.
+
+Follow [the three-harness workflow guide](docs/three-harness-workflow.md) to
+start the local bridge, configure a pinned workspace and validation policy,
+and use the Planner → Orchestrator → Worker → Reviewer evidence flow. Live
+proof is in progress: Planner, Orchestrator, and Worker calls succeeded;
+Reviewer evidence is pending. Deterministic bridge fixtures are not live
+provider evidence. The guide records current results and outstanding proof.
+
 ## Run locally
 
 Use Node 24 and pnpm 11.
@@ -23,7 +41,7 @@ Open `http://127.0.0.1:4399`. The service serves the built React UI, local REST 
 | `FOREMAN_DATA_DIR` | Local durable state directory. |
 | `UHP_BASE_URL`, `UHP_TOKEN`, `UHP_HARNESS_ID`, `UHP_MODEL` | UHP server, optional bearer credential, and optional explicit initial harness/model pair. Without a reachable server, harness/model options are unavailable. |
 | `HINDSIGHT_BASE_URL`, `HINDSIGHT_TOKEN` | Hindsight API and optional credential. Outages show degraded memory status and do not stop workflow state changes. |
-| `FOREMAN_REQUEST_TIMEOUT_MS`, `FOREMAN_TASK_TIMEOUT_MS` | Bounded service requests and task policy. |
+| `FOREMAN_REQUEST_TIMEOUT_MS`, `FOREMAN_TASK_TIMEOUT_MS` | Bounded service requests and task policy. Request timeout defaults to 120 seconds for CLI role turns. |
 | `FOREMAN_WORKSPACE_SOURCE_REPO` | Local Git repository used to read the pinned base and verify the complete Worker snapshot. |
 | `FOREMAN_WORKSPACE_BRIDGE_URL` | Optional loopback URL for the external workspace bridge; needed to seed and fetch a live Worker workspace, not to replay recorded evidence. |
 | `FOREMAN_WORKSPACE_ALLOWED_SCOPE` | Comma-separated exact paths or directory prefixes ending in `/` allowed in the Worker result. |

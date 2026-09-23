@@ -13,6 +13,8 @@ export interface UhpFixtureOptions {
   versions?: string[];
   omitResponseHarnessId?: boolean;
   codexCli?: boolean;
+  antigravityCli?: boolean;
+  omitHarnessTimeout?: boolean;
   missingActualModel?: boolean;
   codexFailure?: boolean;
 }
@@ -47,11 +49,13 @@ export async function startUhpFixture(options: UhpFixtureOptions = {}): Promise<
         for (const capability of options.omitCapabilities ?? []) delete capabilities[capability];
         res.end(JSON.stringify({ object: "uhp.discovery", protocol: options.protocol ?? "uhp", versions, default_version: defaultVersion, conformance_class: "core", capabilities, implementation: { name: "fixture-router", version: "test" } }));
       } else if (path === "/v1/harnesses") {
-        json(res, 200, { harnesses: [{ id: options.codexCli ? "codex-cli" : "chrn_fixture", base: "codex", maxStep: 40, timeoutSeconds: 180 }, { id: "chrn_other", base: "hermes" }] }, requestVersion);
+        json(res, 200, { harnesses: [{ id: options.codexCli ? "codex-cli" : options.antigravityCli ? "antigravity-cli" : "chrn_fixture", base: "codex", maxStep: 40, ...(options.omitHarnessTimeout ? {} : {timeoutSeconds: 180}) }, { id: "chrn_other", base: "hermes" }] }, requestVersion);
       } else if (path === "/v1/harnesses/chrn_fixture/models") {
         json(res, 200, { harness_id: "chrn_fixture", models: [{ id: "model-fixture", available: true }, { id: "model-offline", available: false }] }, requestVersion);
       } else if (path === "/v1/harnesses/codex-cli/models") {
         json(res, 200, { harness_id: "codex-cli", models: [{ id: "codex-available", available: true }] }, requestVersion);
+      } else if (path === "/v1/harnesses/antigravity-cli/models") {
+        json(res, 200, { harness_id: "antigravity-cli", models: [{ id: "gemini-3.8-flash-medium", available: true }] }, requestVersion);
       } else if (path === "/v1/harnesses/chrn_other/models") {
         json(res, 200, { harness_id: "chrn_other", models: [{ id: "model-other", available: true }] }, requestVersion);
       } else if (path.startsWith("/v1/responses/") && path.endsWith("/cancel") && req.method === "POST") {
@@ -94,8 +98,8 @@ export async function startUhpFixture(options: UhpFixtureOptions = {}): Promise<
         const metadata = request.metadata ?? {};
         const shouldHold = options.holdUntilCancel === true && (!options.holdRole || metadata.foreman_role_id === options.holdRole);
         const status = shouldHold ? "in_progress" : options.codexFailure ? "failed" : options.terminalStatus ?? "completed";
-        const responseMetadata = { ...(!options.codexFailure ? { session_id: sessionId } : {}), ...(options.omitResponseHarnessId ? {} : { harness_id: options.codexCli ? "codex-cli" : "chrn_fixture" }), ...(options.codexCli ? { actual_model_status: options.missingActualModel || options.codexFailure ? "unavailable" : "observed", cli_invocation: { executable: "/opt/codex", host_executable: "/usr/bin/codex", args: ["exec", "--model", "codex-available"] } } : {}), ...(metadata.foreman_review_mode === 'read_only' ? { foreman_review_mode: 'read_only', reviewer_mutation_attempted: false, reviewer_validation: metadata.review_evidence?.controllerValidation } : {}) };
-        const response = { id: responseId, object: "response", status, ...(!options.missingActualModel && !options.codexFailure ? { model: options.codexCli ? "codex-actual" : "model-fixture" } : {}), ...(options.codexCli ? { requested_model: "codex-available" } : {}), metadata: responseMetadata, usage: { input_tokens: 7, output_tokens: 3, total_tokens: 10, input_tokens_details: { cached_tokens: 2 } }, output_text: "fixture result", output: [{ type: "message", content: [{ type: "output_text", text: "fixture result" }] }] };
+        const responseMetadata = { ...(!options.codexFailure ? { session_id: sessionId } : {}), ...(options.omitResponseHarnessId ? {} : { harness_id: options.codexCli ? "codex-cli" : options.antigravityCli ? "antigravity-cli" : "chrn_fixture" }), ...(options.codexCli || options.antigravityCli ? { actual_model_status: options.missingActualModel || options.codexFailure ? "unavailable" : "observed", cli_invocation: { executable: options.antigravityCli ? "/opt/agy" : "/opt/codex", host_executable: options.antigravityCli ? "/usr/bin/agy" : "/usr/bin/codex", args: options.antigravityCli ? ["-p", "prompt", "--output-format", "stream-json", "--model", "gemini-3.8-flash-medium"] : ["exec", "--model", "codex-available"] } } : {}), ...(metadata.foreman_review_mode === 'read_only' ? { foreman_review_mode: 'read_only', reviewer_mutation_attempted: false, reviewer_validation: metadata.review_evidence?.controllerValidation } : {}) };
+        const response = { id: responseId, object: "response", status, ...(!options.missingActualModel && !options.codexFailure ? { model: options.codexCli ? "codex-actual" : options.antigravityCli ? "gemini-3.8-flash-medium" : "model-fixture" } : {}), ...(options.codexCli ? { requested_model: "codex-available" } : options.antigravityCli ? { requested_model: "gemini-3.8-flash-medium" } : {}), metadata: responseMetadata, usage: options.antigravityCli ? { input_tokens: 8, output_tokens: 5, total_tokens: 13, thinking_tokens: 2, cache_read_tokens: 3 } : { input_tokens: 7, output_tokens: 3, total_tokens: 10, input_tokens_details: { cached_tokens: 2 } }, output_text: "fixture result", output: [{ type: "message", content: [{ type: "output_text", text: "fixture result" }] }] };
         const created = { type: "response.created", sequence_number: 0, response: { id: responseId, status: "in_progress", metadata: { session_id: sessionId } } };
         const terminalType = status === "cancelled" ? "response.failed" : `response.${status}`;
         const terminal = { type: terminalType, sequence_number: 1, response };

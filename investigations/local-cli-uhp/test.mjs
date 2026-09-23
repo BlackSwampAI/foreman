@@ -23,22 +23,33 @@ async function fixtureCli(dir, name, body) {
 }
 async function setup(t, options = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'local-cli-uhp-test-')); dirs.push(dir);
+  const agyDiscoveryEnv = options.agyDiscoveryRequirements ? { HOME:join(dir,'agy-home'), XDG_RUNTIME_DIR:join(dir,'runtime'), DBUS_SESSION_BUS_ADDRESS:`unix:path=${join(dir,'bus')}`, HTTPS_PROXY:'http://fixture-proxy.invalid:8080', AGY_CONFIG_DIR:join(dir,'agy-auth') } : {};
   const fixture = options.sourceRepo ? undefined : await createWorkspaceFixture();
   if (fixture) t.after(fixture.cleanup);
   const claude = await fixtureCli(dir, 'fake-claude', options.claudeBody ?? `import { appendFileSync } from 'node:fs'; const names=['ANTHROPIC_API_KEY','OPENAI_API_KEY','AWS_ACCESS_KEY_ID','GOOGLE_API_KEY','CLAUDE_CODE_USE_BEDROCK','CLAUDE_CODE_USE_VERTEX','CLAUDE_CODE_USE_FOUNDRY','CODEX_API_KEY']; const model=${JSON.stringify(options.claudeUndefined ? 'undefined' : 'claude-actual')}; const ix=process.argv.indexOf('--model'); appendFileSync('.fixture-cli-count', (names.some(name=>process.env[name]) ? 'c:provider-env-present' : 'c:provider-env-absent')+':model='+(ix<0?'missing':process.argv[ix+1])+'\\n'); process.stdin.resume(); process.stdin.on('end',()=>{ console.log(JSON.stringify({type:'system',subtype:'init',model,session_id:'claude-session'})); console.log(JSON.stringify({type:'result',subtype:${JSON.stringify(options.claudeIsError ? 'error_api_error' : 'success')},is_error:${options.claudeIsError === true},result:'bounded answer',model,session_id:'claude-session',usage:{input_tokens:7,output_tokens:3,cache_read_input_tokens:2,cache_creation_input_tokens:99}})); });`);
   const codex = await fixtureCli(dir, 'fake-codex', options.codexBody ?? `import { appendFileSync } from 'node:fs'; const ix=process.argv.indexOf('--model'); appendFileSync('.fixture-cli-count', (process.env.OPENAI_API_KEY ? 'x:provider-env-present' : 'x:provider-env-absent')+':model='+(ix<0?'missing':process.argv[ix+1])+':ignore-user-config='+process.argv.includes('--ignore-user-config')+':skip-git-repo-check='+process.argv.includes('--skip-git-repo-check')+'\\n'); process.stdin.resume(); process.stdin.on('end',()=>{ console.log(JSON.stringify({type:'thread.started',thread_id:'codex-thread'})); console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'codex bounded answer'}})); console.log(JSON.stringify({type:'turn.completed',${options.codexReportedModel ? `model:${JSON.stringify(options.codexReportedModel)},` : ''}usage:{input_tokens:4,output_tokens:2}})); ${options.codexExit ? 'process.exit(7);' : ''} });`);
+  const agyDiscoveryFixtureBody = options.agyDiscoveryRequirements ? `const required=${JSON.stringify(agyDiscoveryEnv)};if(process.argv[2]==='models'){const ok=Object.entries(required).every(([key,value])=>process.env[key]===value)&&!['ANTHROPIC_API_KEY','OPENAI_API_KEY','AWS_ACCESS_KEY_ID','GOOGLE_API_KEY','CODEX_API_KEY'].some(key=>process.env[key]);console.error('fake local server diagnostic');console.log(ok?'gemini-3.8-flash-medium\\tGemini 3.8 Flash (Medium)':'');process.exit(ok?0:1)}` : undefined;
+  const agy = await fixtureCli(dir, 'fake-agy', options.agyBody ?? agyDiscoveryFixtureBody ?? `import {writeFileSync,readFileSync} from 'node:fs'; if(process.argv[2]==='models'){console.log('gemini-3.8-flash-low\\tGemini 3.8 Flash (Low)');console.log('gemini-3.8-flash-medium\\tGemini 3.8 Flash (Medium)');console.log('gemini-3.8-flash-high\\tGemini 3.8 Flash (High)');process.exit(0)} const ix=process.argv.indexOf('--model'); const model=ix<0?'missing':process.argv[ix+1]; const prompt=process.argv[process.argv.indexOf('-p')+1]||''; const agent=readFileSync(process.env.HOME+'/.gemini/config/agents/foreman-worker.md','utf8'); const agentOk=process.argv.includes('--agent')&&process.argv[process.argv.indexOf('--agent')+1]==='foreman-worker'&&process.argv.includes('--add-dir')&&process.argv[process.argv.indexOf('--add-dir')+1]==='/workspace'&&agent.includes('excludeDefaultComponents: true')&&agent.includes('commandExecutionPolicy: "off"')&&['view_file','replace_file_content','multi_replace_file_content','write_to_file','finish'].every(tool=>agent.includes('  - '+tool))&&!agent.includes('  - list_dir')&&prompt.includes('README.md')&&prompt.includes('do not enumerate directories'); writeFileSync('README.md','AGY fixture edit\\n'); const conversation_id='agy-fixture-conversation'; const tools=['ask_permission','run_command','write_to_file','view_file','list_dir','replace_file_content','multi_replace_file_content','finish']; console.log(JSON.stringify({event:'init',conversation_id,agent:agentOk?'foreman-worker':'unexpected-agent',init:{cwd:process.cwd(),model,tools}})); console.log(JSON.stringify({event:'step_update',step_update:{conversation_id,step_index:0,state:'DONE',step_type:'tool',tool_name:'view_file',tool_info:{name:'view_file'}}})); console.log(JSON.stringify({event:'step_update',step_update:{conversation_id,step_index:1,state:'DONE',step_type:'tool',tool_name:'write_to_file',tool_info:{name:'write_to_file'}}})); console.log(JSON.stringify({event:'step_update',step_update:{conversation_id,step_index:2,state:'DONE',step_type:'agent_response',text_delta:'Edited README.\\n',usage:{input_tokens:11,output_tokens:4}}})); console.log(JSON.stringify({event:'result',result:{conversation_id,status:'SUCCESS',response:'Edited README.',model,usage:{input_tokens:11,output_tokens:4,thinking_tokens:2,cache_read_tokens:3,total_tokens:15}}}));`);
   const port = 22000 + Math.floor(Math.random() * 20000);
-  await mkdir(join(dir,'claude-auth')); await mkdir(join(dir,'codex-auth')); await writeFile(join(dir,'codex-auth','auth.json'),'{"fixture":true}',{mode:0o600});
-  const env = { ...process.env, ANTHROPIC_API_KEY:'fixture-only-do-not-forward', OPENAI_API_KEY:'fixture-only-do-not-forward', AWS_ACCESS_KEY_ID:'fixture-only-do-not-forward', GOOGLE_API_KEY:'fixture-only-do-not-forward', CLAUDE_CODE_USE_BEDROCK:'1', CLAUDE_CODE_USE_VERTEX:'1', CLAUDE_CODE_USE_FOUNDRY:'1', CODEX_API_KEY:'fixture-only-do-not-forward', LOCAL_CLI_UHP_PORT: String(port), LOCAL_CLI_UHP_STATE: join(dir, 'state.json'), LOCAL_CLI_UHP_WORK: join(dir, 'work'), CLAUDE_CONFIG_DIR: join(dir, 'claude-auth'), CODEX_HOME: join(dir, 'codex-auth'), CLAUDE_MODEL: options.noClaudeModel ? '' : 'claude-requested', CODEX_MODEL: 'codex-requested', CLAUDE_BIN: options.claudeBin ?? (options.spawnError ? join(dir,'missing-cli') : claude), CODEX_BIN: codex, LOCAL_CLI_UHP_SOURCE_REPO: options.sourceRepo ?? fixture.repo, LOCAL_CLI_UHP_BWRAP: options.bwrapBin ?? 'bwrap' };
+  if (options.agyEnabled) {
+    await mkdir(join(dir,'agy-auth'));
+    for (const name of ['log','crashes','brain','conversations','cache','updater','presence','annotations','implicit','scratch']) await mkdir(join(dir,'agy-auth',name));
+  }
+  await mkdir(join(dir,'claude-auth'));
+  if (!options.claudeAuthRoleDirsAbsent) for (const name of ['projects','session-env','file-history','todos','plans','tasks']) await mkdir(join(dir,'claude-auth',name));
+  await mkdir(join(dir,'codex-auth')); await writeFile(join(dir,'codex-auth','auth.json'),'{"fixture":true}',{mode:0o600});
+  const env = { ...process.env, ANTHROPIC_API_KEY:'fixture-only-do-not-forward', OPENAI_API_KEY:'fixture-only-do-not-forward', AWS_ACCESS_KEY_ID:'fixture-only-do-not-forward', GOOGLE_API_KEY:'fixture-only-do-not-forward', CLAUDE_CODE_USE_BEDROCK:'1', CLAUDE_CODE_USE_VERTEX:'1', CLAUDE_CODE_USE_FOUNDRY:'1', CODEX_API_KEY:'fixture-only-do-not-forward', ...(options.claudeNetworkRequirements ? {HTTP_PROXY:'http://fixture-proxy.invalid:8080'} : {}), ...(Number.isFinite(options.keepaliveMs) ? {LOCAL_CLI_UHP_KEEPALIVE_MS:String(options.keepaliveMs)} : {}), LOCAL_CLI_UHP_PORT: String(port), LOCAL_CLI_UHP_STATE: join(dir, 'state.json'), LOCAL_CLI_UHP_WORK: join(dir, 'work'), CLAUDE_CONFIG_DIR: join(dir, 'claude-auth'), CODEX_HOME: join(dir, 'codex-auth'), CLAUDE_MODEL: options.noClaudeModel ? '' : 'claude-requested', CODEX_MODEL: 'codex-requested', CLAUDE_BIN: options.claudeBin ?? (options.spawnError ? join(dir,'missing-cli') : claude), CODEX_BIN: codex, AGY_BIN:join(dir,'missing-agy'), ...(options.agyEnabled ? { AGY_CONFIG_DIR: join(dir,'agy-auth'), ...(options.noAgyModel ? {} : {AGY_MODEL:options.agyModel ?? 'gemini-3.8-flash-medium'}), AGY_BIN:agy } : {}), ...agyDiscoveryEnv, LOCAL_CLI_UHP_SOURCE_REPO: options.sourceRepo ?? fixture.repo, LOCAL_CLI_UHP_BWRAP: options.bwrapBin ?? 'bwrap' };
+  if (options.noAgyModel) delete env.AGY_MODEL;
+  if (options.agyEnabled) Object.assign(env,{AGY_CONFIG_DIR:join(dir,'agy-auth'),...(options.noAgyModel?{}:{AGY_MODEL:options.agyModel ?? 'gemini-3.8-flash-medium'}),AGY_BIN:agy});
   let proc = spawn(process.execPath, [join(here, 'server.mjs')], { env, stdio: 'ignore' });
   t.after(async () => { if (proc.exitCode === null) { proc.kill('SIGTERM'); await new Promise(r => proc.once('exit', r)); } await rm(dir, { recursive: true, force: true }); });
   const base = `http://127.0.0.1:${port}`;
   for (let i=0;i<100;i++) { try { const r=await fetch(`${base}/v1/uhp`); if(r.ok) break; } catch {} await new Promise(r=>setTimeout(r,20)); }
   return { base, dir, env, baseCommit: options.baseCommit ?? fixture?.baseCommit, sourceRepo: options.sourceRepo ?? fixture?.repo, countFor: workspaceId=>join(env.LOCAL_CLI_UHP_WORK,workspaceId,'.fixture-cli-count'), restart: async () => { proc.kill('SIGTERM'); await new Promise(r => proc.once('exit', r)); proc = spawn(process.execPath, [join(here, 'server.mjs')], { env, stdio: 'ignore' }); for(let i=0;i<100;i++){try{if((await fetch(`${base}/v1/uhp`)).ok)break;}catch{} await new Promise(r=>setTimeout(r,20));} } };
 }
-async function submit(base, harness, model, key, baseCommit, workspaceId) {
+async function submit(base, harness, model, key, baseCommit, workspaceId, input = 'Say bounded answer') {
   const seeded=workspaceId ? {workspace_id:workspaceId} : await (await fetch(`${base}/extensions/foreman-workspace/v1/workspaces`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({base_commit:baseCommit})})).json();
-  const r = await fetch(`${base}/v1/responses`, { method: 'POST', headers: { 'Content-Type':'application/json', Accept:'text/event-stream', 'UHP-Version':'2026-09-12', 'Idempotency-Key':key }, body: JSON.stringify({ input:'Say bounded answer', model, metadata:{harness_id:harness,workspace_id:seeded.workspace_id}, stream:true, timeout_seconds:5, max_step:1 }) });
+  const r = await fetch(`${base}/v1/responses`, { method: 'POST', headers: { 'Content-Type':'application/json', Accept:'text/event-stream', 'UHP-Version':'2026-09-12', 'Idempotency-Key':key }, body: JSON.stringify({ input, model, metadata:{harness_id:harness,workspace_id:seeded.workspace_id}, stream:true, timeout_seconds:5, max_step:1 }) });
   const text=await r.text(); assert.equal(r.status,200,text); return text.split('\n').filter(x=>x.startsWith('data: ')).map(x=>JSON.parse(x.slice(6)));
 }
 function reviewEvidence(overrides = {}) { return { validation:'verified_by_foreman_git_comparison', scopeVerified:true, baseCommit:'a'.repeat(40), workerResponseId:'resp_worker_fixture', allowedScope:['src/example.ts'], reviewDiff:'### modify: src/example.ts\n- before\n+ after\n', controllerValidation:{passed:true,policy:{requireAllChecksPass:true,configuredCheckCount:1},observations:[{name:'typecheck',command:'node',args:['--check','src/example.ts'],exitCode:0,signal:null,timedOut:false,output:'passed',outputTruncated:false,passed:true,startedAt:'2026-09-22T00:00:00Z',finishedAt:'2026-09-22T00:00:01Z'}]}, ...overrides }; }
@@ -48,7 +59,7 @@ async function submitReview(base, harness, key, metadata = {}, input = 'Review t
 }
 test('discovery advertises configured CLIs and Claude submit/replay retains idempotent response across restart', async t => {
   const {base,baseCommit,countFor,restart}=await setup(t);
-  const d=await (await fetch(`${base}/v1/uhp`)).json(); assert.equal(d.default_version,'2026-09-12'); assert.equal(d.capabilities.sessions,false);
+  const d=await (await fetch(`${base}/v1/uhp`)).json(); assert.equal(d.default_version,'2026-09-12'); assert.equal(d.capabilities.sessions,true);
   const hs=await (await fetch(`${base}/v1/harnesses`)).json(); assert.deepEqual(hs.harnesses.map(x=>x.id),['claude-code','codex-cli']);
   const first=await submit(base,'claude-code','claude-requested','same-key',baseCommit); assert.equal(first[0].type,'response.created'); assert.equal(first[1].type,'response.completed',JSON.stringify(first));
   const r=first[1].response; assert.equal(r.output_text,'bounded answer'); assert.equal(r.model,'claude-actual'); assert.equal(r.session_id,'claude-session'); assert.equal(r.metadata.session_id,'claude-session'); assert.deepEqual(r.usage,{input_tokens:7,output_tokens:3,input_tokens_details:{cached_tokens:2}});
@@ -61,13 +72,55 @@ test('discovery advertises configured CLIs and Claude submit/replay retains idem
   const retrieved=await (await fetch(`${base}/v1/responses/${r.id}`,{headers:{'UHP-Version':'2026-09-12'}})).json(); assert.equal(retrieved.id,r.id);
 });
 test('Foreman UhpClient discovers, submits, validates fallback/session/usage, and replays idempotently', async t => {
-  const {base,baseCommit,countFor}=await setup(t); const seed=await (await fetch(`${base}/extensions/foreman-workspace/v1/workspaces`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({base_commit:baseCommit})})).json();
-  const fetchWithWorkspace=async (input,init)=>{if(new URL(input).pathname==='/v1/responses'&&init?.method==='POST'){const body=JSON.parse(init.body);body.metadata.workspace_id=seed.workspace_id;return fetch(input,{...init,body:JSON.stringify(body)});}return fetch(input,init);};
-  const client=new UhpClient({baseUrl:base,harnessId:'claude-code',model:'claude-requested',fetch:fetchWithWorkspace});
-  const discovery=await client.discover(); assert.equal(discovery.version,'2026-09-12'); assert.equal(discovery.capabilities.sessions,false);
-  const seen=[]; const input={submissionId:'sub-smoke-fixture',assignmentId:'assignment-fixture',runId:'run-fixture',roleId:'planner',taskId:'task-fixture',projectId:'project-fixture',prompt:'Reply with one bounded sentence.',config:{harnessId:'claude-code',model:'claude-requested',timeoutSeconds:5,maxStep:1},idempotencyKey:'uhpclient-fixed-fixture-key',onEvent:e=>seen.push(e.type)};
+  const claudeBody=`process.stdin.resume();process.stdin.on('end',()=>{const model='claude-actual';console.log(JSON.stringify({type:'system',subtype:'init',model,session_id:'claude-session'}));console.log(JSON.stringify({type:'result',subtype:'success',result:'bounded answer',model,session_id:'claude-session',usage:{input_tokens:7,output_tokens:3,cache_read_input_tokens:2}}));});`;
+  const {base}=await setup(t,{claudeBody});
+  const client=new UhpClient({baseUrl:base,harnessId:'claude-code',model:'claude-requested'});
+  const discovery=await client.discover(); assert.equal(discovery.version,'2026-09-12'); assert.equal(discovery.capabilities.sessions,true);
+  const seen=[]; const input={submissionId:'sub-smoke-fixture',assignmentId:'assignment-fixture',runId:'run-fixture',roleId:'planner',taskId:'task-fixture',projectId:'project-fixture',prompt:'Reply with one bounded sentence.',config:{harnessId:'claude-code',model:'claude-requested',timeoutSeconds:5},idempotencyKey:'uhpclient-fixed-fixture-key',onEvent:e=>seen.push(e.type)};
   const first=await client.submit(input); assert.equal(first.status,'completed'); assert.equal(first.actualModel,'claude-actual'); assert.equal(first.requestedModel,'claude-requested'); assert.equal(first.modelFallback,true); assert.equal(first.selectedHarnessId,'claude-code'); assert.equal(first.sessionId,'claude-session'); assert.equal(first.responseId,first.externalId); assert.deepEqual(first.usage,{inputTokens:7,outputTokens:3,cachedInputTokens:2}); assert.deepEqual(seen,['response.created','response.completed']);
-  const replay=await client.submit(input); assert.equal(replay.responseId,first.responseId); assert.equal((await readFile(countFor(seed.workspace_id),'utf8')).trim().split('\n').length,1);
+  const replay=await client.submit(input); assert.equal(replay.responseId,first.responseId);
+  const stored=await (await fetch(`${base}/v1/responses/${first.responseId}`)).json(); assert.equal(stored.metadata.workspace_id,undefined); assert.equal(stored.metadata.execution_boundary.role_context_isolated,true);
+  assert.equal(stored.metadata.cli_invocation.args[stored.metadata.cli_invocation.args.indexOf('--max-turns')+1],'10');
+});
+
+test('UHP SSE keepalives reset the client inactivity timer during a quiet CLI turn', async t => {
+  const body=`process.stdin.resume();process.stdin.on('end',()=>setTimeout(()=>{console.log(JSON.stringify({type:'system',subtype:'init',model:'claude-requested',session_id:'slow-session'}));console.log(JSON.stringify({type:'result',subtype:'success',result:'slow bounded answer',model:'claude-requested',session_id:'slow-session',usage:{input_tokens:3,output_tokens:2}}));},1250));`;
+  const {base}=await setup(t,{claudeBody:body,keepaliveMs:100});
+  const client=new UhpClient({baseUrl:base,harnessId:'claude-code',model:'claude-requested',timeoutMs:5_000,streamInactivityTimeoutMs:1_000});
+  const seen=[]; const started=Date.now();
+  const result=await client.submit({submissionId:'slow-submission',assignmentId:'slow-assignment',runId:'slow-run',roleId:'planner',taskId:'slow-task',projectId:'slow-project',prompt:'Reply once after the quiet interval.',config:{harnessId:'claude-code',model:'claude-requested',timeoutSeconds:5,maxStep:1},idempotencyKey:'slow-sse-keepalive-key',onEvent:event=>seen.push(event.type)});
+  assert.ok(Date.now()-started>=1_000);
+  assert.equal(result.status,'completed'); assert.equal(result.outputText,'slow bounded answer');
+  assert.deepEqual(seen,['response.created','response.completed']);
+});
+
+test('Planner continuation binds the same native session and keeps a workspace-free role context', async t => {
+  const claudeBody=`process.stdin.resume();process.stdin.on('end',()=>{console.log(JSON.stringify({type:'system',subtype:'init',model:'claude-requested',session_id:'planner-native-session'}));console.log(JSON.stringify({type:'result',subtype:'success',result:'planner turn',model:'claude-requested',session_id:'planner-native-session',usage:{input_tokens:2,output_tokens:1}}));});`;
+  const {base}=await setup(t,{claudeBody});
+  const submitTurn=async (key,previousResponseId)=> {
+    const response=await fetch(`${base}/v1/responses`,{method:'POST',headers:{'Content-Type':'application/json',Accept:'text/event-stream','UHP-Version':'2026-09-12','Idempotency-Key':key},body:JSON.stringify({input:'Planner turn',model:'claude-requested',previous_response_id:previousResponseId,metadata:{harness_id:'claude-code',foreman_run_id:'run-session-fixture',foreman_role_id:'planner',foreman_project_id:'project-session-fixture'},stream:true,timeout_seconds:5,max_step:1})});
+    const text=await response.text(); assert.equal(response.status,200,text); return text.split('\n').filter(line=>line.startsWith('data: ')).map(line=>JSON.parse(line.slice(6))).at(-1).response;
+  };
+  const first=await submitTurn('planner-first');
+  assert.equal(first.status,'completed'); assert.equal(first.metadata.workspace_id,undefined);
+  assert.equal(first.metadata.role_session.cli_session_id,'planner-native-session');
+  assert.match(first.metadata.role_session.state_path,/role-sessions\/[a-f0-9]{64}$/);
+  const second=await submitTurn('planner-second',first.id);
+  assert.equal(second.status,'completed'); assert.equal(second.session_id,'planner-native-session');
+  assert.deepEqual(second.metadata.cli_invocation.args.slice(-2),['--resume','planner-native-session']);
+  assert.equal(second.metadata.role_session.state_path,first.metadata.role_session.state_path);
+});
+test('Claude role mounts create missing transcript directories outside the host auth view', async t => {
+  const body=`import {readFileSync} from 'node:fs';process.stdin.resume();process.stdin.on('end',()=>{const ca=readFileSync(process.env.SSL_CERT_FILE,'utf8').includes('-----BEGIN CERTIFICATE-----');const keys=['ANTHROPIC_API_KEY','OPENAI_API_KEY','AWS_ACCESS_KEY_ID','GOOGLE_API_KEY','CODEX_API_KEY','CLAUDE_CODE_USE_BEDROCK','CLAUDE_CODE_USE_VERTEX','CLAUDE_CODE_USE_FOUNDRY'].some(k=>process.env[k]);const proxy=process.env.HTTP_PROXY==='http://fixture-proxy.invalid:8080';console.log(JSON.stringify({type:'system',subtype:'init',model:'claude-requested',session_id:'missing-dirs-session'}));console.log(JSON.stringify({type:'result',subtype:'success',result:'ca='+ca+';proxy='+proxy+';provider_keys='+keys,model:'claude-requested',session_id:'missing-dirs-session',usage:{input_tokens:2,output_tokens:1}}));if(!ca||!proxy||keys)process.exit(9)});`;
+  const {base,env}=await setup(t,{claudeAuthRoleDirsAbsent:true,claudeNetworkRequirements:true,claudeBody:body});
+  const response=await fetch(`${base}/v1/responses`,{method:'POST',headers:{'Content-Type':'application/json',Accept:'text/event-stream','UHP-Version':'2026-09-12','Idempotency-Key':'claude-missing-auth-dirs'},body:JSON.stringify({input:'Planner fixture',model:'claude-requested',metadata:{harness_id:'claude-code',foreman_run_id:'run-missing-dirs',foreman_role_id:'planner',foreman_project_id:'project-missing-dirs'},stream:true,timeout_seconds:5,max_step:1})});
+  const text=await response.text(); assert.equal(response.status,200,text);
+  const result=text.split('\n').filter(line=>line.startsWith('data: ')).map(line=>JSON.parse(line.slice(6))).at(-1).response;
+  assert.equal(result.status,'completed',JSON.stringify(result));
+  assert.equal(result.output_text,'ca=true;proxy=true;provider_keys=false');
+  assert.deepEqual(await readdir(env.CLAUDE_CONFIG_DIR),[]);
+  const statePath=result.metadata.role_session.state_path;
+  for (const name of ['todos','plans','tasks']) assert.ok((await readdir(statePath)).includes(`claude-${name}`));
 });
 test('Codex parser returns reported output and leaves unavailable model/usage absent', async t => {
   const {base,baseCommit,countFor}=await setup(t);
@@ -81,6 +134,163 @@ test('Codex parser returns reported output and leaves unavailable model/usage ab
   assert.equal(r.session_id,'codex-thread'); assert.deepEqual(r.usage,{input_tokens:4,output_tokens:2});
   assert.equal(r.metadata.execution_boundary.proven,true);
   assert.equal((await readFile(countFor(r.metadata.workspace_id),'utf8')).trim(),'x:provider-env-absent:model=codex-requested:ignore-user-config=true:skip-git-repo-check=true');
+});
+
+test('AGY discovery pins only listed models and its stream result edits only the pinned workspace', async t => {
+  const {base,baseCommit,env}=await setup(t,{agyEnabled:true});
+  const harnesses=await (await fetch(`${base}/v1/harnesses`)).json(); assert.ok(harnesses.harnesses.some(h=>h.id==='antigravity-cli'));
+  const models=await (await fetch(`${base}/v1/harnesses/antigravity-cli/models`)).json(); assert.deepEqual(models.models.map(m=>m.id),['gemini-3.8-flash-low','gemini-3.8-flash-medium','gemini-3.8-flash-high']);
+  const events=await submit(base,'antigravity-cli','gemini-3.8-flash-high','agy-stream-fixture-key',baseCommit,undefined,'Edit README.md by replacing its contents with AGY fixture edit.'); const response=events.at(-1).response;
+  assert.equal(events.at(-1).type,'response.completed',JSON.stringify(events));
+  assert.equal(response.output_text,'Edited README.'); assert.equal(response.model,'gemini-3.8-flash-high');
+  assert.equal(response.session_id,'agy-fixture-conversation'); assert.equal(response.metadata.session_id,'agy-fixture-conversation');
+  assert.equal(response.metadata.agy_diagnostic.observed_agent,'foreman-worker');
+  assert.equal(response.metadata.agy_diagnostic.requested_execution_mode,'accept-edits');
+  assert.equal(response.metadata.agy_diagnostic.available_tools_semantics,'headless_init_tools_available_to_cli_not_profile_allowlist');
+  assert.ok(response.metadata.agy_diagnostic.available_tools.includes('run_command'));
+  assert.deepEqual(response.metadata.agy_worker_tool_policy.observed_executed_tool_events,['view_file','write_to_file']);
+  assert.equal(response.metadata.agy_worker_tool_policy.execution_observations_passed,true);
+  assert.equal(response.metadata.agy_permission_policy.read_file_allow,'read_file(/workspace)');
+  assert.equal(response.metadata.agy_permission_policy.write_file_allow,'write_file(/workspace)');
+  assert.equal(response.metadata.agy_permission_policy.directory_listing,'not allowed; task must name exact relative file paths');
+  assert.deepEqual(response.metadata.cli_invocation.args.slice(-5),['--mode=accept-edits','--add-dir','/workspace','--agent','foreman-worker']);
+  assert.deepEqual(response.usage,{input_tokens:11,output_tokens:4,total_tokens:15,thinking_tokens:2,input_tokens_details:{cached_tokens:3}});
+  assert.equal(response.metadata.execution_boundary.proven,true);
+  const snapshot=await (await fetch(`${base}/extensions/foreman-workspace/v1/workspaces/${response.metadata.workspace_id}/snapshot`)).json();
+  assert.equal(snapshot.complete,true,JSON.stringify(snapshot.errors));
+  const evidence=await verifyBridgeWorkspace({repoPath:env.LOCAL_CLI_UHP_SOURCE_REPO,baseCommit, snapshot,allowedScope:['README.md']});
+  assert.equal(evidence.validation,'verified_by_foreman_git_comparison'); assert.equal(evidence.scopeVerified,true);
+  assert.equal(evidence.changes.length,1); assert.equal(evidence.changes[0].path,'README.md');
+});
+
+test('AGY model discovery keeps host runtime access while filtering provider credential variables', async t => {
+  const {base}=await setup(t,{agyEnabled:true,agyDiscoveryRequirements:true});
+  const harnesses=await (await fetch(`${base}/v1/harnesses`)).json();
+  assert.ok(harnesses.harnesses.some(harness=>harness.id==='antigravity-cli'),JSON.stringify(harnesses));
+  const models=await (await fetch(`${base}/v1/harnesses/antigravity-cli/models`)).json();
+  assert.deepEqual(models.models.map(model=>model.id),['gemini-3.8-flash-medium']);
+});
+
+test('AGY defaults to Flash Low only when host model discovery lists it', async t => {
+  const {base}=await setup(t,{agyEnabled:true,noAgyModel:true});
+  const harnesses=await (await fetch(`${base}/v1/harnesses`)).json();
+  assert.ok(harnesses.harnesses.some(harness=>harness.id==='antigravity-cli'),JSON.stringify(harnesses));
+  const models=await (await fetch(`${base}/v1/harnesses/antigravity-cli/models`)).json();
+  assert.ok(models.models.some(model=>model.id==='gemini-3.8-flash-low'));
+});
+
+test('AGY malformed stream fails closed without returning a complete worker snapshot', async t => {
+  const body=`if(process.argv[2]==='models'){console.log('gemini-3.8-flash-medium\\tGemini 3.8 Flash (Medium)');process.exit(0)}console.log(JSON.stringify({event:'init',conversation_id:'agy-malformed',agent:'foreman-worker',init:{tools:['view_file','list_dir','replace_file_content','multi_replace_file_content','write_to_file','finish']}}));console.log('not-json');`;
+  const {base,baseCommit}=await setup(t,{agyEnabled:true,agyBody:body});
+  const events=await submit(base,'antigravity-cli','gemini-3.8-flash-medium','agy-malformed-key',baseCommit); const response=events.at(-1).response;
+  assert.equal(events.at(-1).type,'response.failed',JSON.stringify(events));
+  assert.equal(response.error.message,'CLI output contained malformed or unrecognized stream records');
+  const snapshot=await (await fetch(`${base}/extensions/foreman-workspace/v1/workspaces/${response.metadata.workspace_id}/snapshot`)).json();
+  assert.equal(snapshot.complete,false); assert.ok(snapshot.errors.some(error=>/task_status_failed/.test(error.error)));
+});
+
+test('AGY success with an empty response distinguishes headless soft denial from a completed no-edit answer', async t => {
+  const body=`import {readFileSync} from 'node:fs';if(process.argv[2]==='models'){console.log('gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)');process.exit(0)}const prompt=process.argv[process.argv.indexOf('-p')+1]||'';let config={};let settingsRead=false;try{config=JSON.parse(readFileSync(process.env.HOME+'/.gemini/antigravity-cli/settings.json','utf8'));settingsRead=true}catch{}let agent='';try{agent=readFileSync(process.env.HOME+'/.gemini/config/agents/foreman-worker.md','utf8')}catch{}const allow=config.permissions?.allow||[];const setupOk=settingsRead&&config.agentMode==='accept-edits'&&config.enableTerminalSandbox===false&&allow.includes('read_file(/workspace)')&&allow.includes('write_file(/workspace)')&&allow.length===2&&!allow.some(rule=>rule.startsWith('command('))&&process.argv.includes('--mode=accept-edits')&&process.argv.includes('--add-dir')&&process.argv[process.argv.indexOf('--add-dir')+1]==='/workspace'&&process.argv.includes('--agent')&&agent.includes('excludeDefaultComponents: true')&&agent.includes('commandExecutionPolicy: "off"')&&prompt.includes('Do not run shell or terminal commands')&&prompt.includes('Foreman will inspect the complete workspace snapshot')&&prompt.includes('do not enumerate directories');const conversation_id='agy-soft-denied';console.error('Tool list_dir was soft-denied in headless mode.');const tools=['ask_permission','run_command','write_to_file','view_file','list_dir','replace_file_content','multi_replace_file_content','finish'];console.log(JSON.stringify({event:'init',conversation_id,agent:'foreman-worker',init:{cwd:'/workspace',model:'gemini-3.8-flash-medium',permission_mode:'request-review',tools:setupOk?tools:['run_command']}}));console.log(JSON.stringify({event:'step_update',step_update:{conversation_id,step_index:1,state:'DONE',step_type:'tool',tool_name:'list_dir',tool_info:{name:'list_dir',error:{type:'PermissionDenied',message:'Approval required in headless mode'}}}}));console.log(JSON.stringify({event:'result',result:{conversation_id,status:'SUCCESS',response:'',model:'gemini-3.8-flash-medium',usage:{input_tokens:14,output_tokens:2,total_tokens:16}}}));`;
+  const {base,baseCommit,env}=await setup(t,{agyEnabled:true,agyBody:body});
+  const events=await submit(base,'antigravity-cli','gemini-3.8-flash-medium','agy-soft-denied-key',baseCommit); const response=events.at(-1).response;
+  assert.equal(events.at(-1).type,'response.failed',JSON.stringify(events));
+  assert.equal(response.output_text,''); assert.equal(response.usage.input_tokens,14);
+  assert.deepEqual(response.metadata.agy_diagnostic,{permission_mode:'request-review',observed_agent:'foreman-worker',cwd:'assigned_workspace',available_tools:['ask_permission','run_command','write_to_file','view_file','list_dir','replace_file_content','multi_replace_file_content','finish'],available_tools_semantics:'headless_init_tools_available_to_cli_not_profile_allowlist',tool_events:[{name:'list_dir',state:'DONE',error_category:'permission_denied'}],soft_denial_observed:true,result_status:'SUCCESS',response_empty:true,streamed_agent_text_characters:0,requested_agent:'foreman-worker',requested_execution_mode:'accept-edits',outcome:'soft_denied_without_response'});
+  assert.deepEqual(response.metadata.agy_worker_tool_policy.unsafe_tool_events,['list_dir']);
+  assert.equal(response.metadata.agy_worker_tool_policy.execution_observations_passed,false);
+  assert.equal(response.metadata.cli_invocation.args.includes('--agent'),true);
+  assert.equal(response.metadata.cli_invocation.args[response.metadata.cli_invocation.args.indexOf('--agent')+1],'foreman-worker');
+  assert.deepEqual(response.metadata.agy_permission_policy,{read_file_allow:'read_file(/workspace)',write_file_allow:'write_file(/workspace)',directory_listing:'not allowed; task must name exact relative file paths',terminal_sandbox_disabled_for_nested_runtime:true,outer_bubblewrap_isolation:true});
+  assert.doesNotMatch(JSON.stringify(response),/soft-denied because approval/);
+  const snapshot=await (await fetch(`${base}/extensions/foreman-workspace/v1/workspaces/${response.metadata.workspace_id}/snapshot`)).json();
+  assert.equal(snapshot.complete,false,JSON.stringify(snapshot.errors));
+  assert.ok(snapshot.errors.some(error=>/task_status_failed/.test(error.error)));
+  assert.deepEqual((await readdir(env.AGY_CONFIG_DIR)).sort(),['annotations','brain','cache','conversations','crashes','implicit','log','presence','scratch','updater'].sort());
+});
+
+test('AGY successful no-edit response is distinct from a headless soft denial', async t => {
+  const body=`if(process.argv[2]==='models'){console.log('gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)');process.exit(0)}const conversation_id='agy-no-edit-answer';console.log(JSON.stringify({event:'init',conversation_id,agent:'foreman-worker',init:{cwd:'/workspace',model:'gemini-3.8-flash-medium',permission_mode:'accept-edits',tools:['view_file','list_dir','replace_file_content','multi_replace_file_content','write_to_file','finish']}}));console.log(JSON.stringify({event:'step_update',step_update:{conversation_id,step_index:1,state:'DONE',step_type:'agent_response',text_delta:'No edit is needed.\\n'}}));console.log(JSON.stringify({event:'result',result:{conversation_id,status:'SUCCESS',response:'No edit is needed.',model:'gemini-3.8-flash-medium',usage:{input_tokens:9,output_tokens:4,total_tokens:13}}}));`;
+  const {base,baseCommit,env}=await setup(t,{agyEnabled:true,agyBody:body});
+  const events=await submit(base,'antigravity-cli','gemini-3.8-flash-medium','agy-no-edit-answer-key',baseCommit); const response=events.at(-1).response;
+  assert.equal(events.at(-1).type,'response.completed',JSON.stringify(events));
+  assert.equal(response.output_text,'No edit is needed.');
+  assert.equal(response.metadata.agy_diagnostic.soft_denial_observed,false);
+  assert.equal(response.metadata.agy_diagnostic.outcome,'response_received');
+  assert.equal(response.metadata.agy_diagnostic.tool_events.length,0);
+  const snapshot=await (await fetch(`${base}/extensions/foreman-workspace/v1/workspaces/${response.metadata.workspace_id}/snapshot`)).json();
+  const evidence=await verifyBridgeWorkspace({repoPath:env.LOCAL_CLI_UHP_SOURCE_REPO,baseCommit,snapshot,allowedScope:['README.md']});
+  assert.deepEqual(evidence.changes,[]);
+});
+
+test('AGY Worker permits selected custom agent with global tool catalog, but rejects an executed shell tool', async t => {
+  const body=`if(process.argv[2]==='models'){console.log('gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)');process.exit(0)}const conversation_id='agy-command-tool-attempt';console.log(JSON.stringify({event:'init',conversation_id,agent:'foreman-worker',init:{cwd:'/workspace',model:'gemini-3.8-flash-medium',permission_mode:'request-review',tools:['ask_permission','run_command','write_to_file','view_file','list_dir','replace_file_content','multi_replace_file_content','finish']}}));for(let i=0;i<41;i++){const name=i===40?'run_command':'view_file';console.log(JSON.stringify({event:'step_update',step_update:{conversation_id,step_index:i,state:'DONE',step_type:'tool',tool_name:name,tool_info:{name,error:name==='run_command'?{type:'PermissionDenied',message:'Approval required'}:undefined}}}))}console.log(JSON.stringify({event:'result',result:{conversation_id,status:'SUCCESS',response:'No work performed.',model:'gemini-3.8-flash-medium'}}));`;
+  const {base,baseCommit}=await setup(t,{agyEnabled:true,agyBody:body});
+  const events=await submit(base,'antigravity-cli','gemini-3.8-flash-medium','agy-command-advertised-key',baseCommit); const response=events.at(-1).response;
+  assert.equal(events.at(-1).type,'response.failed',JSON.stringify(events));
+  assert.equal(response.error.message,'AGY Worker selected the wrong agent or executed an out-of-profile tool');
+  assert.deepEqual(response.metadata.agy_worker_tool_policy.unsafe_tool_events,['run_command']);
+  assert.equal(response.metadata.agy_worker_tool_policy.execution_observations_passed,false);
+  assert.equal(response.metadata.agy_diagnostic.observed_agent,'foreman-worker');
+  assert.equal(response.metadata.agy_diagnostic.permission_mode,'request-review');
+  assert.equal(response.metadata.agy_diagnostic.requested_execution_mode,'accept-edits');
+  assert.deepEqual(response.metadata.agy_diagnostic.available_tools,['ask_permission','run_command','write_to_file','view_file','list_dir','replace_file_content','multi_replace_file_content','finish']);
+  assert.equal(response.metadata.agy_diagnostic.tool_events.length,41);
+  assert.equal(response.metadata.agy_diagnostic.tool_events[40].name,'run_command');
+  const snapshot=await (await fetch(`${base}/extensions/foreman-workspace/v1/workspaces/${response.metadata.workspace_id}/snapshot`)).json();
+  assert.equal(snapshot.complete,false);
+});
+
+test('AGY Worker rejects a different init.agent even when it executes only an allowed file tool', async t => {
+  const body=`if(process.argv[2]==='models'){console.log('gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)');process.exit(0)}const conversation_id='agy-wrong-agent';console.log(JSON.stringify({event:'init',conversation_id,agent:'default',init:{cwd:'/workspace',model:'gemini-3.8-flash-medium',tools:['run_command','view_file','write_to_file']}}));console.log(JSON.stringify({event:'step_update',step_update:{conversation_id,step_index:1,state:'DONE',step_type:'tool',tool_name:'view_file',tool_info:{name:'view_file'}}}));console.log(JSON.stringify({event:'result',result:{conversation_id,status:'SUCCESS',response:'Read file.',model:'gemini-3.8-flash-medium'}}));`;
+  const {base,baseCommit}=await setup(t,{agyEnabled:true,agyBody:body});
+  const events=await submit(base,'antigravity-cli','gemini-3.8-flash-medium','agy-wrong-agent-key',baseCommit); const response=events.at(-1).response;
+  assert.equal(events.at(-1).type,'response.failed',JSON.stringify(events));
+  assert.equal(response.error.message,'AGY Worker selected the wrong agent or executed an out-of-profile tool');
+  assert.equal(response.metadata.agy_worker_tool_policy.selected_agent,'default');
+  assert.equal(response.metadata.agy_worker_tool_policy.selected_agent_matches,false);
+  assert.deepEqual(response.metadata.agy_worker_tool_policy.unsafe_tool_events,[]);
+});
+
+test('AGY accepts a stream without an observed model and records its exact selected invocation', async t => {
+  const body=`import {writeFileSync} from 'node:fs';if(process.argv[2]==='models'){console.log('gemini-3.8-flash-medium\\tGemini 3.8 Flash (Medium)');process.exit(0)}writeFileSync('README.md','AGY fixture edit\\n');const conversation_id='agy-no-model-conversation';console.log(JSON.stringify({event:'init',conversation_id,agent:'foreman-worker',init:{cwd:process.cwd(),tools:['view_file','list_dir','replace_file_content','multi_replace_file_content','write_to_file','finish']}}));console.log(JSON.stringify({event:'result',result:{conversation_id,status:'SUCCESS',response:'Edited README.',usage:{input_tokens:8,output_tokens:3,total_tokens:11}}}));`;
+  const {base,baseCommit,env}=await setup(t,{agyEnabled:true,agyBody:body});
+  const events=await submit(base,'antigravity-cli','gemini-3.8-flash-medium','agy-no-model-key',baseCommit); const response=events.at(-1).response;
+  assert.equal(events.at(-1).type,'response.completed',JSON.stringify(events));
+  assert.equal(response.metadata.actual_model_status,'unavailable'); assert.equal(response.model,undefined);
+  assert.equal(response.session_id,'agy-no-model-conversation');
+  assert.deepEqual(response.metadata.cli_invocation.args.slice(-5),['--mode=accept-edits','--add-dir','/workspace','--agent','foreman-worker']);
+  assert.equal(response.metadata.cli_invocation.args.includes('--mode=accept-edits'),true);
+  assert.equal(response.metadata.cli_invocation.args.includes('--model'),true);
+  assert.equal(response.metadata.cli_invocation.args[response.metadata.cli_invocation.args.indexOf('--model')+1],'gemini-3.8-flash-medium');
+  const snapshot=await (await fetch(`${base}/extensions/foreman-workspace/v1/workspaces/${response.metadata.workspace_id}/snapshot`)).json();
+  assert.equal(snapshot.complete,true,JSON.stringify(snapshot.errors));
+  const evidence=await verifyBridgeWorkspace({repoPath:env.LOCAL_CLI_UHP_SOURCE_REPO,baseCommit,snapshot,allowedScope:['README.md']});
+  assert.equal(evidence.changes[0].path,'README.md');
+});
+
+test('AGY Planner continuation reuses its bound conversation and reports cumulative usage deltas', async t => {
+  const body=`if(process.argv[2]==='models'){console.log('gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)');process.exit(0)}const ix=process.argv.indexOf('--conversation');const resumed=ix>=0;const conversation_id=resumed?process.argv[ix+1]:'agy-role-conversation';console.log(JSON.stringify({event:'init',conversation_id,init:{cwd:process.cwd(),model:'gemini-3.8-flash-medium',tools:[]}}));console.log(JSON.stringify({event:'result',result:{conversation_id,status:'SUCCESS',response:resumed?'Planner follow-up':'Planner answer',model:'gemini-3.8-flash-medium',usage:resumed?{input_tokens:13,output_tokens:5,thinking_tokens:3,cache_read_tokens:4,total_tokens:18}:{input_tokens:8,output_tokens:3,thinking_tokens:2,cache_read_tokens:2,total_tokens:11}}}));`;
+  const {base}=await setup(t,{agyEnabled:true,agyBody:body});
+  const turn=async (key,previous_response_id)=> {
+    const response=await fetch(`${base}/v1/responses`,{method:'POST',headers:{'Content-Type':'application/json',Accept:'text/event-stream','UHP-Version':'2026-09-12','Idempotency-Key':key},body:JSON.stringify({input:'Planner turn',model:'gemini-3.8-flash-medium',previous_response_id,metadata:{harness_id:'antigravity-cli',foreman_run_id:'run-agy-session',foreman_role_id:'planner',foreman_project_id:'project-agy-session'},stream:true,timeout_seconds:5,max_step:1})});
+    const text=await response.text(); assert.equal(response.status,200,text); return text.split('\n').filter(line=>line.startsWith('data: ')).map(line=>JSON.parse(line.slice(6))).at(-1).response;
+  };
+  const first=await turn('agy-planner-first');
+  assert.equal(first.status,'completed'); assert.equal(first.usage.input_tokens,8); assert.equal(first.usage.output_tokens,3);
+  const crossRole=await fetch(`${base}/v1/responses`,{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':'agy-cross-role'},body:JSON.stringify({input:'Orchestrator turn',model:'gemini-3.8-flash-medium',previous_response_id:first.id,metadata:{harness_id:'antigravity-cli',foreman_run_id:'run-agy-session',foreman_role_id:'orchestrator',foreman_project_id:'project-agy-session'},stream:true,timeout_seconds:5,max_step:1})});
+  assert.equal(crossRole.status,409); assert.equal((await crossRole.json()).error.code,'previous_response_invalid');
+  const second=await turn('agy-planner-second',first.id);
+  assert.equal(second.status,'completed'); assert.equal(second.session_id,'agy-role-conversation');
+  assert.deepEqual(second.usage,{input_tokens:5,output_tokens:2,total_tokens:7,thinking_tokens:1,input_tokens_details:{cached_tokens:2}});
+  assert.equal(second.metadata.cli_invocation.args.includes('--conversation'),true);
+  assert.equal(second.metadata.cli_invocation.args[second.metadata.cli_invocation.args.indexOf('--conversation')+1],'agy-role-conversation');
+  assert.equal(second.metadata.role_session.state_path,first.metadata.role_session.state_path);
+});
+
+test('client-supplied bridge session paths cannot create a workspace-free Worker context', async t => {
+  const {base}=await setup(t);
+  const response=await fetch(`${base}/v1/responses`,{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':'forged-role-session'},body:JSON.stringify({input:'Do not run',model:'claude-requested',metadata:{harness_id:'claude-code',foreman_run_id:'run-forged',foreman_role_id:'worker',foreman_project_id:'project-forged',role_session_binding:{run_id:'run-forged',role_id:'planner'},role_session_state_path:'/tmp/attacker',conversation_id:'attacker-session'},stream:true,timeout_seconds:5,max_step:1})});
+  assert.equal(response.status,409); assert.equal((await response.json()).error.code,'workspace_required');
 });
 
 test('Codex Worker edits only its seeded workspace and cannot read or write an outside sentinel', async t => {
@@ -195,10 +405,16 @@ test('read-only Reviewer fails closed for invalid scope, oversized diff, and any
   const bound=await submitReview(base,'claude-code','review-workspace',{workspace_id:'ws_00000000-0000-0000-0000-000000000000'}); assert.equal(bound.status,400); assert.equal(bound.body.error.code,'review_workspace_forbidden');
 });
 
-test('Codex Reviewer requires a model reported by its own JSON events', async t => {
-  const {base}=await setup(t,{codexUndefined:true}); const result=await submitReview(base,'codex-cli','codex-review-missing-model');
-  assert.equal(result.events.at(-1).type,'response.failed'); assert.equal(result.events.at(-1).response.model,undefined);
-  assert.match(result.events.at(-1).response.error.message,/actual model/);
+test('Codex Reviewer can report an unavailable model only with bound invocation and read-only evidence', async t => {
+  const codexBody=`process.stdin.resume();process.stdin.on('end',()=>{console.log(JSON.stringify({type:'thread.started',thread_id:'codex-review-no-model'}));console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'review recommendation'}}));console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:2,output_tokens:1}}));});`;
+  const {base}=await setup(t,{codexBody}); const result=await submitReview(base,'codex-cli','codex-review-missing-model');
+  const response=result.events.at(-1).response;
+  assert.equal(result.events.at(-1).type,'response.completed',JSON.stringify(result.events)); assert.equal(response.model,undefined);
+  assert.equal(response.metadata.actual_model_status,'unavailable');
+  assert.equal(response.metadata.cli_invocation.executable,'/opt/codex');
+  assert.equal(response.metadata.cli_invocation.args[response.metadata.cli_invocation.args.indexOf('--model')+1],'codex-requested');
+  assert.equal(response.metadata.reviewer_boundary.codex_sandbox,'read-only');
+  assert.equal(response.metadata.reviewer_boundary.proven,true);
 });
 
 test('Codex Reviewer runs from an empty transient cwd with read-only ephemeral flags and reported model', async t => {
@@ -227,7 +443,7 @@ test('bridge-specific seed and full snapshot preserve every Git file case for Fo
   assert.match(fixture.baseCommit,/^[0-9a-f]{40}$/);
   const {base,env}=await setup(t,{sourceRepo:fixture.repo});
   const discovery=await (await fetch(`${base}/v1/uhp`)).json();
-  assert.equal(discovery.capabilities.sessions,false);
+  assert.equal(discovery.capabilities.sessions,true);
   assert.deepEqual(discovery.capabilities.extensions.foreman_workspace_bridge_v1,{version:1,seed:true,complete_snapshot:true,execution_boundary:'bubblewrap'});
   const seed=await fetch(`${base}/extensions/foreman-workspace/v1/workspaces`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({base_commit:fixture.baseCommit})});
   assert.equal(seed.status,201); const workspace=await seed.json();
@@ -286,7 +502,8 @@ test('Codex Worker edits only its seeded workspace; Foreman verifies the complet
   const parent = await mkdtemp(join(tmpdir(),'foreman-codex-boundary-')); t.after(()=>rm(parent,{recursive:true,force:true}));
   const sentinel=join(parent,'outside-sentinel'); await writeFile(sentinel,'FOREMAN-CODEX-OUTSIDE-SENTINEL');
   const codexBody = `import {readFileSync,writeFileSync} from 'node:fs'; const path=${JSON.stringify(sentinel)}; let read='allowed',write='allowed'; try{readFileSync(path,'utf8')}catch{read='denied'} try{writeFileSync(path,'CHANGED')}catch{write='denied'} writeFileSync('README.md',${JSON.stringify('# Fixture\n\nCodex changed the assigned README.\n')}); writeFileSync('.boundary-result.json',JSON.stringify({read,write})); console.log(JSON.stringify({type:'thread.started',thread_id:'codex-worker-thread'})); console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'Updated README.md in the assigned workspace.'}})); console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:11,output_tokens:7}}));`;
-  const {base,env}=await setup(t,{sourceRepo:fixture.repo,baseCommit:fixture.baseCommit,codexBody});
+  const claudeBody=`let prompt='';process.stdin.setEncoding('utf8');process.stdin.on('data',chunk=>prompt+=chunk);process.stdin.on('end',()=>{const model='claude-actual';const result=prompt.includes('Return exactly one JSON object and no prose: {"workerTask":"..."}')?JSON.stringify({workerTask:'Change README.md with one short sentence.'}):'Planner recommends a concise README note.';console.log(JSON.stringify({type:'system',subtype:'init',model,session_id:'judgment-session'}));console.log(JSON.stringify({type:'result',subtype:'success',result,model,session_id:'judgment-session',usage:{input_tokens:5,output_tokens:2}}));});`;
+  const {base,env}=await setup(t,{sourceRepo:fixture.repo,baseCommit:fixture.baseCommit,codexBody,claudeBody});
   const uhp = new UhpClient({baseUrl:base,timeoutMs:20_000});
   const controller = new Controller(new JsonStore(join(parent,'foreman-state.json')),uhp,false,true);
   controller.configureVerifiedWorkspace({repoPath:fixture.repo,allowedScope:['README.md','.boundary-result.json'],commands:[{name:'assert verified README content',command:process.execPath,args:['-e',`const fs=require('node:fs');if(fs.readFileSync('README.md','utf8')!=='# Fixture\\n\\nCodex changed the assigned README.\\n')process.exit(1)`]}],bridgeBaseUrl:base,timeoutMs:10_000,maxOutputBytes:2_000});
@@ -294,9 +511,18 @@ test('Codex Worker edits only its seeded workspace; Foreman verifies the complet
   const project=await controller.createProject('Codex disposable workspace fixture');
   const task=await controller.createTask(project.id,'Edit the assigned README');
   const run=await controller.createRun(task.id);
-  await controller.selectRoleConfig('worker',{harnessId:'codex-cli',model:'codex-requested'},undefined,run.id);
+  await controller.selectRoleConfig('planner',{harnessId:'claude-code',model:'claude-requested',options:{timeoutSeconds:5,maxStep:1}},undefined,run.id);
+  await controller.selectRoleConfig('orchestrator',{harnessId:'claude-code',model:'claude-requested',options:{timeoutSeconds:5,maxStep:1}},undefined,run.id);
+  await controller.selectRoleConfig('worker',{harnessId:'codex-cli',model:'codex-requested',options:{timeoutSeconds:5,maxStep:1}},undefined,run.id);
   await controller.prepareWorkerWorkspace(run.id,fixture.baseCommit);
-  const assignment=await controller.assign(run.id,'worker','Change README.md with one short sentence.',{harnessId:'codex-cli',model:'codex-requested',options:{maxStep:1,timeoutSeconds:5}});
+  const guidance=await controller.addGuidance(run.id,'Keep the README change to one short note.');
+  assert.equal(guidance.status,'queued',JSON.stringify(guidance)); assert.equal(guidance.plannerReply,'Planner recommends a concise README note.',JSON.stringify((await controller.state()).events.slice(-8)));
+  const orchestration=await controller.orchestrate(run.id,'Implement the requested README note.');
+  assert.equal(orchestration.assignment.status,'succeeded',JSON.stringify(orchestration.assignment));
+  assert.equal((await controller.state()).projects[0].tasks[0].runs[0].guidance[0].status,'delivered');
+  assert.equal(orchestration.proposal?.text,'Change README.md with one short sentence.');
+  assert.ok(orchestration.proposal);
+  const assignment=await controller.dispatchWorkerProposal(run.id,orchestration.proposal.id);
   assert.equal(assignment.status,'succeeded',JSON.stringify(assignment));
   assert.equal(assignment.actualModelStatus,'unavailable');
   assert.deepEqual(assignment.cliInvocation?.args.slice(-3),['--model','codex-requested','-']);

@@ -12,6 +12,14 @@ uses its configured auth directory mounted read-only. For Codex Worker tasks,
 the bridge creates a writable ephemeral `CODEX_HOME` for each response and
 mounts the host `auth.json` into it read-only; it does not copy credentials.
 Harness discovery advertises only configured directories.
+
+Antigravity CLI (`agy`) uses the existing host sign-in under
+`AGY_CONFIG_DIR` (default: `~/.gemini/antigravity-cli`) mounted read-only.
+Its practical Worker default is `gemini-3.8-flash-low`; discovery advertises
+AGY only when `agy models` reports that configured default as available. Set
+`AGY_MODEL` to choose another default, or pass a discovered model for an
+individual run. The request model remains explicit and is checked against live
+model discovery before the CLI starts.
 Each harness is advertised only when its auth directory, explicit model, pinned
 source repository, and bubblewrap executable are configured. Claude tasks
 must use the bridge-specific pinned-workspace flow below; the older generic
