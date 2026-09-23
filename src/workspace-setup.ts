@@ -83,6 +83,15 @@ export async function loadWorkspaceSetup(dataDir: string, projectId: string): Pr
   return validateWorkspaceSetup(input);
 }
 
+/** Find the newest saved project that already owns this canonical Git checkout. */
+export async function findSavedProjectForRepository(dataDir:string,projects:ReadonlyArray<{id:string;createdAt:string}>,repoPath:string):Promise<string|undefined>{
+  for(const project of [...projects].sort((a,b)=>b.createdAt.localeCompare(a.createdAt))){
+    const setup=await loadWorkspaceSetup(dataDir,project.id).catch(()=>undefined);
+    if(setup?.repoPath===resolve(repoPath))return project.id;
+  }
+  return undefined;
+}
+
 function validateProjectId(projectId: string): void {
   if (!/^[a-zA-Z0-9_-]{1,128}$/.test(projectId)) throw new Error('Invalid project ID for workspace setup');
 }
