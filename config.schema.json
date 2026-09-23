@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Foreman v2 local service configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "FOREMAN_HOST": { "type": "string", "default": "127.0.0.1" },
+    "FOREMAN_PORT": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 4399 },
+    "FOREMAN_DATA_DIR": { "type": "string", "default": ".foreman-data" },
+    "UHP_BASE_URL": { "type": "string", "format": "uri", "description": "Configured UHP server base URL; absent means disconnected" },
+    "HINDSIGHT_BASE_URL": { "type": "string", "format": "uri", "description": "Configured Hindsight server base URL; absent means degraded memory" },
+    "FOREMAN_REQUEST_TIMEOUT_MS": { "type": "integer", "minimum": 100, "maximum": 120000, "default": 10000 },
+    "FOREMAN_TASK_TIMEOUT_MS": { "type": "integer", "minimum": 1000, "maximum": 3600000, "default": 300000 }
+  }
+}

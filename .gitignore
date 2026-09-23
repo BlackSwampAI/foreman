@@ -6,3 +6,5 @@ dist/
 .env.*
 !.env.example
 .foreman-data/
+
+.pnpm-store/
