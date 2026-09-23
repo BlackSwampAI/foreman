@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Controller, type UhpAdapter } from '../src/controller.js';
 import { JsonStore } from '../src/store.js';
+import { promoteSnapshotToGit } from '../src/git-promotion.js';
 
 const dirs:string[]=[];
 const bundle=resolve('tests/fixtures/recorded-worker-base.bundle');
@@ -30,6 +31,79 @@ async function setup(validationPass=true,reviewVerdict:'recommend'|'reject'='rec
 afterEach(async()=>{await Promise.all(dirs.splice(0).map(dir=>rm(dir,{recursive:true,force:true})));});
 
 describe('recorded Worker integration fixture (simulated Reviewer; no live model call)',()=>{
+  async function approveRecordedRun(fixture: Awaited<ReturnType<typeof setup>>) {
+    await fixture.controller.replayRecordedWorkerOutput(fixture.runId,fixture.workerId,fixture.recorded);
+    const recommendation:any=await fixture.controller.requestReviewer(fixture.runId,'simulated_fixture');
+    expect(recommendation).toMatchObject({provenance:'simulated_fixture',verdict:'recommend',reviewMode:'read_only'});
+    return fixture.controller.approveRun(fixture.runId,{approved:true,rationale:'Accepted the verified recorded result after inspecting its simulated review.'});
+  }
+
+  it('keeps the human decision immutable and distinct from an explicitly applied Git result',async()=>{
+    const fixture=await setup();
+    const approval:any=await approveRecordedRun(fixture);
+    expect(approval).toMatchObject({approved:true,decision:'approved',evidenceCommit:fixture.recorded.baseCommit});
+    expect((await fixture.store.load()).projects[0]!.tasks[0]!.runs[0]!.promotion).toMatchObject({status:'not_started'});
+    await expect(fixture.controller.approveRun(fixture.runId,{approved:false,rationale:'Attempt to replace approval'})).rejects.toThrow('A human decision is final for this run');
+
+    const promoted:any=await fixture.controller.promoteRun(fixture.runId,{destinationBranch:'foreman/results/controller-success'});
+    expect(promoted.approval).toEqual(approval);
+    expect(promoted.promotion).toMatchObject({status:'applied',destinationBranch:'foreman/results/controller-success',resultCommit:expect.any(String),resultTree:expect.any(String)});
+    expect(promoted.promotion.resultCommit).not.toBe(promoted.approval.evidenceCommit);
+    expect(execFileSync('git',['-C',fixture.repoPath,'rev-list','--parents','-n','1',promoted.promotion.resultCommit],{encoding:'utf8'}).trim()).toBe(`${promoted.promotion.resultCommit} ${fixture.recorded.baseCommit}`);
+    const after:any=(await fixture.store.load()).projects[0]!.tasks[0]!.runs[0]!;
+    expect(after.approval).toEqual(approval);
+    expect(after.promotion).toEqual(promoted.promotion);
+  });
+
+  it('recovers persisted promotion intent after Git created the result branch but before state recorded applied',async()=>{
+    const fixture=await setup();
+    await approveRecordedRun(fixture);
+    const state:any=await fixture.store.load();
+    const run=state.projects[0].tasks[0].runs[0];
+    const operationId='crash-recovery-promotion-operation';
+    const destinationBranch='refs/heads/foreman/results/recovered';
+    await fixture.store.mutate(s=>{const current=s.projects[0]!.tasks[0]!.runs[0]!;current.promotion={status:'promoting',operationId,evidenceDigest:current.approval!.evidenceDigest,destinationBranch,updatedAt:new Date().toISOString()};});
+    const evidence=run.workerEvidence;
+    const firstGitResult=await promoteSnapshotToGit({repoPath:fixture.repoPath,pinnedBaseCommit:fixture.recorded.baseCommit,entries:evidence.entries,allowedScope:evidence.allowedScope,operationId,destinationBranch,commitMessage:`Foreman approved result ${fixture.runId}`});
+    // Simulate a process crash after the ref update: persistent Foreman state still says promoting.
+    const recovered=new Controller(new JsonStore(fixture.store.filePath),{submit:async()=>{throw new Error('promotion recovery must not submit any model call');},cancel:async()=>({status:'cancelled'})});
+    recovered.configureVerifiedWorkspace({repoPath:fixture.repoPath,allowedScope:['README.md'],commands:[{name:'recorded README assertion',command:process.execPath,args:['-e',"const fs=require('fs');if(!fs.readFileSync('README.md','utf8').includes('Bridge smoke'))process.exit(2);console.log('recorded README assertion passed')"]}]});
+    const result:any=await recovered.promoteRun(fixture.runId);
+    expect(result.promotion).toMatchObject({status:'applied',operationId,resultCommit:firstGitResult.commit,resultTree:firstGitResult.tree,destinationBranch});
+    const again:any=await recovered.promoteRun(fixture.runId);
+    expect(again.promotion.resultCommit).toBe(firstGitResult.commit);
+    expect(again.promotion.operationId).toBe(operationId);
+  });
+
+  it('rejects changed validation/review evidence and a conflicting destination branch after approval',async()=>{
+    const tampered=await setup();
+    await approveRecordedRun(tampered);
+    await tampered.store.mutate(s=>{const run=s.projects[0]!.tasks[0]!.runs[0]!;run.validation!.observations![0]!.output='tampered after approval';});
+    await expect(tampered.controller.promoteRun(tampered.runId)).rejects.toThrow('Approval evidence binding no longer matches stored evidence');
+
+    const reviewTampered=await setup();
+    await approveRecordedRun(reviewTampered);
+    await reviewTampered.store.mutate(s=>{const run=s.projects[0]!.tasks[0]!.runs[0]!;run.assignments.find(a=>a.roleId==='reviewer')!.responseId='changed-review-response';});
+    const reviewDestination='foreman/results/review-binding-tamper';
+    await expect(reviewTampered.controller.promoteRun(reviewTampered.runId,{destinationBranch:reviewDestination})).rejects.toThrow('Approval evidence binding no longer matches stored evidence');
+    expect(()=>execFileSync('git',['-C',reviewTampered.repoPath,'show-ref','--verify',`refs/heads/${reviewDestination}`],{stdio:'pipe'})).toThrow();
+
+    const policyChanged=await setup();
+    await approveRecordedRun(policyChanged);
+    const observation=(await policyChanged.store.load()).projects[0]!.tasks[0]!.runs[0]!.validation!.observations![0]!;
+    policyChanged.controller.configureVerifiedWorkspace({repoPath:policyChanged.repoPath,allowedScope:['README.md'],commands:[{name:observation.name,command:observation.command,args:observation.args,cwd:'different-validation-directory'}]});
+    await expect(policyChanged.controller.promoteRun(policyChanged.runId)).rejects.toThrow('Stored validation does not match');
+
+    const conflict=await setup();
+    await approveRecordedRun(conflict);
+    execFileSync('git',['-C',conflict.repoPath,'update-ref','refs/heads/foreman/results/conflict',conflict.recorded.baseCommit],{stdio:'pipe'});
+    await expect(conflict.controller.promoteRun(conflict.runId,{destinationBranch:'foreman/results/conflict'})).rejects.toThrow('points elsewhere');
+    const run:any=(await conflict.store.load()).projects[0]!.tasks[0]!.runs[0]!;
+    expect(run.approval).toMatchObject({approved:true,decision:'approved'});
+    expect(run.promotion).toMatchObject({status:'failed'});
+    expect(execFileSync('git',['-C',conflict.repoPath,'rev-parse','refs/heads/foreman/results/conflict'],{encoding:'utf8'}).trim()).toBe(conflict.recorded.baseCommit);
+  });
+
   it('imports a recorded live Worker response without a Worker submission and keeps it separate from a simulated Reviewer',async()=>{
     const fixture=await setup(true,'recommend',false);
     const imported:any=await fixture.controller.importRecordedWorkerEvidence(fixture.runId,{responseId:fixture.recorded.responseId,sessionId:fixture.recorded.sessionId,actualModel:fixture.recorded.actualModel,usage:(fixture.recorded as any).usage,evidence:fixture.recorded});
