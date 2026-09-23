@@ -1,9 +1,13 @@
 # Codex Worker workspace proof
 
 This proof routes one Worker task through the experimental external UHP bridge
-to Codex CLI using the existing host ChatGPT login. The bridge receives the
-configured `CODEX_HOME` by path and mounts it read-only; it does not copy
-credentials. Do not set a provider API key for this proof.
+to Codex CLI using the existing host ChatGPT login. For each response, the
+bridge creates a fresh writable ephemeral `CODEX_HOME` and bind-mounts the
+host's `auth.json` into it read-only. It does not copy credentials. Codex
+runtime state stays in the ephemeral home. The bridge sets `PWD=/workspace`,
+resolves the host CA bundle, mounts it read-only at the sandbox's standard CA
+path, and sets `SSL_CERT_FILE` to that path. Do not set a provider API key for
+this proof.
 
 Codex edits only the assigned workspace. Before starting the CLI, the bridge
 runs a deterministic boundary probe that must show an outside sentinel cannot
@@ -105,31 +109,52 @@ result commit is not claimed.
 - Deterministic fake-CLI bridge proof: **23/23 tests passed**, with no provider
   calls. It proves the assigned workspace edit, outside-sentinel boundary,
   complete snapshot, independent scope check, and configured validation.
-- Live attempt: one UHP submission and one CLI invocation; **zero completed
-  model turns**. Response ID: `resp_94f2495f-43f6-4d22-b401-463266d9e5db`.
-  The bridge reported `CLI did not report an actual model and session id`.
-  There is no session ID, measured usage, or CLI output, and the underlying
-  provider request count is unavailable.
-- The bridge response metadata says actual model unavailable; requested model
-  was `gpt-6-sol`. The failed response predates a controller persistence fix,
-  so the Foreman assignment itself has no persisted actual-model status.
-  Evidence keeps those two observations distinct. Missing actual-model data is
-  permitted for a completed result; this attempt failed because the CLI task
-  had failed status and no session ID or usable response JSON.
-- The bridge did prove the workspace boundary: the outside sentinel was
-  unreadable and unmodifiable, and the assigned workspace was writable. The
-  returned snapshot was incomplete (`complete:false`, one 87-byte README entry
-  identical to the pinned base, and `task_status_failed` at `.`). Scope
-  verification did not run because the snapshot was incomplete; this is not a
-  finding that a change was out of scope. Foreman's configured validation did
-  not run.
-  The README remained unchanged.
-- The durable one-call lock remains in place. There will be no retry for this
-  proof. Human approval and Git promotion were not requested.
-- Codex ignores UHP `max_step`. The live bridge timeout is 30 seconds, and the
-  durable smoke lock permitted one CLI invocation.
+- Three live UHP submissions each invoked Codex once. Across the three
+  attempts the underlying provider request count is unavailable. The first
+  attempt, recorded in
+  [`actual-codex-worker-smoke.json`](../investigations/local-cli-uhp/evidence/actual-codex-worker-smoke.json),
+  failed immediately without a session ID or usable response JSON;
+  the bridge's terminal error was `CLI did not report an actual model and
+  session id`. It had no completed model turn. The partial snapshot was
+  incomplete and unchanged from its pinned base; scope verification and
+  validation did not run.
+- The second attempt used the corrected per-response runtime and is
+  recorded separately in
+  [`actual-codex-worker-smoke-retry2.json`](../investigations/local-cli-uhp/evidence/actual-codex-worker-smoke-retry2.json).
+  It passed the boundary probe and started a Codex session, but exited 1 in
+  the CLI execution stage before completing a turn (`cliFailureCategory:
+  network`). The response contained a session ID but no completed turn or agent
+  message. A separate unauthenticated curl reproduction implicated the old
+  runtime's missing host CA bundle. That is a
+  diagnostic inference, not a TLS error reported by Codex. It
+  reported session `01a0cc9f-da14-7920-b00d-e5dc5c730fcd`, response
+  `resp_ec9c9d4c-fa0c-4600-8384-20b152ec2e8c`, no usage, and actual model
+  unavailable. Its snapshot was incomplete; Foreman did not verify scope or
+  run validation. It had zero completed model turns.
+- The third attempt completed a turn and produced a verified result. Evidence
+  is in
+  [`actual-codex-worker-smoke-retry3.json`](../investigations/local-cli-uhp/evidence/actual-codex-worker-smoke-retry3.json).
+  Response `resp_d6fb1919-b195-4589-afed-40f6b504f0d3`, session
+  `01a0cca6-4ed6-7f12-9013-95fce4e6d5a9`; requested model `gpt-6-sol`, actual
+  model unavailable. Measured usage: 57,325 input, 640 output, and 53,888
+  cached input tokens. The bridge returned a complete one-entry snapshot;
+  Foreman independently verified the single `README.md` modification within
+  allowed scope. The edit appended “Codex Worker smoke: Foreman independently
+  verified this change.” Configured validation passed with exit code 0.
+  Acceptance remained `not_decided`; no Reviewer, human approval, or Git
+  promotion was requested. `max_step: 1` is reported as ignored by Codex; the
+  task timeout was 30 seconds. The measured CLI runtime was about 20.9 seconds.
+- Missing actual-model data is permitted for a completed Codex Worker result;
+  the third attempt demonstrates that this reporting gap does not block exact
+  snapshot/scope verification or validation. The second attempt's failure was
+  instead a network-category failure after session startup; its exact cause is
+  not reported by Codex. Requested model and exact invocation are recorded per
+  attempt and are not represented as observed actual model. No result was
+  approved or promoted.
+- Codex ignores UHP `max_step`; each task used the bridge's 30-second timeout.
 - Validation: one configured README content check; this does not claim a
   broader project test suite.
 
-The captured result is in
-[`actual-codex-worker-smoke.json`](../investigations/local-cli-uhp/evidence/actual-codex-worker-smoke.json).
+The three attempt records above distinguish the initial CLI failure, the
+session-started network-category failure, and the completed verified Worker
+result.

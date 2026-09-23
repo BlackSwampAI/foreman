@@ -247,15 +247,30 @@ async function runtimeFiles(binary, mountBinary = false) {
   }
   return [...files];
 }
-function bwrapBaseArgs(ws, runtime = [], readOnlyWorkspace = false) {
-  const dirs = new Set(['/tmp/cli-home', '/opt']);
+const SANDBOX_CA_FILE = '/etc/ssl/certs/ca-certificates.crt';
+function codexCaMountArgs(caBundle) { return ['--ro-bind', caBundle, SANDBOX_CA_FILE]; }
+async function resolveCaBundle() {
+  const candidates = ['/etc/ssl/certs/ca-certificates.crt', '/etc/ssl/ca-bundle.pem', '/var/lib/ca-certificates/ca-bundle.pem', '/etc/pki/tls/certs/ca-bundle.crt', '/etc/ssl/cert.pem'];
+  for (const candidate of candidates) {
+    try {
+      const path = await realpath(candidate);
+      const info = await lstat(path);
+      if (!info.isFile()) continue;
+      const contents = await readFile(path);
+      if (contents.length > 0 && contents.includes(Buffer.from('-----BEGIN CERTIFICATE-----'))) return path;
+    } catch {}
+  }
+  throw Error('host_ca_bundle_unavailable');
+}
+function bwrapBaseArgs(ws, runtime = [], readOnlyWorkspace = false, mountAuth = true) {
+  const dirs = new Set(['/tmp/cli-home', '/opt', '/etc', '/etc/ssl', '/etc/ssl/certs']);
   for (const file of runtime) {
     let parent = dirname(file);
     while (parent !== '/') { dirs.add(parent); parent = dirname(parent); }
   }
   const dirArgs = [...dirs].sort((a, b) => a.split('/').length - b.split('/').length).flatMap(dir => ['--dir', dir]);
   const mounts = runtime.flatMap(file => ['--ro-bind', file, file]);
-  return ['--die-with-parent', '--new-session', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', ...dirArgs, ...mounts, readOnlyWorkspace ? '--ro-bind' : '--bind', ws.dir, '/workspace', '--chdir', '/workspace', '--ro-bind', ws.authDir, '/auth'];
+  return ['--die-with-parent', '--new-session', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', ...dirArgs, ...mounts, readOnlyWorkspace ? '--ro-bind' : '--bind', ws.dir, '/workspace', '--chdir', '/workspace', ...(mountAuth ? ['--ro-bind', ws.authDir, '/auth'] : [])];
 }
 
 function validateReviewEvidence(metadata) {
@@ -352,18 +367,25 @@ async function runCodexWorkspaceSandboxed(ws, args, env, prompt, codex) {
   ws.executionStage = 'resolve_cli';
   ws.executionStage = 'resolve_auth';
   ws.authDir = await realpath(HARNESS.codex.authDir);
+  const authFile = join(ws.authDir, 'auth.json');
+  if (!(await lstat(authFile).catch(() => null))?.isFile()) throw Error('Codex host auth.json is unavailable');
+  ws.codexAuthFile = await realpath(authFile);
+  ws.codexHome = join(ROOT, `${ws.id}.codex-home`);
+  await mkdir(ws.codexHome, { recursive: false, mode: 0o700 });
+  await writeFile(join(ws.codexHome, 'auth.json'), '', { mode: 0o600 });
   ws.executionStage = 'boundary_probe';
   const probe = await proveBoundary(ws);
-  ws.boundary = { ...probe, harness: 'codex-cli', workspace_writable: true, host_auth_mounted_read_only: true };
+  ws.boundary = { ...probe, harness: 'codex-cli', workspace_writable: true, host_auth_mounted_read_only: true, ca_bundle_mounted_read_only: true };
   ws.executionStage = 'runtime_mount';
   const shellBinary = await realpath('/bin/sh');
   const shellDependencies = (await runtimeFiles(shellBinary)).filter(path => path !== shellBinary);
-  const runtime = [...new Set([...(await runtimeFiles(codex.binary)), ...shellDependencies])];
+  const caBundle = await resolveCaBundle();
+  const runtime = [...new Set([...(await runtimeFiles(codex.binary)), ...shellDependencies])].filter(path => path !== SANDBOX_CA_FILE);
   const nodePath = dirname(await realpath(process.execPath));
-  const bargs = [...bwrapBaseArgs(ws, runtime), '--dir', '/usr', '--ro-bind', '/usr/bin', '/usr/bin', '--symlink', 'usr/bin', '/bin', ...(codex.vendorRoot ? ['--dir', '/opt/codex-vendor', '--ro-bind', codex.vendorRoot, '/opt/codex-vendor'] : ['--ro-bind', codex.binary, '/opt/codex']), '--', codex.sandboxExecutable, ...args];
+  const bargs = [...bwrapBaseArgs(ws, runtime, false, false), '--dir', '/codex-home', '--bind', ws.codexHome, '/codex-home', '--ro-bind', ws.codexAuthFile, '/codex-home/auth.json', ...codexCaMountArgs(caBundle), '--dir', '/usr', '--ro-bind', '/usr/bin', '/usr/bin', '--symlink', 'usr/bin', '/bin', ...(codex.vendorRoot ? ['--dir', '/opt/codex-vendor', '--ro-bind', codex.vendorRoot, '/opt/codex-vendor'] : ['--ro-bind', codex.binary, '/opt/codex']), '--', codex.sandboxExecutable, ...args];
   const sandboxEnv = Object.fromEntries(Object.entries(env).filter(([name]) => ['LANG','LC_ALL','TERM','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY'].includes(name)));
   ws.executionStage = 'cli_spawn';
-  const child = spawn(BWRAP, bargs, { cwd: ROOT, env: { ...sandboxEnv, PATH: `/usr/bin:/bin:${nodePath}`, HOME: '/tmp/cli-home', CODEX_HOME: '/auth' }, shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  const child = spawn(BWRAP, bargs, { cwd: ROOT, env: { ...sandboxEnv, PATH: `/usr/bin:/bin:${nodePath}`, HOME: '/tmp/cli-home', PWD: '/workspace', CODEX_HOME: '/codex-home', SSL_CERT_FILE: SANDBOX_CA_FILE }, shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   ws.executionStage = 'cli_execution';
   child.stdin.end(prompt); return child;
 }
@@ -401,26 +423,49 @@ async function preflightCodexRuntime() {
   if (!HARNESS.codex.authDir) throw Error('CODEX_HOME is required for the Codex runtime preflight');
   const dir = join(ROOT, `codex-preflight-${randomUUID()}`); await mkdir(dir, { recursive: false, mode: 0o700 });
   const ws = { id: `ws_${randomUUID()}`, dir, authDir: await realpath(HARNESS.codex.authDir) };
+  const authFile = await realpath(join(ws.authDir, 'auth.json'));
+  const codexHome = join(ROOT, `${ws.id}.codex-home`);
+  await mkdir(codexHome, { recursive: false, mode: 0o700 });
+  await writeFile(join(codexHome, 'auth.json'), '', { mode: 0o600 });
   try {
     const codex = await resolveCodexRuntime(HARNESS.codex.bin);
+    const caBundle = await resolveCaBundle();
     const shellBinary = await realpath('/bin/sh');
     const shellDependencies = (await runtimeFiles(shellBinary)).filter(path => path !== shellBinary);
-    const runtime = [...new Set([...(await runtimeFiles(codex.binary)), ...shellDependencies])];
-    const args = [...bwrapBaseArgs(ws, runtime), '--dir', '/usr', '--ro-bind', '/usr/bin', '/usr/bin', '--symlink', 'usr/bin', '/bin', ...(codex.vendorRoot ? ['--dir', '/opt/codex-vendor', '--ro-bind', codex.vendorRoot, '/opt/codex-vendor'] : ['--ro-bind', codex.binary, '/opt/codex']), '--', codex.sandboxExecutable, '--version'];
-    const env = { PATH: `/usr/bin:/bin:${dirname(await realpath(process.execPath))}`, HOME: '/tmp/cli-home', CODEX_HOME: '/auth' };
+    const runtime = [...new Set([...(await runtimeFiles(codex.binary)), ...shellDependencies])].filter(path => path !== SANDBOX_CA_FILE);
+    const mounts = [...bwrapBaseArgs(ws, runtime, false, false), '--dir', '/codex-home', '--bind', codexHome, '/codex-home', '--ro-bind', authFile, '/codex-home/auth.json', ...codexCaMountArgs(caBundle), '--dir', '/usr', '--ro-bind', '/usr/bin', '/usr/bin', '--symlink', 'usr/bin', '/bin', ...(codex.vendorRoot ? ['--dir', '/opt/codex-vendor', '--ro-bind', codex.vendorRoot, '/opt/codex-vendor'] : ['--ro-bind', codex.binary, '/opt/codex'])];
+    const args = [...mounts, '--', codex.sandboxExecutable, '--version'];
+    const env = { PATH: `/usr/bin:/bin:${dirname(await realpath(process.execPath))}`, HOME: '/tmp/cli-home', PWD: '/workspace', CODEX_HOME: '/codex-home', SSL_CERT_FILE: SANDBOX_CA_FILE };
     const result = await spawnCaptured(BWRAP, args, env, 10_000);
     if (result.code !== 0) throw Error('Codex isolated runtime preflight failed');
-    const loginArgs = [...args.slice(0, -3), '--', codex.sandboxExecutable, 'login', 'status'];
+    const loginArgs = [...mounts, '--', codex.sandboxExecutable, 'login', 'status'];
     const login = await spawnCaptured(BWRAP, loginArgs, env, 10_000);
     const loginStatus = `${login.stdout} ${typeof login.error === 'string' ? login.error : ''}`.toLowerCase();
     if (login.code !== 0) throw Error(`Codex isolated login status exited with code ${login.code ?? 'unknown'}`);
     if (/not logged in|not authenticated|no login/.test(loginStatus)) throw Error('Codex isolated login status reports no authenticated host login');
     if (!/logged in|authenticated/.test(loginStatus)) throw Error('Codex isolated login status output was not recognized');
-    const workerHelpArgs = [...args.slice(0, -3), '--', codex.sandboxExecutable, '--ask-for-approval', 'never', 'exec', '--json', '--ephemeral', '--sandbox', 'workspace-write', '--ignore-user-config', '--skip-git-repo-check', '--model', HARNESS.codex.model, '--help'];
+    const workerHelpArgs = [...mounts, '--', codex.sandboxExecutable, '--ask-for-approval', 'never', 'exec', '--json', '--ephemeral', '--sandbox', 'workspace-write', '--ignore-user-config', '--skip-git-repo-check', '--model', HARNESS.codex.model, '--help'];
     const workerHelp = await spawnCaptured(BWRAP, workerHelpArgs, env, 10_000);
     if (workerHelp.code !== 0) throw Error('Codex Worker invocation flags are rejected by the isolated CLI');
-    return `Codex isolated runtime ${result.stdout.trim().split(/\r?\n/)[0].slice(0, 120)}; host login readable; Worker flags accepted`;
-  } finally { await rm(dir, { recursive: true, force: true }); }
+    const nodePath = await realpath(process.execPath);
+    const caCheck = [...mounts, '--', nodePath, '-e', `const fs=require('node:fs');const p=process.env.SSL_CERT_FILE;const b=fs.readFileSync(p);if(!b.includes(Buffer.from('-----BEGIN CERTIFICATE-----')))process.exit(1);try{fs.writeFileSync(p,'x');process.exit(2)}catch{}`];
+    const ca = await spawnCaptured(BWRAP, caCheck, env, 10_000);
+    if (ca.code !== 0) throw Error('Codex isolated CA bundle mount check failed');
+    const sentinel = join(ROOT, `${ws.id}.codex-sandbox-sentinel`); await writeFile(sentinel, 'FOREMAN_CODEX_SANDBOX_SENTINEL', { mode: 0o600 });
+    try {
+      const script = `if test -r ${JSON.stringify(sentinel)}; then exit 41; fi; if printf changed >> ${JSON.stringify(sentinel)} 2>/dev/null; then exit 42; fi; printf '%s' inside-workspace > /workspace/.codex-sandbox-probe; test "$(cat /workspace/.codex-sandbox-probe)" = inside-workspace`;
+      const sandboxArgs = [...mounts, '--', codex.sandboxExecutable, 'sandbox', '-P', ':workspace', '-C', '/workspace', '--', '/bin/sh', '-c', script];
+      const sandbox = await spawnCaptured(BWRAP, sandboxArgs, env, 15_000);
+      const sentinelUnchanged = (await readFile(sentinel, 'utf8').catch(() => '')) === 'FOREMAN_CODEX_SANDBOX_SENTINEL';
+      const workspaceEdited = (await readFile(join(dir, '.codex-sandbox-probe'), 'utf8').catch(() => '')) === 'inside-workspace';
+      if (sandbox.code !== 0 || !sentinelUnchanged || !workspaceEdited) {
+        const errorText = typeof sandbox.error === 'string' ? sandbox.error.toLowerCase() : '';
+        const diagnostic = /permission-profile|permission profile/.test(errorText) ? 'profile_required' : /operation not permitted|permission denied|unshare/.test(errorText) ? 'nested_sandbox_unavailable' : sandbox.signal === 'SIGKILL' ? 'timeout' : 'sandbox_command_failed';
+        throw Error(`Codex isolated workspace profile preflight failed (${diagnostic}, exit ${sandbox.code ?? 'unknown'}, outside_unchanged ${sentinelUnchanged}, workspace_edited ${workspaceEdited})`);
+      }
+    } finally { await rm(sentinel, { force: true }); }
+    return `Codex isolated runtime ${result.stdout.trim().split(/\r?\n/)[0].slice(0, 120)}; host login readable; CA bundle readable read-only; Worker flags accepted; native workspace sandbox verified`;
+  } finally { await rm(dir, { recursive: true, force: true }); await rm(codexHome, { recursive: true, force: true }); }
 }
 async function resolveBinary(name) {
   if (name.includes('/')) return realpath(name);
@@ -459,7 +504,8 @@ async function runTask(record, prompt) {
   const active = tasks.get(record.id); active.child = child;
   let out = '', stdoutBytes = 0, cliOutputOverflow = false;
   child.stdout.setEncoding('utf8'); child.stdout.on('data', chunk => { stdoutBytes += Buffer.byteLength(chunk); if ((reviewer || kind === 'codex-cli') && stdoutBytes > MAX_OUTPUT * 3 && !cliOutputOverflow) { cliOutputOverflow = true; child.kill('SIGTERM'); } out = (out + chunk).slice(-MAX_OUTPUT * 3); });
-  child.stderr.on('data', () => {}); // Drain without retaining or exposing stderr, which may contain credentials.
+  let stderrTail = '';
+  child.stderr.setEncoding('utf8'); child.stderr.on('data', chunk => { stderrTail = (stderrTail + chunk).slice(-4000); }); // Bounded in-memory diagnostics only; never persist raw stderr.
   child.stdin.on('error', () => {});
   let spawnError;
   let killTimer;
@@ -473,6 +519,7 @@ async function runTask(record, prompt) {
   if (kind === 'codex-cli' && !reviewer) {
     record.metadata.cli_exit = { exit_code: Number.isInteger(exit.code) ? exit.code : null, signal: exit.signal ?? null };
     record.metadata.execution_stage = ws.executionStage ?? 'cli_execution';
+    if (spawnError || exit.code !== 0 || exit.signal) record.metadata.cli_failure_category = classifyCodexFailure(stderrTail, exit, spawnError);
   }
   let parsed = kind === 'claude' ? parseClaude(out) : parseCodex(out);
   if (parsed.text.length > MAX_OUTPUT) parsed.text = parsed.text.slice(0, MAX_OUTPUT);
@@ -495,7 +542,21 @@ async function runTask(record, prompt) {
   if (record.status !== 'completed') record.error = { message: spawnError ? 'CLI could not be started' : reviewer && parsed.mutationAttempted ? 'Reviewer attempted to use a tool or mutate state' : cliOutputOverflow ? 'CLI output exceeded the bounded stream limit' : (reviewer || kind === 'codex-cli') && (parsed.malformedOutput || parsed.unrecognizedOutput) ? 'CLI output contained malformed or unrecognized stream records' : kind === 'codex-cli' && !reviewer && !parsed.session ? exit.code !== 0 || exit.signal ? 'Codex CLI exited before reporting a session id' : 'Codex CLI did not report a session id' : kind === 'codex-cli' && !reviewer && !parsed.turnCompleted ? 'Codex CLI exited without completing a turn' : parsed.isError ? kind === 'claude' ? 'Claude Code reported an unsuccessful task' : 'Codex CLI reported an unsuccessful task' : missingReportedIdentity ? 'CLI did not report an actual model and session id' : active.cancelRequested ? 'CLI task was cancelled' : exit.signal ? `CLI terminated by ${exit.signal}` : 'CLI exited unsuccessfully' };
   await persist();
   active.resolve?.();
+  if (kind === 'codex-cli' && !reviewer && ws?.codexHome) { await rm(ws.codexHome, { recursive: true, force: true }).catch(() => undefined); ws.codexHome = undefined; }
   if (reviewer) { await rm(work, { recursive: true, force: true }); tasks.get(record.id).reviewerWorkDir = undefined; }
+}
+
+function classifyCodexFailure(stderr, exit, spawnError) {
+  if (spawnError) return 'sandbox_spawn_failed';
+  const text = String(stderr ?? '').toLowerCase();
+  if (/not logged in|unauthorized|authentication|sign.?in|token expired/.test(text)) return 'authentication';
+  if (/model .*not found|unknown model|model unavailable|unsupported model/.test(text)) return 'model_unavailable';
+  if (/permission denied|operation not permitted|read.only file system|failed to create.*directory/.test(text)) return 'filesystem_permission';
+  if (/sandbox|bwrap|seccomp|landlock|unshare/.test(text)) return 'sandbox_setup';
+  if (/unexpected argument|unrecognized option|unknown option/.test(text)) return 'cli_arguments';
+  if (/network|connection|dns|timed out|tls|certificate/.test(text)) return 'network';
+  if (!text.trim()) return exit?.signal ? 'terminated_without_stderr' : 'no_stderr';
+  return 'unclassified_stderr';
 }
 
 function normalizeCliUsage(kind, value) {
@@ -564,7 +625,7 @@ const server = createServer(async (req, res) => {
       if (ws) { ws.responseId = id; state.workspaces[ws.id].responseId = id; }
       state.keys[key] = id; state.responses[id] = record; const task = { response: record, resolve: null }; tasks.set(id, task);
       await persist(); // durable idempotency intent before spawning any CLI process
-      runTask(record, b.input).catch(async error => { record.status = 'failed'; record.error = { message: 'CLI task failed internally' }; if(task.reviewerWorkDir) { await rm(task.reviewerWorkDir,{recursive:true,force:true}).catch(()=>undefined); task.reviewerWorkDir=undefined; } const ws = workspaces.get(record.metadata.workspace_id); if (ws) { record.metadata.execution_boundary = ws.boundary ?? { proven: false, error: 'execution_boundary_unavailable' }; record.metadata.execution_stage = ws.executionStage ?? 'task_setup'; if (ws.boundaryDiagnostic) record.metadata.execution_boundary_diagnostic = ws.boundaryDiagnostic; else if (/^boundary_probe_failed:/.test(String(error?.message))) record.metadata.execution_boundary_diagnostic = { category: String(error.message).split(':')[1] ?? 'probe_failed', exit_code: Number(String(error.message).split(':')[2]) || null, signal: null }; } await persist(); task.resolve?.(); });
+      runTask(record, b.input).catch(async error => { record.status = 'failed'; record.error = { message: 'CLI task failed internally' }; if(task.reviewerWorkDir) { await rm(task.reviewerWorkDir,{recursive:true,force:true}).catch(()=>undefined); task.reviewerWorkDir=undefined; } const ws = workspaces.get(record.metadata.workspace_id); if (ws) { record.metadata.execution_boundary = ws.boundary ?? { proven: false, error: 'execution_boundary_unavailable' }; record.metadata.execution_stage = ws.executionStage ?? 'task_setup'; if (ws.boundaryDiagnostic) record.metadata.execution_boundary_diagnostic = ws.boundaryDiagnostic; else if (/^boundary_probe_failed:/.test(String(error?.message))) record.metadata.execution_boundary_diagnostic = { category: String(error.message).split(':')[1] ?? 'probe_failed', exit_code: Number(String(error.message).split(':')[2]) || null, signal: null }; if (record.metadata.harness_id === 'codex-cli' && record.metadata.foreman_review_mode !== 'read_only') { record.metadata.cli_exit = { exit_code: null, signal: null }; record.metadata.cli_failure_category = record.metadata.execution_stage === 'resolve_auth' ? 'host_auth_unavailable' : record.metadata.execution_stage === 'boundary_probe' ? 'boundary_setup' : record.metadata.execution_stage === 'runtime_mount' ? 'runtime_setup' : 'cli_setup'; await rm(ws.codexHome, { recursive: true, force: true }).catch(() => undefined); } } await persist(); task.resolve?.(); });
       return streamResponse(res, record, task);
     }
     send(res, 404, { error: { code: 'not_found' } });

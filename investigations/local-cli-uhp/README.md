@@ -7,9 +7,11 @@ Responses, retrieval, idempotency, SSE, and cancellation routes used by
 
 The provider-connection preflight is satisfied by explicit local configuration:
 set `CLAUDE_CONFIG_DIR` to an already authenticated Claude Code config
-directory and/or `CODEX_HOME` to an already authenticated Codex home. The
-server passes that existing directory to the CLI as-is. It never reads or
-copies credentials. Harness discovery advertises only configured directories.
+directory and/or `CODEX_HOME` to an already authenticated Codex home. Claude
+uses its configured auth directory mounted read-only. For Codex Worker tasks,
+the bridge creates a writable ephemeral `CODEX_HOME` for each response and
+mounts the host `auth.json` into it read-only; it does not copy credentials.
+Harness discovery advertises only configured directories.
 Each harness is advertised only when its auth directory, explicit model, pinned
 source repository, and bubblewrap executable are configured. Claude tasks
 must use the bridge-specific pinned-workspace flow below; the older generic
@@ -20,8 +22,9 @@ in a fresh context. A UHP request cannot supply an arbitrary host cwd.
 
 HarnessRouter's per-session `CLAUDE_CONFIG_DIR` and `CODEX_HOME` are credential
 stores; creating fresh empty per-session directories there would discard the
-existing login. This adapter reuses the configured host auth directory and
-isolates task state with a unique working directory. It advertises
+existing login. This adapter keeps the host auth material mounted read-only
+and isolates Codex Worker state in a fresh writable ephemeral home and task
+workspace. It advertises
 `sessions: false` because CLI resume is not implemented; a CLI-reported session
 ID is returned on the response and in its metadata for evidence only. It therefore demonstrates a
 host-side alternative that bypasses the router's
@@ -147,7 +150,7 @@ and `LOCAL_CLI_UHP_EVIDENCE_FILE` select the key and evidence paths.
 
 ## Recorded live proof
 
-The first workspace attempt failed closed at `boundary_probe` before CLI
+The first Claude workspace attempt failed closed at `boundary_probe` before CLI
 launch. Response `resp_af452680-6544-496f-b12e-23c89aa667ad` had no actual
 model, session ID, or usage, and its incomplete snapshot was rejected. A
 deterministic ELF-header check exposed and fixed the bubblewrap setup issue;
@@ -171,14 +174,22 @@ in `evidence/initial-boundary-failure.json`.
 The later [Codex Worker proof](../../docs/codex-worker-smoke.md) has 23 passing
 deterministic bridge fixtures. They verify assigned-workspace edits, an outside
 sentinel that neither Node nor the shell can read or change, a read-only host
-login mount, and Foreman's snapshot/scope/validation path. Its one live UHP
-submission invoked Codex once and failed before any session or JSON events;
-response `resp_94f2495f-43f6-4d22-b401-463266d9e5db` has no measured usage.
-The resulting snapshot is incomplete and the README is unchanged. Foreman did
-not run scope verification or validation. The [captured evidence](evidence/actual-codex-worker-smoke.json)
-keeps the requested `gpt-6-sol` separate from the unavailable actual model and
-records the durable no-retry lock.
+auth mount, and Foreman's snapshot/scope/validation path. Three bounded live
+UHP submissions each invoked Codex once. The first failed before a session or
+usable JSON response (`actual-codex-worker-smoke.json`); the second started a
+session and failed with category `network` (`actual-codex-worker-smoke-retry2.json`). A separate unauthenticated curl reproduction implicated the old runtime's missing host CA bundle; this is an inference, not an error reported by Codex.
+The third completed a turn (`actual-codex-worker-smoke-retry3.json`, response
+`resp_d6fb1919-b195-4589-afed-40f6b504f0d3`, session
+`01a0cca6-4ed6-7f12-9013-95fce4e6d5a9`). Requested model was `gpt-6-sol`,
+actual model unavailable, and measured usage was 57,325 input, 640 output,
+53,888 cached input tokens. Foreman received a complete snapshot, verified the
+single README change in allowed scope, and passed configured validation.
+Acceptance remained `not_decided`; no Reviewer, approval, or Git promotion
+occurred. The actual model remains unreported, and provider request count is
+unavailable. This external bridge proof does not establish HarnessRouter
+subscription-login or full-snapshot parity.
 
-Claude session continuation remains unimplemented. Codex has no verified
-actual-model signal. The pinned HarnessRouter runtime still has no verified
-subscription-auth or full-workspace-snapshot proof.
+Claude session continuation remains unimplemented. Codex still has no verified
+actual-model signal, including on the completed Worker turn. The pinned
+HarnessRouter runtime still has no verified subscription-auth or
+full-workspace-snapshot proof.
