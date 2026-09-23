@@ -172,22 +172,33 @@ owns those transitions and binds the evidence to the run's pinned base.
 
 ## Proof record
 
-Live proof is in progress on run `run_8931540b-d039-4f2d-a92b-e1a1b3658857`,
-pinned to disposable base `14eb32bf56f584043d4466b6eacb0ae39f622576`. Three
-successful workflow role calls are recorded: Codex Planner, Codex Orchestrator,
-and AGY Worker. Earlier diagnostic CLI turns also occurred; they are separate
-from these successful role calls, and their aggregate invocation count is not
-included in the successful-role count. Aggregate live CLI invocations
-(including diagnostics): **pending reconciliation**. The Claude Reviewer call
-is pending because of the Claude quota limit; no Reviewer call or retry is
-claimed. No provider request count is available.
+The four-role live proof is complete through Reviewer on run
+`run_8931540b-d039-4f2d-a92b-e1a1b3658857`, pinned to disposable base
+`14eb32bf56f584043d4466b6eacb0ae39f622576`. The proof summary records 12
+session-confirmed live CLI turns including diagnostics: Codex CLI 4 (2
+diagnostic), AGY 6 (5 diagnostic), and Claude Code 2 (one quota-limited failed
+Planner turn and one successful Reviewer turn). One additional failed Claude
+submission has an invocation record but no session ID or execution-stage
+evidence, so whether the CLI process started is unconfirmed. These 12 turns
+include diagnostics and are distinct from the four successful workflow role
+calls. Underlying provider request counts are unavailable.
 
 | Role | Harness/model | Response ID | Session/conversation ID | Observed model | Reported usage |
 | --- | --- | --- | --- | --- | --- |
 | Planner | Codex CLI / `gpt-6-sol` | `resp_52dbeb3d-b3a3-4c07-a123-bb3788a7f61c` | `01a0cd11-ffe9-77d2-881f-40f42bdb3d25` | Unavailable | Input 56,420; output 515; cached input 53,248; other fields unavailable |
 | Orchestrator | Codex CLI / `gpt-6-sol` | `resp_b58ecd52-8530-488b-8a8a-626a48c38f41` | `01a0cd12-6994-7ce1-ab09-14212af864ec` | Unavailable | Input 14,073; output 156; cached input 11,776; other fields unavailable |
 | Worker | `antigravity-cli` / `gemini-3.8-flash-low` | `resp_f837db7f-95f2-4a79-ba44-78c3cff31c4a` | `fc97e7fb-24a9-4e52-8e83-536e75176e24` | `gemini-3.8-flash-low` | Input 18,442; output 284; thinking 0; cached input 0; total 18,726 |
-| Reviewer | Claude Code / pending | Pending | Pending | Pending | Pending |
+| Reviewer | Claude Code / `sonnet` | `resp_3ef89ac8-462a-4ca3-833e-1838228188ba` | `45b25219-a910-4b5f-91be-e518b437d818` | `claude-sonnet-5` | Input 2; output 391; cached input 3,397; runtime 5,305 ms; total tokens unavailable |
+
+Reviewer recommendation `recommendation_789b30c8-05f0-4e85-a0f5-b2b5643f4c2b`
+was `recommend`, with read-only mode and no mutation attempt. Aggregate usage
+reported across all session-confirmed turns:
+
+| Harness | Turns | Reported usage |
+| --- | ---: | --- |
+| Codex CLI | 4 | Input 141,780; output 1,339; cached input 128,640; total tokens unavailable |
+| AGY | 6 (4 usage-bearing) | Input 60,023; output 1,403; total 61,426; thinking 785; cached input 0 |
+| Claude Code | 2 | Input 2; output 391; cached input 3,397; total tokens unavailable (quota-limited turn reported zero input/output) |
 
 AGY used `view_file`, `replace_file_content`, and `view_file` in the isolated
 Worker workspace. Foreman verified the complete one-entry snapshot against the
@@ -202,9 +213,10 @@ addition was:
 The configured `grep -Fx` validation for `AGY Flash made this disposable
 change.` passed with exit code 0. Orchestrator inbox digest:
 `3c4459b99134a33057a147167988ff706d0d2e55cf1eb7e1c2fa028c7361deb5`.
-Deterministic fixtures passed separately: Foreman 70/70 and bridge 36/36
-outside the sandbox. Fixture results are not live model calls. Reviewer
-evidence remains pending; human approval and Git promotion remain untouched.
+Deterministic fixtures passed separately outside the sandbox: Foreman 72/72
+and bridge 37/37. Fixture results are not live model calls. Human approval
+remains null and Git promotion remains not started; both are reserved for the
+operator's decision in the UI.
 
 ## Current limitations
 

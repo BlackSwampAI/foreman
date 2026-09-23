@@ -18,9 +18,14 @@ choices in the UI.
 Follow [the three-harness workflow guide](docs/three-harness-workflow.md) to
 start the local bridge, configure a pinned workspace and validation policy,
 and use the Planner → Orchestrator → Worker → Reviewer evidence flow. Live
-proof is in progress: Planner, Orchestrator, and Worker calls succeeded;
-Reviewer evidence is pending. Deterministic bridge fixtures are not live
-provider evidence. The guide records current results and outstanding proof.
+four-role proof is complete through Reviewer. The proof summary records 12
+session-confirmed live CLI turns including diagnostics (Codex 4, AGY 6, Claude
+2); one additional Claude submission has no session or execution-stage evidence
+and is not counted as a confirmed CLI start. Deterministic bridge fixtures are
+not live provider evidence. Current deterministic suites passed 72/72 Foreman
+tests and 37/37 bridge tests. Human approval and Git promotion remain for the
+operator in the UI. The guide records the role IDs, usage, verification, and
+validation evidence.
 
 ## Run locally
 
