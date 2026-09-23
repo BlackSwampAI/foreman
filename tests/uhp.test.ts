@@ -104,8 +104,16 @@ describe("UHP adapter", () => {
   });
 
   it("requires UHP protocol/version identity and supports forced discovery refresh", async () => {
-    const oldServer = await fixture({ versions: ["2026-08-11"] });
-    await expect(new UhpClient({ baseUrl: oldServer.baseUrl }).discover()).rejects.toThrow("does not advertise supported protocol version");
+    const oldServer = await fixture({ versions: ["2026-08-11"], omitResponseHarnessId: true });
+    const oldClient = new UhpClient({ baseUrl: oldServer.baseUrl, harnessId: "chrn_fixture", model: "model-fixture" });
+    const oldDiscovery = await oldClient.discover();
+    expect(oldDiscovery.version).toBe("2026-08-11");
+    const oldResult = await oldClient.submit({ submissionId: "old-s", assignmentId: "old-a", runId: "old-r", roleId: "worker", taskId: "old-t", projectId: "old-p", prompt: "work", config: {}, idempotencyKey: "old-key" });
+    expect(oldResult.selectedHarnessId).toBe("chrn_fixture");
+    expect(oldServer.requests.filter((request) => request.path !== "/v1/uhp").every((request) => request.headers["uhp-version"] === "2026-08-11")).toBe(true);
+    expect(oldServer.requests.find((request) => request.path === "/v1/responses")?.headers["uhp-version"]).toBe("2026-08-11");
+    const unsupported = await fixture({ versions: ["2026-07-01"] });
+    await expect(new UhpClient({ baseUrl: unsupported.baseUrl }).discover()).rejects.toThrow("does not advertise a supported protocol version");
     const wrongProtocol = await fixture({ protocol: "not-uhp" });
     await expect(new UhpClient({ baseUrl: wrongProtocol.baseUrl }).discover()).rejects.toThrow("protocol='uhp'");
     const current = await fixture();

@@ -1,4 +1,5 @@
 export const UHP_VERSION = "2026-09-12";
+export const UHP_SUPPORTED_VERSIONS = [UHP_VERSION, "2026-08-11"] as const;
 
 export type UhpTerminalStatus = "completed" | "failed" | "incomplete" | "cancelled";
 
@@ -33,6 +34,7 @@ export interface UhpSubmitResult {
   requestedModel?: string;
   modelFallback?: boolean;
   selectedHarnessId?: string;
+  reportedHarnessId?: string;
   boundsApplied?: boolean;
   ignoredFields?: string[];
   usage?: UhpUsage | null;
@@ -132,19 +134,19 @@ export class UhpClient implements UhpAdapter {
   private async doDiscover(): Promise<UhpDiscovery> {
     const info = await this.requestJson("GET", "v1/uhp", undefined, false);
     if (info.protocol !== "uhp") throw new UhpError("UHP discovery response did not identify protocol='uhp'");
-    if (!Array.isArray(info.versions) || !info.versions.every((version) => typeof version === "string") || !info.versions.includes(UHP_VERSION)) {
-      throw new UhpError(`UHP server does not advertise supported protocol version '${UHP_VERSION}'`);
-    }
+    const advertisedVersions = info.versions;
+    if (!Array.isArray(advertisedVersions) || !advertisedVersions.every((candidate) => typeof candidate === "string")) throw new UhpError("UHP discovery response did not include a valid versions list");
+    const version = UHP_SUPPORTED_VERSIONS.find((candidate) => advertisedVersions.includes(candidate));
+    if (!version) throw new UhpError(`UHP server does not advertise a supported protocol version (supported: ${UHP_SUPPORTED_VERSIONS.join(", ")})`);
     const defaultVersion = stringAt(info, ["default_version"]);
-    if (!defaultVersion || !info.versions.includes(defaultVersion)) throw new UhpError("UHP discovery response default_version was not in versions");
+    if (!defaultVersion || !advertisedVersions.includes(defaultVersion)) throw new UhpError("UHP discovery response default_version was not in versions");
     if (this.discoveryResponseVersion !== defaultVersion) throw new UhpError(`UHP discovery header version '${this.discoveryResponseVersion ?? "missing"}' did not match default_version '${defaultVersion}'`);
-    const version = UHP_VERSION;
     const capabilities = { idempotency: false, streaming: false, cancellation: false, sessions: false, ...Object.fromEntries(Object.entries(info.capabilities && typeof info.capabilities === "object" ? info.capabilities : {}).map(([key, value]) => [key, value === true])) };
-    const harnessPayload = await this.requestJson("GET", "v1/harnesses", undefined, true, UHP_VERSION);
+    const harnessPayload = await this.requestJson("GET", "v1/harnesses", undefined, true, version);
     const harnesses = requiredObjectList(harnessPayload, "harnesses", "UHP harness discovery").filter((item): item is UhpHarness => typeof item.id === "string");
     const harnessModels: Record<string, UhpModel[]> = {};
     for (const harness of harnesses) {
-      const modelsPayload = await this.requestJson("GET", `v1/harnesses/${encodeURIComponent(harness.id)}/models`, undefined, true, UHP_VERSION);
+      const modelsPayload = await this.requestJson("GET", `v1/harnesses/${encodeURIComponent(harness.id)}/models`, undefined, true, version);
       harnessModels[harness.id] = requiredObjectList(modelsPayload, "models", `UHP models for '${harness.id}'`).filter((item): item is UhpModel => typeof item.id === "string");
     }
     const models = Object.entries(harnessModels).flatMap(([harnessId, items]) => items.map((model) => ({ ...model, harnessId })));
@@ -198,7 +200,7 @@ export class UhpClient implements UhpAdapter {
       clearTimeout(timer);
       if (!response.ok) throw await this.httpError(response);
       const negotiated = response.headers.get("UHP-Version");
-      if (negotiated !== UHP_VERSION) throw new UhpError(`UHP version changed or was missing during task submission (${UHP_VERSION} -> ${negotiated ?? "missing"})`);
+      if (negotiated !== discovery.version) throw new UhpError(`UHP version changed or was missing during task submission (${discovery.version} -> ${negotiated ?? "missing"})`);
       const contentType = response.headers.get("content-type") ?? "";
       let final: UhpResponse;
       if (contentType.includes("text/event-stream")) final = await this.readSse(response, controller, input.onEvent);
@@ -214,9 +216,9 @@ export class UhpClient implements UhpAdapter {
       if (actualModel && actualModel !== model.id && !modelFallback) throw new UhpError(`UHP ran model '${actualModel}' although '${model.id}' was requested`);
       if (modelFallback && responseMetadata.requested_model !== model.id) throw new UhpError(`UHP reported a model substitution inconsistent with request '${model.id}'`);
       if (modelFallback && actualModel === model.id) throw new UhpError("UHP marked the requested model as substituted but returned that same model");
-      const actualHarnessId = responseMetadata.harness_id;
-      if (typeof actualHarnessId !== "string") throw new UhpError("UHP response did not report the selected harness");
-      if (actualHarnessId !== harness.id) throw new UhpError(`UHP ran harness '${actualHarnessId}' although '${harness.id}' was requested`);
+      const reportedHarnessId = responseMetadata.harness_id;
+      if (reportedHarnessId !== undefined && typeof reportedHarnessId !== "string") throw new UhpError("UHP response reported an invalid selected harness");
+      if (typeof reportedHarnessId === "string" && reportedHarnessId !== harness.id) throw new UhpError(`UHP ran harness '${reportedHarnessId}' although '${harness.id}' was requested`);
       const sessionId = getSessionId(final) ?? getSessionId(responseObject);
       if (!sessionId) throw new UhpError("UHP response did not report its session id");
       const ignoredFields = Array.isArray(responseMetadata.ignored_fields) ? responseMetadata.ignored_fields.filter((field): field is string => typeof field === "string") : [];
@@ -227,7 +229,10 @@ export class UhpClient implements UhpAdapter {
         status,
         outputText: extractOutputText(responseObject),
         ...(actualModel ? { actualModel } : {}), requestedModel: model.id, modelFallback,
-        selectedHarnessId: actualHarnessId,
+        // This is the validated explicit request choice. UHP does not require a response harness
+        // field when the request names one; preserve any server-reported value separately.
+        selectedHarnessId: harness.id,
+        ...(typeof reportedHarnessId === "string" ? { reportedHarnessId } : {}),
         boundsApplied: !ignoredFields.includes("timeout_seconds") && !ignoredFields.includes("max_step"),
         ignoredFields,
         ...(Object.hasOwn(responseObject, "usage") ? { usage: normalizeUsage(responseObject.usage) } : {}),
@@ -247,21 +252,21 @@ export class UhpClient implements UhpAdapter {
     if (discovery.capabilities.cancellation !== true) throw new UhpError("UHP server does not advertise cancellation");
     const response = await this.fetchImpl(this.url(`v1/responses/${encodeURIComponent(input.externalId)}/cancel`), {
       method: "POST",
-      headers: this.headers({ "Idempotency-Key": input.idempotencyKey, "UHP-Version": UHP_VERSION }),
+      headers: this.headers({ "Idempotency-Key": input.idempotencyKey, "UHP-Version": discovery.version }),
       body: "{}",
       signal: AbortSignal.timeout(this.timeoutMs()),
     });
     if (!response.ok) throw await this.httpError(response);
-    if (response.headers.get("UHP-Version") !== UHP_VERSION) throw new UhpError("UHP cancellation response did not use the requested protocol version");
+    if (response.headers.get("UHP-Version") !== discovery.version) throw new UhpError("UHP cancellation response did not use the requested protocol version");
     const body = await response.json() as Record<string, unknown>;
     return { status: typeof body.status === "string" ? body.status : "cancelled" };
   }
 
   async retrieve(responseId: string): Promise<UhpResponse> {
-    await this.discover();
-    const response = await this.fetchImpl(this.url(`v1/responses/${encodeURIComponent(responseId)}`), { headers: this.headers({ "UHP-Version": UHP_VERSION }), signal: AbortSignal.timeout(this.timeoutMs()) });
+    const discovery = await this.discover();
+    const response = await this.fetchImpl(this.url(`v1/responses/${encodeURIComponent(responseId)}`), { headers: this.headers({ "UHP-Version": discovery.version }), signal: AbortSignal.timeout(this.timeoutMs()) });
     if (!response.ok) throw await this.httpError(response);
-    if (response.headers.get("UHP-Version") !== UHP_VERSION) throw new UhpError("UHP retrieval response did not use the requested protocol version");
+    if (response.headers.get("UHP-Version") !== discovery.version) throw new UhpError("UHP retrieval response did not use the requested protocol version");
     return this.parseResponse(response);
   }
 
