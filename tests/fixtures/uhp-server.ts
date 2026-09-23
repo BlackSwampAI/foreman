@@ -3,6 +3,8 @@ import { once } from "node:events";
 
 export interface UhpFixtureOptions {
   capabilityIdempotency?: boolean;
+  capabilities?: Record<string, unknown>;
+  omitCapabilities?: string[];
   terminalStatus?: "completed" | "failed" | "incomplete" | "cancelled";
   holdUntilCancel?: boolean;
   holdRole?: string;
@@ -36,7 +38,9 @@ export async function startUhpFixture(options: UhpFixtureOptions = {}): Promise<
         const versions = options.versions ?? ["2026-09-12", "2026-08-11"];
         const defaultVersion = versions[0];
         res.writeHead(200, { "Content-Type": "application/json", "UHP-Version": defaultVersion ?? "2026-09-12" });
-        res.end(JSON.stringify({ object: "uhp.discovery", protocol: options.protocol ?? "uhp", versions, default_version: defaultVersion, conformance_class: "core", capabilities: { idempotency: options.capabilityIdempotency ?? true }, implementation: { name: "fixture-router", version: "test" } }));
+        const capabilities: Record<string, unknown> = { idempotency: options.capabilityIdempotency ?? true, streaming: true, cancellation: true, sessions: true, ...options.capabilities };
+        for (const capability of options.omitCapabilities ?? []) delete capabilities[capability];
+        res.end(JSON.stringify({ object: "uhp.discovery", protocol: options.protocol ?? "uhp", versions, default_version: defaultVersion, conformance_class: "core", capabilities, implementation: { name: "fixture-router", version: "test" } }));
       } else if (path === "/v1/harnesses") {
         json(res, 200, { harnesses: [{ id: "chrn_fixture", base: "codex", maxStep: 40, timeoutSeconds: 180 }, { id: "chrn_other", base: "hermes" }] });
       } else if (path === "/v1/harnesses/chrn_fixture/models") {

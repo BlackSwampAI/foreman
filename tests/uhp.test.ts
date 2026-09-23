@@ -86,6 +86,23 @@ describe("UHP adapter", () => {
     await expect(unavailable.discover()).rejects.toThrow("unavailable for harness");
   });
 
+  it("requires advertised streaming, cancellation, and sessions capabilities when using each feature", async () => {
+    const required = { submissionId: "s", assignmentId: "a", runId: "r", roleId: "role", taskId: "t", projectId: "p", prompt: "work", config: {}, idempotencyKey: "key" };
+    const noStreaming = await fixture({ capabilities: { streaming: false } });
+    const noStreamingClient = new UhpClient({ baseUrl: noStreaming.baseUrl, harnessId: "chrn_fixture", model: "model-fixture" });
+    await expect(noStreamingClient.submit(required)).rejects.toThrow("does not advertise streaming");
+    expect(noStreaming.executionCount).toBe(0);
+
+    const noCancellation = await fixture({ capabilities: { cancellation: false } });
+    const noCancellationClient = new UhpClient({ baseUrl: noCancellation.baseUrl, harnessId: "chrn_fixture", model: "model-fixture" });
+    await expect(noCancellationClient.cancel({ submissionId: "s", externalId: "resp_fixture", idempotencyKey: "cancel" })).rejects.toThrow("does not advertise cancellation");
+
+    const noSessions = await fixture({ omitCapabilities: ["sessions"] });
+    const noSessionsClient = new UhpClient({ baseUrl: noSessions.baseUrl, harnessId: "chrn_fixture", model: "model-fixture" });
+    await expect(noSessionsClient.submit({ ...required, config: { previousResponseId: "resp_prior" } })).rejects.toThrow("does not advertise sessions");
+    expect((await noSessionsClient.discover()).capabilities.sessions).toBe(false);
+  });
+
   it("requires UHP protocol/version identity and supports forced discovery refresh", async () => {
     const oldServer = await fixture({ versions: ["2026-08-11"] });
     await expect(new UhpClient({ baseUrl: oldServer.baseUrl }).discover()).rejects.toThrow("does not advertise supported protocol version");

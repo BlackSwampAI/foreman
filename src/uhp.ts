@@ -139,7 +139,7 @@ export class UhpClient implements UhpAdapter {
     if (!defaultVersion || !info.versions.includes(defaultVersion)) throw new UhpError("UHP discovery response default_version was not in versions");
     if (this.discoveryResponseVersion !== defaultVersion) throw new UhpError(`UHP discovery header version '${this.discoveryResponseVersion ?? "missing"}' did not match default_version '${defaultVersion}'`);
     const version = UHP_VERSION;
-    const capabilities = Object.fromEntries(Object.entries(info.capabilities && typeof info.capabilities === "object" ? info.capabilities : {}).map(([key, value]) => [key, value === true]));
+    const capabilities = { idempotency: false, streaming: false, cancellation: false, sessions: false, ...Object.fromEntries(Object.entries(info.capabilities && typeof info.capabilities === "object" ? info.capabilities : {}).map(([key, value]) => [key, value === true])) };
     const harnessPayload = await this.requestJson("GET", "v1/harnesses", undefined, true, UHP_VERSION);
     const harnesses = requiredObjectList(harnessPayload, "harnesses", "UHP harness discovery").filter((item): item is UhpHarness => typeof item.id === "string");
     const harnessModels: Record<string, UhpModel[]> = {};
@@ -158,6 +158,7 @@ export class UhpClient implements UhpAdapter {
   async submit(input: UhpSubmitInput): Promise<UhpSubmitResult> {
     const discovery = await this.discover();
     if (discovery.capabilities.idempotency !== true) throw new UhpError("UHP server does not advertise idempotency; refusing a non-idempotent task submission");
+    if (discovery.capabilities.streaming !== true) throw new UhpError("UHP server does not advertise streaming; refusing a task submission that requires progress and live cancellation");
     if (!input.idempotencyKey.trim()) throw new Error("idempotencyKey is required");
     const configHarness = input.config.harnessId ?? this.options.harnessId;
     const configModel = input.config.model ?? this.options.model;
@@ -177,6 +178,7 @@ export class UhpClient implements UhpAdapter {
     try {
       const previousResponseId = input.config.previousResponseId;
       if (previousResponseId !== undefined && (typeof previousResponseId !== "string" || !previousResponseId.trim())) throw new Error("config.previousResponseId must be a non-empty response id when provided");
+      if (typeof previousResponseId === "string" && discovery.capabilities.sessions !== true) throw new UhpError("UHP server does not advertise sessions; refusing response continuation");
       const response = await this.fetchImpl(this.url("v1/responses"), {
         method: "POST",
         headers: this.headers({ "Content-Type": "application/json", Accept: "text/event-stream", "Idempotency-Key": input.idempotencyKey, "UHP-Version": discovery.version }),
@@ -241,7 +243,8 @@ export class UhpClient implements UhpAdapter {
 
   async cancel(input: { submissionId: string; externalId?: string; idempotencyKey: string }): Promise<{ status: string }> {
     if (!input.externalId) throw new UhpError("Cannot cancel UHP task before its response id has been persisted");
-    await this.discover();
+    const discovery = await this.discover();
+    if (discovery.capabilities.cancellation !== true) throw new UhpError("UHP server does not advertise cancellation");
     const response = await this.fetchImpl(this.url(`v1/responses/${encodeURIComponent(input.externalId)}/cancel`), {
       method: "POST",
       headers: this.headers({ "Idempotency-Key": input.idempotencyKey, "UHP-Version": UHP_VERSION }),
