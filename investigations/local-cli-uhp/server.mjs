@@ -4,15 +4,22 @@
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, readFile, rename, writeFile, readdir, lstat, readlink, realpath, rm, access, symlink, chmod, open } from 'node:fs/promises';
+import { accessSync, constants as fsConstants } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, resolve, dirname } from 'node:path';
+import { posix } from 'node:path';
+import { TextDecoder } from 'node:util';
 
 const VERSION = '2026-09-12';
+const utf8 = new TextDecoder('utf-8', { fatal: true });
 const PORT = Number(process.env.LOCAL_CLI_UHP_PORT ?? 8787);
 const STATE = resolve(process.env.LOCAL_CLI_UHP_STATE ?? join(tmpdir(), 'local-cli-uhp-state.json'));
 const ROOT = resolve(process.env.LOCAL_CLI_UHP_WORK ?? join(tmpdir(), 'local-cli-uhp-work'));
 if (ROOT !== tmpdir() && !ROOT.startsWith(`${tmpdir()}/`)) throw new Error('LOCAL_CLI_UHP_WORK must be under the system temporary directory');
+const SOURCE_REPO = process.env.LOCAL_CLI_UHP_SOURCE_REPO ? resolve(process.env.LOCAL_CLI_UHP_SOURCE_REPO) : undefined;
+const BWRAP = process.env.LOCAL_CLI_UHP_BWRAP ?? 'bwrap';
 const MAX_PROMPT = 16_000;
 const MAX_OUTPUT = 64_000;
 const MAX_TIMEOUT = 120;
@@ -21,7 +28,8 @@ const HARNESS = {
   codex: { id: 'codex-cli', bin: process.env.CODEX_BIN ?? 'codex', authDir: process.env.CODEX_HOME, model: process.env.CODEX_MODEL },
 };
 const tasks = new Map();
-let state = { keys: {}, responses: {} };
+const workspaces = new Map();
+let state = { keys: {}, responses: {}, workspaces: {} };
 
 async function persist() {
   await mkdir(resolve(STATE, '..'), { recursive: true });
@@ -31,6 +39,12 @@ async function persist() {
 }
 async function load() {
   try { state = JSON.parse(await readFile(STATE, 'utf8')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  state.workspaces ??= {};
+  for (const [id, item] of Object.entries(state.workspaces)) {
+    if (!/^ws_[0-9a-f-]{36}$/.test(id) || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(item.baseCommit) || !SOURCE_REPO) continue;
+    const dir = join(ROOT, id);
+    try { if ((await lstat(dir)).isDirectory()) workspaces.set(id, { id, baseCommit: item.baseCommit, dir, sourceRepo: await realpath(SOURCE_REPO), responseId: item.responseId }); } catch {}
+  }
   for (const [id, r] of Object.entries(state.responses)) {
     if (r.status === 'in_progress') { r.status = 'failed'; r.error = { message: 'Server restarted before CLI completion; replay will not spawn a duplicate' }; await persist(); }
     tasks.set(id, { response: r });
@@ -42,7 +56,11 @@ function send(res, status, body, extra = {}) {
 function body(req) { return new Promise((resolveBody, reject) => { let s=''; req.on('data', c => { s += c; if (s.length > 256_000) reject(Error('body too large')); }); req.on('end', () => { try { resolveBody(JSON.parse(s || '{}')); } catch { reject(Error('invalid JSON')); } }); req.on('error', reject); }); }
 function event(res, type, sequence, response) { res.write(`data: ${JSON.stringify({ type, sequence_number: sequence, response })}\n\n`); }
 function cliFor(harnessId) { return Object.values(HARNESS).find(h => h.id === harnessId); }
-function configured(h) { return !!h?.authDir && typeof h.model === 'string' && h.model.trim() !== '' && h.model.trim().toLowerCase() !== 'undefined'; }
+function executableConfigured(bin) {
+  if (bin.includes('/')) { try { accessSync(bin, fsConstants.X_OK); return true; } catch { return false; } }
+  return (process.env.PATH ?? '').split(':').some(dir => { try { accessSync(join(dir, bin), fsConstants.X_OK); return true; } catch { return false; } });
+}
+function configured(h) { return !!h?.authDir && typeof h.model === 'string' && h.model.trim() !== '' && h.model.trim().toLowerCase() !== 'undefined' && (h.id !== 'claude-code' || (!!SOURCE_REPO && executableConfigured(BWRAP))); }
 function outputText(r) { return typeof r.output_text === 'string' ? r.output_text : ''; }
 function reportedModel(value) { return typeof value === 'string' && value.trim() !== '' && value.trim().toLowerCase() !== 'undefined' ? value.trim() : undefined; }
 
@@ -61,18 +79,263 @@ function parseCodex(text) {
   return { text: messages.join('\n'), model: reportedModel(done?.model) ?? reportedModel(thread?.model), session: thread?.thread_id, usage: usage && typeof usage === 'object' ? usage : undefined };
 }
 function cliArgs(kind, model, timeout, maxStep) {
-  if (kind === 'claude') return ['-p', '--output-format', 'stream-json', '--verbose', '--model', model, '--max-turns', String(Math.min(maxStep, 10)), '--tools', ''];
+  if (kind === 'claude') return ['-p', '--output-format', 'stream-json', '--verbose', '--model', model, '--max-turns', String(Math.min(maxStep, 10)), '--restricted', '--strict-mcp-config', '--permission-mode', 'acceptEdits', '--tools', 'Read,Edit,Write'];
   return ['exec', '--json', '--ephemeral', '--sandbox', 'read-only', '--ignore-user-config', '--skip-git-repo-check', '--model', model, '-'];
+}
+
+function validRelativePath(path) {
+  return typeof path === 'string' && path.length > 0 && !path.startsWith('/') && !path.includes('\\') && !path.includes('\0') && path.split('/').every(p => p && p !== '.' && p !== '..' && p !== '.git');
+}
+function linkEscapes(path, target) {
+  if (!target || target.includes('\0') || posix.isAbsolute(target)) return true;
+  const parent = posix.dirname(path);
+  const resolved = posix.normalize(posix.join(parent, target));
+  return resolved === '..' || resolved.startsWith('../');
+}
+function git(repo, args, maxBytes = 32 * 1024 * 1024) {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn('git', ['-C', repo, ...args], { stdio: ['ignore', 'pipe', 'pipe'], shell: false });
+    const out = []; let size = 0; let err = '';
+    child.stdout.on('data', chunk => { size += chunk.length; if (size > maxBytes) { child.kill('SIGKILL'); reject(Error('Git output limit exceeded')); } else out.push(chunk); });
+    child.stderr.on('data', chunk => { if (err.length < 4000) err += chunk.toString('utf8').slice(0, 4000 - err.length); });
+    child.once('error', reject);
+    child.once('close', code => code === 0 ? resolvePromise(Buffer.concat(out, size)) : reject(Error(`git ${args[0]} failed (${code}): ${err.slice(0, 1000)}`)));
+  });
+}
+async function seedWorkspace(baseCommit) {
+  if (!SOURCE_REPO) throw Error('Workspace seeding requires LOCAL_CLI_UHP_SOURCE_REPO');
+  if (typeof baseCommit !== 'string' || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(baseCommit)) throw Error('A full base commit SHA is required');
+  const repo = await realpath(SOURCE_REPO);
+  const sha = baseCommit.toLowerCase();
+  const resolved = (await git(repo, ['rev-parse', '--verify', '--end-of-options', `${sha}^{commit}`], 256)).toString('ascii').trim().toLowerCase();
+  if (resolved !== sha) throw Error('Git did not resolve the requested commit SHA exactly');
+  const tree = await git(repo, ['ls-tree', '-rz', '--full-tree', '-r', sha]);
+  let treeText;
+  try { treeText = utf8.decode(tree); } catch { throw Error('Git tree contains a non-UTF-8 path'); }
+  const records = tree.length ? treeText.split('\0').filter(Boolean) : [];
+  if (records.length > 100_000) throw Error('Seed snapshot entry limit exceeded');
+  let total = 0;
+  const parsed = [];
+  for (const record of records) {
+    const tab = record.indexOf('\t'); const [mode, type, oid] = record.slice(0, tab).split(' '); const path = record.slice(tab + 1);
+    if (!validRelativePath(path) || type !== 'blob' || !['100644', '100755', '120000'].includes(mode)) throw Error(`Unsupported or unsafe Git tree entry: ${path}`);
+    const sizeText = (await git(repo, ['cat-file', '-s', oid], 64)).toString('ascii').trim();
+    const size = Number(sizeText);
+    if (!/^\d+$/.test(sizeText) || !Number.isSafeInteger(size) || size > 16 * 1024 * 1024 || (total += size) > 256 * 1024 * 1024) throw Error(`Seed snapshot size limit exceeded: ${path}`);
+    parsed.push({ mode, oid, path, size });
+    if (mode === '120000') {
+      let target;
+      try { target = utf8.decode(await git(repo, ['cat-file', 'blob', oid], 16 * 1024 * 1024)); } catch { throw Error(`Non-UTF-8 symlink target: ${path}`); }
+      if (linkEscapes(path, target)) throw Error(`Seed symlink escapes workspace: ${path}`);
+    }
+  }
+  const id = `ws_${randomUUID()}`; const dir = join(ROOT, id);
+  await mkdir(dir, { recursive: false, mode: 0o700 });
+  try {
+    for (const entry of parsed) {
+      const target = join(dir, ...entry.path.split('/'));
+      await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+      const bytes = await git(repo, ['cat-file', 'blob', entry.oid], 16 * 1024 * 1024);
+      if (bytes.length !== entry.size) throw Error(`Pinned Git blob changed or was truncated: ${entry.path}`);
+      if (entry.mode === '120000') await symlink(bytes.toString('utf8'), target);
+      else { await writeFile(target, bytes, { mode: entry.mode === '100755' ? 0o755 : 0o644, flag: 'wx' }); await chmod(target, entry.mode === '100755' ? 0o755 : 0o644); }
+    }
+    const ws = { id, baseCommit: sha, dir, sourceRepo: repo };
+    workspaces.set(id, ws);
+    state.workspaces[id] = { baseCommit: sha }; await persist();
+    return ws;
+  } catch (error) { await rm(dir, { recursive: true, force: true }); throw error; }
+}
+async function snapshotWorkspace(ws) {
+  const entries = []; const errors = []; let total = 0;
+  async function walk(dir, prefix = '') {
+    let names; let directoryStat;
+    try { directoryStat = await lstat(dir); names = await readdir(dir, { encoding: 'buffer' }); } catch (error) { errors.push({ path: prefix || '.', error: `unreadable_directory:${error.code ?? 'unknown'}` }); return; }
+    names.sort(Buffer.compare);
+    for (const rawName of names) {
+      let name;
+      try { name = utf8.decode(rawName); } catch { errors.push({ path: prefix || '.', error: 'non_utf8_path_component', name_base64: rawName.toString('base64') }); continue; }
+      const path = prefix ? `${prefix}/${name}` : name;
+      if (!validRelativePath(path)) { errors.push({ path, error: 'unsafe_path' }); continue; }
+      if (entries.length + errors.length >= 100_000) { errors.push({ path, error: 'entry_limit_exceeded' }); return; }
+      const full = join(dir, name); let st;
+      try { st = await lstat(full); } catch (error) { errors.push({ path, error: `unreadable:${error.code ?? 'unknown'}` }); continue; }
+      if (name === '.git') { errors.push({ path, error: 'git_metadata_not_allowed' }); continue; }
+      if (st.isDirectory()) { await walk(full, path); continue; }
+      if (st.isSymbolicLink()) {
+        try {
+          const targetBytes = await readlink(full, { encoding: 'buffer' });
+          let target;
+          try { target = utf8.decode(targetBytes); } catch { errors.push({ path, error: 'non_utf8_symlink_target' }); continue; }
+          if (linkEscapes(path, target)) { errors.push({ path, error: 'symlink_escapes_workspace' }); continue; }
+          const after = await lstat(full);
+          if (after.ino !== st.ino || !after.isSymbolicLink()) { errors.push({ path, error: 'file_changed_during_snapshot' }); continue; }
+          const bytes = targetBytes;
+          total += bytes.length;
+          if (bytes.length > 16 * 1024 * 1024 || total > 256 * 1024 * 1024) { errors.push({ path, error: 'size_limit_exceeded' }); continue; }
+          entries.push({ path, kind: 'symlink', mode: '120000', size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), target });
+        } catch (error) { errors.push({ path, error: `unreadable_symlink:${error.code ?? 'unknown'}` }); }
+        continue;
+      }
+      if (!st.isFile()) { errors.push({ path, error: 'unsupported_file_type' }); continue; }
+      if (st.size > 16 * 1024 * 1024 || total + st.size > 256 * 1024 * 1024) { errors.push({ path, error: 'size_limit_exceeded' }); continue; }
+      try {
+        const bytes = await readFile(full); total += bytes.length;
+        if (bytes.length !== st.size) { errors.push({ path, error: 'file_changed_during_snapshot' }); continue; }
+        const after = await lstat(full);
+        if (after.ino !== st.ino || after.size !== st.size || after.mode !== st.mode || after.mtimeMs !== st.mtimeMs) { errors.push({ path, error: 'file_changed_during_snapshot' }); continue; }
+        const mode = (st.mode & 0o111) ? '100755' : '100644';
+        entries.push({ path, kind: 'file', mode, size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), contentBase64: bytes.toString('base64') });
+      } catch (error) { errors.push({ path, error: `unreadable:${error.code ?? 'unknown'}` }); }
+    }
+    try {
+      const afterNames = await readdir(dir, { encoding: 'buffer' }); afterNames.sort(Buffer.compare);
+      if (afterNames.length !== names.length || afterNames.some((name, index) => !name.equals(names[index]))) errors.push({ path: prefix || '.', error: 'directory_changed_during_snapshot' });
+      const afterDir = await lstat(dir);
+      if (afterDir.ino !== directoryStat.ino || !afterDir.isDirectory()) errors.push({ path: prefix || '.', error: 'directory_changed_during_snapshot' });
+    } catch (error) { errors.push({ path: prefix || '.', error: `unreadable_directory:${error.code ?? 'unknown'}` }); }
+  }
+  await walk(ws.dir);
+  return { complete: errors.length === 0, base_commit: ws.baseCommit, entries, errors };
+}
+
+async function runtimeFiles(binary, mountBinary = false) {
+  const files = new Set(); const inspected = new Set();
+  async function include(target, mount = true) {
+    if (inspected.has(target)) return;
+    inspected.add(target); if (mount) files.add(target);
+    const handle = await open(target, 'r'); const header = Buffer.alloc(4096); const { bytesRead } = await handle.read(header, 0, header.length, 0); await handle.close();
+    const magic = header.subarray(0, 4);
+    if (bytesRead >= 4 && magic.equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]))) {
+      const result = await spawnCaptured('ldd', [target], {}, 5000);
+      if (result.code !== 0 && !result.stdout.includes('not a dynamic executable')) throw Error('Could not inspect CLI runtime dependencies');
+      if (result.stdout.includes('not found')) throw Error('CLI runtime dependency is unavailable');
+      for (const match of result.stdout.matchAll(/(?:=>\s+|^\s*)(\/\S+?)(?:\s+\(|$)/gm)) files.add(match[1]);
+      return;
+    }
+    const newline = header.indexOf(10);
+    const line = header.subarray(0, newline < 0 ? bytesRead : newline).toString('utf8');
+    const shebang = line.match(/^#!\s*(\S+)(?:\s+(\S+))?/);
+    if (!shebang) throw Error(`runtime_file_type_unsupported:${magic.toString('hex')}`);
+    if (shebang[1].endsWith('/env') && shebang[2]) {
+      const interpreter = await resolveBinary(shebang[2]);
+      const interpreterPath = process.execPath === interpreter || process.execPath === shebang[2] ? process.execPath : interpreter;
+      await include(interpreterPath);
+      await include(shebang[1]);
+    } else await include(shebang[1]);
+  }
+  if (binary) await include(binary, mountBinary);
+  await include(process.execPath);
+  for (const path of ['/etc/resolv.conf', '/etc/ssl/certs/ca-certificates.crt']) {
+    try { await access(path); files.add(path); } catch {}
+  }
+  return [...files];
+}
+function bwrapBaseArgs(ws, runtime = []) {
+  const dirs = new Set(['/tmp/cli-home', '/opt']);
+  for (const file of runtime) {
+    let parent = dirname(file);
+    while (parent !== '/') { dirs.add(parent); parent = dirname(parent); }
+  }
+  const dirArgs = [...dirs].sort((a, b) => a.split('/').length - b.split('/').length).flatMap(dir => ['--dir', dir]);
+  const mounts = runtime.flatMap(file => ['--ro-bind', file, file]);
+  return ['--die-with-parent', '--new-session', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', ...dirArgs, ...mounts, '--bind', ws.dir, '/workspace', '--chdir', '/workspace', '--ro-bind', ws.authDir, '/auth'];
+}
+async function proveBoundary(ws) {
+  const sentinel = join(ROOT, `${ws.id}.outside-sentinel`); await writeFile(sentinel, 'FOREMAN_OUTSIDE_SENTINEL', { mode: 0o600 });
+  try {
+    const node = await realpath(process.execPath); const runtime = await runtimeFiles(node, true);
+    const script = `const fs=require('node:fs');const p=process.argv[1];try{fs.readFileSync(p);process.exit(31)}catch{}try{fs.writeFileSync(p,'changed');process.exit(32)}catch{}fs.writeFileSync('/workspace/.boundary-probe','ok');if(fs.readFileSync('/workspace/.boundary-probe','utf8')!=='ok')process.exit(33);fs.unlinkSync('/workspace/.boundary-probe')`;
+    const args = [...bwrapBaseArgs(ws, runtime), '--', node, '-e', script, sentinel];
+    const result = await spawnCaptured(BWRAP, args, { HOME: '/tmp/cli-home', CLAUDE_CONFIG_DIR: '/auth' }, 5000);
+    const unchanged = (await readFile(sentinel, 'utf8')) === 'FOREMAN_OUTSIDE_SENTINEL';
+    if (result.code !== 0 || !unchanged) {
+      const diagnostic = boundaryDiagnostic(result, unchanged);
+      ws.boundaryDiagnostic = diagnostic;
+      throw Error(`boundary_probe_failed:${diagnostic.category}:${diagnostic.exit_code ?? 'no_exit'}`);
+    }
+    return { proven: true, evidence: 'outside sentinel unreadable and unmodifiable; assigned workspace writable' };
+  } finally { await rm(sentinel, { force: true }); }
+}
+function boundaryDiagnostic(result, unchanged) {
+  let category = 'probe_failed';
+  if (result.error) {
+    if (/EPERM|operation not permitted|unshare|namespace/i.test(result.error)) category = 'namespace_unavailable';
+    else if (/EACCES|permission denied/i.test(result.error)) category = 'mount_permission_denied';
+    else if (/ENOENT|no such file|not found/i.test(result.error)) category = 'runtime_path_unavailable';
+    else if (result.error.length <= 16 && /^[A-Z]+$/.test(result.error)) category = 'bubblewrap_spawn_failed';
+    else category = 'bubblewrap_failed';
+  } else if (result.signal === 'SIGKILL') category = 'probe_timeout';
+  else if (result.code === 31) category = 'outside_sentinel_readable';
+  else if (result.code === 32) category = 'outside_sentinel_writable';
+  else if (result.code === 33) category = 'workspace_not_writable';
+  else if (!unchanged) category = 'outside_sentinel_modified';
+  return { category, exit_code: Number.isInteger(result.code) ? result.code : null, signal: result.signal ?? null };
+}
+function spawnCaptured(command, args, extraEnv, timeoutMs) {
+  return new Promise((resolvePromise, reject) => {
+    const safeEnv = Object.fromEntries(Object.entries(process.env).filter(([name]) => ['PATH','LANG','LC_ALL'].includes(name)));
+    const child = spawn(command, args, { env: { ...safeEnv, ...extraEnv }, stdio: ['ignore', 'pipe', 'pipe'], shell: false }); let err = ''; let output = ''; let timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+    child.stdout.on('data', c => { if (output.length < 8000) output += c.toString('utf8').slice(0, 8000 - output.length); });
+    child.stderr.on('data', c => { if (err.length < 1000) err += c.toString('utf8').slice(0, 1000 - err.length); });
+    let spawnFailure;
+    child.once('error', error => { spawnFailure = error.code ?? 'spawn_failed'; });
+    child.once('close', (code, signal) => { clearTimeout(timer); resolvePromise({ code, signal, error: spawnFailure ?? err, stdout: output }); });
+  });
+}
+async function runClaudeSandboxed(ws, args, env, prompt) {
+  ws.executionStage = 'resolve_cli';
+  const realBin = await resolveBinary(HARNESS.claude.bin);
+  ws.executionStage = 'resolve_auth';
+  ws.authDir = await realpath(HARNESS.claude.authDir);
+  ws.executionStage = 'boundary_probe';
+  const probe = await proveBoundary(ws);
+  ws.boundary = probe;
+  ws.executionStage = 'runtime_mount';
+  const runtime = await runtimeFiles(realBin);
+  const bargs = [...bwrapBaseArgs(ws, runtime), '--ro-bind', realBin, '/opt/claude', '--', '/opt/claude', ...args];
+  const sandboxEnv = Object.fromEntries(Object.entries(env).filter(([name]) => ['LANG','LC_ALL','TERM'].includes(name)));
+  ws.executionStage = 'cli_spawn';
+  const child = spawn(BWRAP, bargs, { cwd: ROOT, env: { ...sandboxEnv, PATH: '/usr/bin:/bin', HOME: '/tmp/cli-home', CLAUDE_CONFIG_DIR: '/auth' }, shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  ws.executionStage = 'cli_execution';
+  child.stdin.end(prompt); return child;
+}
+async function preflightClaudeRuntime() {
+  if (!HARNESS.claude.authDir) throw Error('CLAUDE_CONFIG_DIR is required for the runtime preflight');
+  const dir = join(ROOT, `preflight-${randomUUID()}`); await mkdir(dir, { recursive: false, mode: 0o700 });
+  const ws = { id: `ws_${randomUUID()}`, dir, authDir: await realpath(HARNESS.claude.authDir) };
+  try {
+    const proof = await proveBoundary(ws);
+    const binary = await resolveBinary(HARNESS.claude.bin);
+    const runtime = await runtimeFiles(binary);
+    const args = [...bwrapBaseArgs(ws, runtime), '--ro-bind', binary, '/opt/claude', '--', '/opt/claude', '--version'];
+    const env = { PATH: '/usr/bin:/bin', HOME: '/tmp/cli-home', CLAUDE_CONFIG_DIR: '/auth' };
+    const result = await spawnCaptured(BWRAP, args, env, 10_000);
+    if (result.code !== 0 || !proof.proven) throw Error('Claude runtime preflight failed');
+    return result.stdout.trim().split(/\r?\n/)[0].slice(0, 200);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+}
+async function resolveBinary(name) {
+  if (name.includes('/')) return realpath(name);
+  for (const dir of (process.env.PATH ?? '').split(':')) {
+    const candidate = join(dir, name);
+    try { await access(candidate); return realpath(candidate); } catch {}
+  }
+  throw Error(`CLI executable not found: ${name}`);
 }
 
 async function runTask(record, prompt) {
   const h = cliFor(record.metadata.harness_id), kind = h.id === 'claude-code' ? 'claude' : 'codex-cli';
-  const work = join(ROOT, record.id); await mkdir(work, { recursive: true, mode: 0o700 });
+  const ws = kind === 'claude' ? workspaces.get(record.metadata.workspace_id) : undefined;
+  const work = ws?.dir ?? join(ROOT, record.id);
+  if (!ws && kind === 'claude') throw Error('Claude workspace binding is unavailable');
+  if (!ws) await mkdir(work, { recursive: true, mode: 0o700 });
   const inheritedNames = new Set(['PATH','HOME','USER','LOGNAME','LANG','LC_ALL','TERM','TMPDIR','TMP','TEMP','XDG_RUNTIME_DIR','SSL_CERT_FILE','SSL_CERT_DIR','NODE_EXTRA_CA_CERTS','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY']);
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => inheritedNames.has(name)));
-  Object.assign(env, kind === 'claude' ? { CLAUDE_CONFIG_DIR: h.authDir } : { CODEX_HOME: h.authDir });
+  Object.assign(env, kind === 'claude' ? { CLAUDE_CONFIG_DIR: '/auth' } : { CODEX_HOME: h.authDir });
   const args = cliArgs(kind, record.requested_model, record.timeout_seconds, record.max_step);
-  const child = spawn(h.bin, args, { cwd: work, env, shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  const child = kind === 'claude' ? await runClaudeSandboxed(ws, args, env, prompt) : spawn(h.bin, args, { cwd: work, env, shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  if (ws?.boundary) record.metadata.execution_boundary = ws.boundary;
   const active = tasks.get(record.id); active.child = child;
   let out = '';
   child.stdout.setEncoding('utf8'); child.stdout.on('data', chunk => { out = (out + chunk).slice(-MAX_OUTPUT * 3); });
@@ -81,7 +344,7 @@ async function runTask(record, prompt) {
   let spawnError;
   let killTimer;
   const timer = setTimeout(() => { child.kill('SIGTERM'); killTimer = setTimeout(() => child.kill('SIGKILL'), 1_000); }, record.timeout_seconds * 1000);
-  child.stdin.end(prompt);
+  if (kind !== 'claude') child.stdin.end(prompt);
   const exit = await new Promise(resolveExit => {
     child.once('error', error => { spawnError = error; resolveExit({ code: null, signal: null }); });
     child.once('close', (code, signal) => resolveExit({ code, signal }));
@@ -120,7 +383,24 @@ function normalizeCliUsage(kind, value) {
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   try {
-    if (req.method === 'GET' && url.pathname === '/v1/uhp') return send(res, 200, { protocol: 'uhp', versions: [VERSION], default_version: VERSION, implementation: { name: 'local-cli-uhp', experimental: true }, capabilities: { streaming: true, idempotency: true, sessions: false, cancellation: true } });
+    if (req.method === 'GET' && url.pathname === '/v1/uhp') return send(res, 200, { protocol: 'uhp', versions: [VERSION], default_version: VERSION, implementation: { name: 'local-cli-uhp', experimental: true }, capabilities: { streaming: true, idempotency: true, sessions: false, cancellation: true, extensions: { foreman_workspace_bridge_v1: { version: 1, seed: !!SOURCE_REPO, complete_snapshot: true, execution_boundary: 'bubblewrap' } } } });
+    if (req.method === 'POST' && url.pathname === '/extensions/foreman-workspace/v1/workspaces') {
+      const b = await body(req); const ws = await seedWorkspace(b.base_commit);
+      return send(res, 201, { workspace_id: ws.id, base_commit: ws.baseCommit });
+    }
+    const snapshotPath = url.pathname.match(/^\/extensions\/foreman-workspace\/v1\/workspaces\/([^/]+)\/snapshot$/);
+    if (req.method === 'GET' && snapshotPath) {
+      const ws = workspaces.get(decodeURIComponent(snapshotPath[1]));
+      if (!ws) return send(res, 404, { error: { code: 'workspace_not_found' } });
+      const response = ws.responseId ? state.responses[ws.responseId] : undefined;
+      if (response?.status === 'in_progress') return send(res, 409, { error: { code: 'workspace_task_in_progress' } });
+      const snapshot = await snapshotWorkspace(ws);
+      if (ws.responseId && response?.status !== 'completed') {
+        snapshot.complete = false;
+        snapshot.errors.push({ path: '.', error: `task_status_${response?.status ?? 'unknown'}` });
+      }
+      return send(res, 200, snapshot);
+    }
     if (req.method === 'GET' && url.pathname === '/v1/harnesses') return send(res, 200, { harnesses: Object.values(HARNESS).filter(configured).map(h => ({ id: h.id, name: h.id })) });
     const models = url.pathname.match(/^\/v1\/harnesses\/([^/]+)\/models$/);
     if (req.method === 'GET' && models) { const h = cliFor(decodeURIComponent(models[1])); return send(res, h && configured(h) ? 200 : 404, h && configured(h) ? { models: [{ id: h.model, available: true, name: h.model }] } : { models: [] }); }
@@ -138,11 +418,16 @@ const server = createServer(async (req, res) => {
       if (b.model !== h.model) return send(res, 409, { error: { code: 'model_unavailable' } });
       const timeout = Number(b.timeout_seconds ?? 60), steps = Number(b.max_step ?? 1);
       if (!Number.isInteger(timeout) || timeout < 1 || timeout > MAX_TIMEOUT || !Number.isInteger(steps) || steps < 1 || steps > 10) return send(res, 400, { error: { code: 'bounds_invalid' } });
+      const workspaceId = b.metadata?.workspace_id;
+      if (h.id === 'claude-code' && (!workspaceId || !workspaces.has(workspaceId))) return send(res, 409, { error: { code: 'workspace_required', message: 'Create a pinned bridge workspace and submit its workspace_id in metadata' } });
+      const ws = workspaceId ? workspaces.get(workspaceId) : undefined;
+      if (ws?.responseId) return send(res, 409, { error: { code: 'workspace_already_used' } });
       const id = `resp_${randomUUID()}`;
-      const record = { id, object: 'response', status: 'in_progress', requested_model: h.model, metadata: { ...b.metadata, harness_id: h.id }, timeout_seconds: timeout, max_step: steps };
+      const record = { id, object: 'response', status: 'in_progress', requested_model: h.model, metadata: { ...b.metadata, harness_id: h.id, ...(workspaceId ? { workspace_id: workspaceId } : {}) }, timeout_seconds: timeout, max_step: steps };
+      if (ws) { ws.responseId = id; state.workspaces[ws.id].responseId = id; }
       state.keys[key] = id; state.responses[id] = record; const task = { response: record, resolve: null }; tasks.set(id, task);
       await persist(); // durable idempotency intent before spawning any CLI process
-      runTask(record, b.input).catch(async () => { record.status = 'failed'; record.error = { message: 'CLI task failed internally' }; await persist(); task.resolve?.(); });
+      runTask(record, b.input).catch(async error => { record.status = 'failed'; record.error = { message: 'CLI task failed internally' }; const ws = workspaces.get(record.metadata.workspace_id); if (ws) { record.metadata.execution_boundary = ws.boundary ?? { proven: false, error: 'execution_boundary_unavailable' }; record.metadata.execution_stage = ws.executionStage ?? 'task_setup'; if (ws.boundaryDiagnostic) record.metadata.execution_boundary_diagnostic = ws.boundaryDiagnostic; else if (/^boundary_probe_failed:/.test(String(error?.message))) record.metadata.execution_boundary_diagnostic = { category: String(error.message).split(':')[1] ?? 'probe_failed', exit_code: Number(String(error.message).split(':')[2]) || null, signal: null }; } await persist(); task.resolve?.(); });
       return streamResponse(res, record, task);
     }
     send(res, 404, { error: { code: 'not_found' } });
@@ -160,6 +445,10 @@ function streamResponse(res, record, task = tasks.get(record.id)) {
 }
 function reqClose(res, fn) { res.on('close', fn); }
 
-await load();
 await mkdir(ROOT, { recursive: true, mode: 0o700 });
-server.listen(PORT, '127.0.0.1', () => console.log(`experimental local CLI UHP listening on 127.0.0.1:${PORT}`));
+if (process.argv[2] === '--preflight-claude-runtime') {
+  console.log(await preflightClaudeRuntime());
+} else {
+  await load();
+  server.listen(PORT, '127.0.0.1', () => console.log(`experimental local CLI UHP listening on 127.0.0.1:${PORT}`));
+}

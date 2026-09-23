@@ -33,4 +33,38 @@ The host Claude settings name `opus` as the preferred model. A diagnostic `claud
 
 The bridge was hardened to require an explicit model before advertising a harness and to pass that model with `--model`. The one authorized retry advertised Claude model `opus` and used the same one-turn, no-tools, 45-second bound in a new temporary workspace. Foreman's `UhpClient` received `response.created` then `response.completed`. The CLI reported **actual harness `claude-code`, model `claude-opus-5-5`**, response ID `resp_e89104a6-a445-44b7-9b4f-f12cae63e17a`, and session ID `c24bb4c5-48f0-48c2-b18e-1a5264375417`. Its answer was: “Deterministic tests produce the same result every run, so failures reliably signal real bugs rather than flakiness.” Measured CLI usage was **2 input tokens, 37 output tokens, and 531 cached-read input tokens**; no cost, quota, or remaining allowance was claimed. The bridge's persisted idempotency key maps to this response. Both temporary loopback servers were stopped after inspection.
 
-This proves a subscription-authenticated Claude Code CLI can complete a bounded task through this external UHP bridge without a provider API key. It does not make pinned HarnessRouter support subscription login, establish a Codex actual-model signal, implement role-session continuation, or provide a complete Worker workspace snapshot for Git acceptance.
+This proves a subscription-authenticated Claude Code CLI can complete a bounded task through this external UHP bridge without a provider API key. That response alone did not prove workspace transport, isolation, or Git acceptance. It does not make pinned HarnessRouter support subscription login, establish a Codex actual-model signal, or implement role-session continuation.
+
+## Worker workspace proof status
+
+The external bridge now has a separately advertised, bridge-specific workspace
+extension. It seeds from a full commit in the server-configured disposable Git
+repository, binds the resulting workspace ID to the UHP task, checks an outside
+filesystem sentinel under bubblewrap before tool execution, and exposes a
+bounded complete snapshot with exact bytes, modes, symlink targets, and
+explicit errors. Foreman's verifier independently reads its pinned Git base,
+checks snapshot hashes/bytes/modes, detects additions, edits, deletions, and
+identical-content renames, and enforces the allowed path scope. Standard UHP
+session artifact APIs still do not mean “complete Git snapshot”.
+
+The initial workspace attempt failed closed at `boundary_probe` before the CLI
+launched: response `resp_af452680-6544-496f-b12e-23c89aa667ad` had no actual
+model, session ID, or usage, and its incomplete snapshot was rejected. A
+deterministic ELF-header check exposed and fixed the bubblewrap setup issue;
+the sentinel check and a real-auth, no-provider preflight then passed.
+
+The subsequent bounded Claude Worker task completed against pinned base
+`ff2e868ae0360b706c57c3ef2d21741fe5f9dd9c`. Foreman received response
+`resp_8f8f4014-ac96-4c8b-9dd9-f9b0fc10c64d`, session
+`b33b15f7-32e5-46be-9946-908e76a6b52c`, requested model `opus`, and actual
+model `claude-opus-5-5`. Measured usage was 6 input, 328 output, and 9,105
+cached input tokens. The complete snapshot had four entries and no errors;
+Foreman's local Git comparison verified only `README.md` changed and returned
+`scopeVerified: true` for the allowed scope. Acceptance remains `not_decided`;
+the live result is reviewable, not accepted by the bridge's claims. Sanitized
+evidence and the readable diff are in
+[`investigations/local-cli-uhp/evidence`](../investigations/local-cli-uhp/evidence/actual-workspace-smoke.json).
+
+Session continuation remains unavailable, Codex still has no verified
+actual-model signal, and the pinned HarnessRouter runtime has no verified
+subscription-auth or full-workspace-snapshot proof.
