@@ -17,8 +17,8 @@ const MAX_PROMPT = 16_000;
 const MAX_OUTPUT = 64_000;
 const MAX_TIMEOUT = 120;
 const HARNESS = {
-  claude: { id: 'claude-code', bin: process.env.CLAUDE_BIN ?? 'claude', authDir: process.env.CLAUDE_CONFIG_DIR, model: process.env.CLAUDE_MODEL ?? 'default' },
-  codex: { id: 'codex-cli', bin: process.env.CODEX_BIN ?? 'codex', authDir: process.env.CODEX_HOME, model: process.env.CODEX_MODEL ?? 'default' },
+  claude: { id: 'claude-code', bin: process.env.CLAUDE_BIN ?? 'claude', authDir: process.env.CLAUDE_CONFIG_DIR, model: process.env.CLAUDE_MODEL },
+  codex: { id: 'codex-cli', bin: process.env.CODEX_BIN ?? 'codex', authDir: process.env.CODEX_HOME, model: process.env.CODEX_MODEL },
 };
 const tasks = new Map();
 let state = { keys: {}, responses: {} };
@@ -42,14 +42,15 @@ function send(res, status, body, extra = {}) {
 function body(req) { return new Promise((resolveBody, reject) => { let s=''; req.on('data', c => { s += c; if (s.length > 256_000) reject(Error('body too large')); }); req.on('end', () => { try { resolveBody(JSON.parse(s || '{}')); } catch { reject(Error('invalid JSON')); } }); req.on('error', reject); }); }
 function event(res, type, sequence, response) { res.write(`data: ${JSON.stringify({ type, sequence_number: sequence, response })}\n\n`); }
 function cliFor(harnessId) { return Object.values(HARNESS).find(h => h.id === harnessId); }
-function configured(h) { return !!h?.authDir; }
+function configured(h) { return !!h?.authDir && typeof h.model === 'string' && h.model.trim() !== '' && h.model.trim().toLowerCase() !== 'undefined'; }
 function outputText(r) { return typeof r.output_text === 'string' ? r.output_text : ''; }
+function reportedModel(value) { return typeof value === 'string' && value.trim() !== '' && value.trim().toLowerCase() !== 'undefined' ? value.trim() : undefined; }
 
 function parseClaude(text) {
   const events = text.split(/\r?\n/).filter(Boolean).map(line => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean);
   const result = [...events].reverse().find(e => e.type === 'result');
   const init = events.find(e => e.type === 'system' && e.subtype === 'init');
-  return { text: typeof result?.result === 'string' ? result.result : '', model: result?.model ?? init?.model, session: result?.session_id ?? init?.session_id, isError: result?.is_error === true || (typeof result?.subtype === 'string' && result.subtype.startsWith('error')), usage: result?.usage && typeof result.usage === 'object' ? result.usage : undefined };
+  return { text: typeof result?.result === 'string' ? result.result : '', model: reportedModel(result?.model) ?? reportedModel(init?.model), session: result?.session_id ?? init?.session_id, isError: result?.is_error === true || (typeof result?.subtype === 'string' && result.subtype.startsWith('error')), usage: result?.usage && typeof result.usage === 'object' ? result.usage : undefined };
 }
 function parseCodex(text) {
   const events = text.split(/\r?\n/).filter(Boolean).map(line => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean);
@@ -57,11 +58,11 @@ function parseCodex(text) {
   const thread = events.find(e => e.type === 'thread.started');
   const messages = events.filter(e => e.type === 'item.completed' && e.item?.type === 'agent_message').map(e => e.item.text).filter(x => typeof x === 'string');
   const usage = done?.usage;
-  return { text: messages.join('\n'), model: done?.model ?? thread?.model, session: thread?.thread_id, usage: usage && typeof usage === 'object' ? usage : undefined };
+  return { text: messages.join('\n'), model: reportedModel(done?.model) ?? reportedModel(thread?.model), session: thread?.thread_id, usage: usage && typeof usage === 'object' ? usage : undefined };
 }
 function cliArgs(kind, model, timeout, maxStep) {
-  if (kind === 'claude') return ['-p', '--output-format', 'stream-json', '--verbose', ...(model === 'default' ? [] : ['--model', model]), '--max-turns', String(Math.min(maxStep, 10)), '--tools', ''];
-  return ['exec', '--json', '--ephemeral', '--sandbox', 'read-only', ...(model === 'default' ? [] : ['--model', model]), '-'];
+  if (kind === 'claude') return ['-p', '--output-format', 'stream-json', '--verbose', '--model', model, '--max-turns', String(Math.min(maxStep, 10)), '--tools', ''];
+  return ['exec', '--json', '--ephemeral', '--sandbox', 'read-only', '--model', model, '-'];
 }
 
 async function runTask(record, prompt) {
@@ -70,7 +71,7 @@ async function runTask(record, prompt) {
   const inheritedNames = new Set(['PATH','HOME','USER','LOGNAME','LANG','LC_ALL','TERM','TMPDIR','TMP','TEMP','XDG_RUNTIME_DIR','SSL_CERT_FILE','SSL_CERT_DIR','NODE_EXTRA_CA_CERTS','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY']);
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => inheritedNames.has(name)));
   Object.assign(env, kind === 'claude' ? { CLAUDE_CONFIG_DIR: h.authDir } : { CODEX_HOME: h.authDir });
-  const args = cliArgs(kind, record.model, record.timeout_seconds, record.max_step);
+  const args = cliArgs(kind, record.requested_model, record.timeout_seconds, record.max_step);
   const child = spawn(h.bin, args, { cwd: work, env, shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   const active = tasks.get(record.id); active.child = child;
   let out = '';
@@ -98,7 +99,6 @@ async function runTask(record, prompt) {
   if (record.model && record.model !== record.requested_model) {
     record.metadata.requested_model = record.requested_model;
     record.metadata.model_fallback = true;
-    if (record.requested_model === 'default') record.metadata.model_alias_resolved = true;
   }
   if (record.status !== 'completed') record.error = { message: spawnError ? 'CLI could not be started' : parsed.isError ? 'Claude Code reported an unsuccessful task' : missingReportedIdentity ? 'CLI did not report an actual model and session id' : active.cancelRequested ? 'CLI task was cancelled' : exit.signal ? `CLI terminated by ${exit.signal}` : 'CLI exited unsuccessfully' };
   await persist();

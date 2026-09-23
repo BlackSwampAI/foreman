@@ -29,17 +29,19 @@ directories.
 
 ## Run
 
-From this folder, with Node 24:
+From this folder, with Node 24, set an explicit model accepted by each
+installed CLI. The model setting is required for discovery; a configured auth
+directory alone does not advertise a harness:
 
 ```sh
-CLAUDE_CONFIG_DIR="$HOME/.claude" LOCAL_CLI_UHP_PORT=8787 node server.mjs
+CLAUDE_CONFIG_DIR="$HOME/.claude" CLAUDE_MODEL="<supported Claude model>" LOCAL_CLI_UHP_PORT=8787 node server.mjs
 ```
 
-Set `CODEX_HOME` similarly to expose Codex; override `CLAUDE_MODEL` or
-`CODEX_MODEL` only with a model accepted by the local CLI. `default` is a
-requested alias, not an actual model claim. A successful response requires the
-CLI output to report its concrete model and session ID. The response marks an
-alias resolution as `metadata.model_fallback` and records the requested model.
+Set `CODEX_HOME` and `CODEX_MODEL` similarly to expose Codex. The bridge passes
+the explicit configured model using the CLI's `--model` argument. A successful
+response requires the CLI output to report a concrete actual model and session
+ID; literal `undefined` does not qualify. If the CLI reports a different model,
+the response marks `metadata.model_fallback` and records the requested model.
 Usage is omitted unless the CLI reports it; Claude cached input counts include
 cache reads and exclude cache creation. The child gets only a small runtime
 environment allowlist, including `PATH` and `HOME`; provider API keys and
