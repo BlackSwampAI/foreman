@@ -28,6 +28,11 @@ function completeAutomaticEvidence(run:any,worker:Assignment){run.workerEvidence
 afterEach(async()=>{await Promise.all([...fixtures.splice(0).map(f=>f.close()),...bridgeServers.splice(0).map(s=>new Promise<void>(resolve=>s.close(()=>resolve()))),...dirs.splice(0).map(d=>rm(d,{recursive:true,force:true}))]);});
 
 describe('controller persistence and state transitions',()=>{
+  it('defaults automatic runs to one Worker turn and one Worker attempt',async()=>{
+    const {controller,store}=await setup({submit:async()=>({externalId:'held',status:'completed',outputText:'held'})});controller.configureVerifiedWorkspace({repoPath:'/fixture/repo',bridgeBaseUrl:'http://127.0.0.1:1',allowedScope:['README.md'],commands:[{name:'fixture check',command:'true',args:[]}]});const project:any=await controller.createProject('Budget defaults'),task:any=await controller.createTask(project.id,'Inspect the default budget'),run:any=await controller.createRun(task.id);
+    await store.mutate(s=>{const current=s.projects[0]!.tasks[0]!.runs[0]!,planner:Assignment={id:'planner-success',roleId:'planner',status:'succeeded',prompt:'plan',result:'Ready',requestedConfig:{harnessId:'fixture',model:'model-fixture'},submissionId:'planner-submission',idempotencyKey:'planner-key',createdAt:new Date().toISOString()};current.pinnedBaseCommit='a'.repeat(40);current.workspaceId='prepared-fixture-workspace';current.assignments.push(planner);current.guidance.push({id:'guidance-success',sequence:1,text:'Ready',status:'delivered',plannerAssignmentId:planner.id,plannerReply:'Ready',createdAt:new Date().toISOString()});});
+    (controller as any).automaticRuns.add(run.id);const started=await controller.startWork(run.id);expect(started.controller?.budgets).toEqual({roleTurns:{planner:3,orchestrator:2,worker:1,reviewer:1},workerAttempts:1});
+  });
   it('seeds role-specific harness defaults from available discovery while preserving an edited selection',async()=>{
     const dir=await mkdtemp(join(tmpdir(),'foreman-'));dirs.push(dir);const store=new JsonStore(join(dir,'state.json'));
     const harnesses=[{id:'claude-code',models:[{id:'claude-sonnet-4',available:true}]},{id:'codex-cli',models:[{id:'gpt-6-sol',available:true}]},{id:'antigravity-cli',models:[{id:'gemini-3.8-flash-medium',available:true},{id:'gemini-3.8-flash-low',available:true}]}];

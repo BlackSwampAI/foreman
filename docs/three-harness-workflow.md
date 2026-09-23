@@ -125,7 +125,9 @@ returned snapshot with the pinned Git base.
    Orchestrator use separate continuing contexts.
 2. **Start the controller.** Click **Start work** and set the per-role turn
    budgets and Worker attempt limit. Defaults are Planner 3, Orchestrator 2,
-   Worker 2, Reviewer 1, and two Worker attempts. The controller automatically
+   Worker 1, Reviewer 1, and one Worker attempt. These limits count CLI turns
+   and Worker attempts; AGY token usage and internal steps are unbounded per
+   CLI invocation, and AGY `max_step` is ignored. The controller automatically
    sends the recorded Planner request and guidance to Orchestrator. Orchestrator
    must return a strict JSON object containing a bounded `workerTask`; only a
    successful, bound proposal can advance the run.
