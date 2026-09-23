@@ -10,7 +10,7 @@
     "dev:ui": "vite ui --host 127.0.0.1",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p ui/tsconfig.json",
     "test": "vitest run",
-    "build": "tsc -p tsconfig.build.json && vite build ui --outDir ../dist/ui",
+    "build": "tsc -p tsconfig.build.json && vite build ui --outDir ../dist/ui --emptyOutDir",
     "start": "node dist/server.js"
   },
   "dependencies": {
