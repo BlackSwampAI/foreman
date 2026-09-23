@@ -62,7 +62,7 @@ function parseCodex(text) {
 }
 function cliArgs(kind, model, timeout, maxStep) {
   if (kind === 'claude') return ['-p', '--output-format', 'stream-json', '--verbose', '--model', model, '--max-turns', String(Math.min(maxStep, 10)), '--tools', ''];
-  return ['exec', '--json', '--ephemeral', '--sandbox', 'read-only', '--model', model, '-'];
+  return ['exec', '--json', '--ephemeral', '--sandbox', 'read-only', '--ignore-user-config', '--skip-git-repo-check', '--model', model, '-'];
 }
 
 async function runTask(record, prompt) {

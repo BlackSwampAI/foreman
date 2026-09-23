@@ -42,6 +42,9 @@ the explicit configured model using the CLI's `--model` argument. A successful
 response requires the CLI output to report a concrete actual model and session
 ID; literal `undefined` does not qualify. If the CLI reports a different model,
 the response marks `metadata.model_fallback` and records the requested model.
+Codex runs with `--ignore-user-config` to retain its existing authentication
+while ignoring `config.toml` provider overrides, and `--skip-git-repo-check`
+because each run starts in a fresh temporary directory.
 Usage is omitted unless the CLI reports it; Claude cached input counts include
 cache reads and exclude cache creation. The child gets only a small runtime
 environment allowlist, including `PATH` and `HOME`; provider API keys and
