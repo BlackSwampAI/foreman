@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { resolve, extname, sep } from 'node:path';
 import { readFile, stat } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { loadConfig } from './config.js';
 import { Controller } from './controller.js';
 import { JsonStore } from './store.js';
@@ -16,6 +17,7 @@ const uhp=config.uhpBaseUrl ? new UhpClient({baseUrl:config.uhpBaseUrl,...(uhpTo
 };
 const hindsight=config.hindsightBaseUrl?new HindsightClient({baseUrl:config.hindsightBaseUrl,token:process.env.HINDSIGHT_TOKEN}):undefined;
 const controller=new Controller(store,uhp,!!config.hindsightBaseUrl,!!config.uhpBaseUrl,config.uhpHarnessId&&config.uhpModel?{harnessId:config.uhpHarnessId,model:config.uhpModel}:undefined,hindsight,Math.ceil(config.taskTimeoutMs/1000));
+const uiRoot=resolve(fileURLToPath(new URL('../dist/ui/',import.meta.url)));
 const body=async(req:IncomingMessage):Promise<any>=>{let data='';for await(const chunk of req)data+=chunk;if(data.length>1_000_000)throw Object.assign(new Error('Request body too large'),{statusCode:413});return data?JSON.parse(data):{};};
 const json=(res:ServerResponse,status:number,data:unknown)=>{res.writeHead(status,{'content-type':'application/json; charset=utf-8','cache-control':'no-store'});res.end(JSON.stringify(data));};
 const server=createServer(async(req,res)=>{
@@ -45,7 +47,7 @@ const server=createServer(async(req,res)=>{
     m=path.match(/^\/api\/runs\/([^/]+)\/approve$/);if(req.method==='POST'&&m){json(res,200,await controller.approveRun(decodeURIComponent(m[1]!),await body(req)));return;}
     m=path.match(/^\/api\/assignments\/([^/]+)\/cancel$/);if(req.method==='POST'&&m){json(res,200,await controller.cancelAssignment(decodeURIComponent(m[1]!)));return;}
     m=path.match(/^\/api\/assignments\/([^/]+)\/refresh$/);if(req.method==='POST'&&m){json(res,200,await controller.refreshAssignment(decodeURIComponent(m[1]!)));return;}
-    if(req.method==='GET'&&(path==='/'||!path.startsWith('/api/'))){const root=resolve(process.cwd(),'../dist/ui');const requested=path==='/'?'index.html':decodeURIComponent(path.slice(1));const candidate=resolve(root,requested);if(candidate!==root&&!candidate.startsWith(`${root}${sep}`)){json(res,403,{error:'Forbidden'});return;}try{if(!(await stat(candidate)).isFile())throw new Error();const content=await readFile(candidate);res.writeHead(200,{'content-type':mime(extname(candidate)),'cache-control':'no-cache'});res.end(content);return;}catch{const index=await readFile(resolve(root,'index.html')).catch(()=>undefined);if(index){res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-cache'});res.end(index);return;}}}
+    if(req.method==='GET'&&(path==='/'||!path.startsWith('/api/'))){const root=uiRoot;const requested=path==='/'?'index.html':decodeURIComponent(path.slice(1));const candidate=resolve(root,requested);if(candidate!==root&&!candidate.startsWith(`${root}${sep}`)){json(res,403,{error:'Forbidden'});return;}try{if(!(await stat(candidate)).isFile())throw new Error();const content=await readFile(candidate);res.writeHead(200,{'content-type':mime(extname(candidate)),'cache-control':'no-cache'});res.end(content);return;}catch{const index=await readFile(resolve(root,'index.html')).catch(()=>undefined);if(index){res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-cache'});res.end(index);return;}}}
     json(res,404,{error:'Not found'});
   } catch(e) {const err=e as Error&{statusCode?:number};json(res,err.statusCode??400,{error:err.message});}
 });
