@@ -49,7 +49,7 @@ function parseClaude(text) {
   const events = text.split(/\r?\n/).filter(Boolean).map(line => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean);
   const result = [...events].reverse().find(e => e.type === 'result');
   const init = events.find(e => e.type === 'system' && e.subtype === 'init');
-  return { text: typeof result?.result === 'string' ? result.result : '', model: result?.model ?? init?.model, session: result?.session_id ?? init?.session_id, usage: result?.usage && typeof result.usage === 'object' ? result.usage : undefined };
+  return { text: typeof result?.result === 'string' ? result.result : '', model: result?.model ?? init?.model, session: result?.session_id ?? init?.session_id, isError: result?.is_error === true || (typeof result?.subtype === 'string' && result.subtype.startsWith('error')), usage: result?.usage && typeof result.usage === 'object' ? result.usage : undefined };
 }
 function parseCodex(text) {
   const events = text.split(/\r?\n/).filter(Boolean).map(line => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean);
@@ -60,41 +60,67 @@ function parseCodex(text) {
   return { text: messages.join('\n'), model: done?.model ?? thread?.model, session: thread?.thread_id, usage: usage && typeof usage === 'object' ? usage : undefined };
 }
 function cliArgs(kind, model, timeout, maxStep) {
-  if (kind === 'claude') return ['-p', '--output-format', 'stream-json', ...(model === 'default' ? [] : ['--model', model]), '--max-turns', String(Math.min(maxStep, 10)), '--tools', ''];
+  if (kind === 'claude') return ['-p', '--output-format', 'stream-json', '--verbose', ...(model === 'default' ? [] : ['--model', model]), '--max-turns', String(Math.min(maxStep, 10)), '--tools', ''];
   return ['exec', '--json', '--ephemeral', '--sandbox', 'read-only', ...(model === 'default' ? [] : ['--model', model]), '-'];
 }
 
 async function runTask(record, prompt) {
   const h = cliFor(record.metadata.harness_id), kind = h.id === 'claude-code' ? 'claude' : 'codex-cli';
   const work = join(ROOT, record.id); await mkdir(work, { recursive: true, mode: 0o700 });
-  const env = { ...process.env, HOME: process.env.HOME, ...(kind === 'claude' ? { CLAUDE_CONFIG_DIR: h.authDir } : { CODEX_HOME: h.authDir }) };
+  const inheritedNames = new Set(['PATH','HOME','USER','LOGNAME','LANG','LC_ALL','TERM','TMPDIR','TMP','TEMP','XDG_RUNTIME_DIR','SSL_CERT_FILE','SSL_CERT_DIR','NODE_EXTRA_CA_CERTS','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY']);
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => inheritedNames.has(name)));
+  Object.assign(env, kind === 'claude' ? { CLAUDE_CONFIG_DIR: h.authDir } : { CODEX_HOME: h.authDir });
   const args = cliArgs(kind, record.model, record.timeout_seconds, record.max_step);
   const child = spawn(h.bin, args, { cwd: work, env, shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   const active = tasks.get(record.id); active.child = child;
-  let out = '', err = '';
+  let out = '';
   child.stdout.setEncoding('utf8'); child.stdout.on('data', chunk => { out = (out + chunk).slice(-MAX_OUTPUT * 3); });
-  child.stderr.setEncoding('utf8'); child.stderr.on('data', chunk => { err = (err + chunk).slice(-4000); });
-  const timer = setTimeout(() => child.kill('SIGTERM'), record.timeout_seconds * 1000);
-  child.stdin.end(kind === 'claude' ? prompt : prompt);
-  const exit = await new Promise(resolveExit => child.once('close', (code, signal) => resolveExit({ code, signal })));
-  clearTimeout(timer);
+  child.stderr.on('data', () => {}); // Drain without retaining or exposing stderr, which may contain credentials.
+  child.stdin.on('error', () => {});
+  let spawnError;
+  let killTimer;
+  const timer = setTimeout(() => { child.kill('SIGTERM'); killTimer = setTimeout(() => child.kill('SIGKILL'), 1_000); }, record.timeout_seconds * 1000);
+  child.stdin.end(prompt);
+  const exit = await new Promise(resolveExit => {
+    child.once('error', error => { spawnError = error; resolveExit({ code: null, signal: null }); });
+    child.once('close', (code, signal) => resolveExit({ code, signal }));
+  });
+  clearTimeout(timer); if (killTimer) clearTimeout(killTimer);
   let parsed = kind === 'claude' ? parseClaude(out) : parseCodex(out);
   if (parsed.text.length > MAX_OUTPUT) parsed.text = parsed.text.slice(0, MAX_OUTPUT);
-  record.status = active.cancelRequested ? 'cancelled' : exit.code === 0 ? 'completed' : exit.signal === 'SIGTERM' ? 'incomplete' : 'failed';
+  const missingReportedIdentity = !parsed.model || !parsed.session;
+  record.status = active.cancelRequested ? 'cancelled' : spawnError ? 'failed' : parsed.isError || missingReportedIdentity ? 'failed' : exit.code === 0 ? 'completed' : exit.signal === 'SIGTERM' ? 'incomplete' : 'failed';
   record.output_text = parsed.text;
   if (parsed.model) record.model = parsed.model;
-  if (parsed.session) record.session_id = parsed.session;
-  if (parsed.usage) record.usage = parsed.usage;
-  if (record.model !== record.requested_model) record.metadata.model_alias_resolved = record.model ? true : null;
-  if (record.status !== 'completed') record.error = { message: exit.signal ? `CLI terminated by ${exit.signal}` : `CLI exited with status ${exit.code}`, detail: err.slice(0, 1000) };
+  if (parsed.session) { record.session_id = parsed.session; record.metadata.session_id = parsed.session; }
+  if (parsed.usage) record.usage = normalizeCliUsage(kind, parsed.usage);
+  if (kind === 'codex-cli') record.metadata.ignored_fields = ['max_step'];
+  if (record.model && record.model !== record.requested_model) {
+    record.metadata.requested_model = record.requested_model;
+    record.metadata.model_fallback = true;
+    if (record.requested_model === 'default') record.metadata.model_alias_resolved = true;
+  }
+  if (record.status !== 'completed') record.error = { message: spawnError ? 'CLI could not be started' : parsed.isError ? 'Claude Code reported an unsuccessful task' : missingReportedIdentity ? 'CLI did not report an actual model and session id' : active.cancelRequested ? 'CLI task was cancelled' : exit.signal ? `CLI terminated by ${exit.signal}` : 'CLI exited unsuccessfully' };
   await persist();
   active.resolve?.();
+}
+
+function normalizeCliUsage(kind, value) {
+  const usage = {};
+  const input = value.input_tokens ?? value.inputTokens;
+  const output = value.output_tokens ?? value.outputTokens;
+  const cached = value.cached_input_tokens ?? value.cachedInputTokens ?? (kind === 'claude' ? value.cache_read_input_tokens : undefined);
+  if (Number.isFinite(input)) usage.input_tokens = input;
+  if (Number.isFinite(output)) usage.output_tokens = output;
+  if (Number.isFinite(value.total_tokens)) usage.total_tokens = value.total_tokens;
+  if (Number.isFinite(cached)) usage.input_tokens_details = { cached_tokens: cached };
+  return usage;
 }
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   try {
-    if (req.method === 'GET' && url.pathname === '/v1/uhp') return send(res, 200, { protocol: 'uhp', versions: [VERSION], default_version: VERSION, implementation: { name: 'local-cli-uhp', experimental: true }, capabilities: { streaming: true, idempotency: true, sessions: true, cancellation: true } });
+    if (req.method === 'GET' && url.pathname === '/v1/uhp') return send(res, 200, { protocol: 'uhp', versions: [VERSION], default_version: VERSION, implementation: { name: 'local-cli-uhp', experimental: true }, capabilities: { streaming: true, idempotency: true, sessions: false, cancellation: true } });
     if (req.method === 'GET' && url.pathname === '/v1/harnesses') return send(res, 200, { harnesses: Object.values(HARNESS).filter(configured).map(h => ({ id: h.id, name: h.id })) });
     const models = url.pathname.match(/^\/v1\/harnesses\/([^/]+)\/models$/);
     if (req.method === 'GET' && models) { const h = cliFor(decodeURIComponent(models[1])); return send(res, h && configured(h) ? 200 : 404, h && configured(h) ? { models: [{ id: h.model, available: true, name: h.model }] } : { models: [] }); }
@@ -116,7 +142,7 @@ const server = createServer(async (req, res) => {
       const record = { id, object: 'response', status: 'in_progress', requested_model: h.model, metadata: { ...b.metadata, harness_id: h.id }, timeout_seconds: timeout, max_step: steps };
       state.keys[key] = id; state.responses[id] = record; const task = { response: record, resolve: null }; tasks.set(id, task);
       await persist(); // durable idempotency intent before spawning any CLI process
-      runTask(record, b.input).catch(async e => { record.status = 'failed'; record.error = { message: String(e.message).slice(0, 1000) }; await persist(); task.resolve?.(); });
+      runTask(record, b.input).catch(async () => { record.status = 'failed'; record.error = { message: 'CLI task failed internally' }; await persist(); task.resolve?.(); });
       return streamResponse(res, record, task);
     }
     send(res, 404, { error: { code: 'not_found' } });
