@@ -1,0 +1,18 @@
+{
+  "recordVersion": 1,
+  "source": "controller_persisted_state",
+  "operatorConfirmedChannel": "UI",
+  "runId": "run_4746c25d-72e1-45e7-a5dd-fe8c093f31cf",
+  "reviewerResponseId": "resp_2d3c9439-28df-460b-8537-7993f2b06540",
+  "recommendationId": "recommendation_548bc43b-238c-4f0d-925f-11e27f5d6a9a",
+  "humanDecision": {
+    "id": "approval_a970fb4e-a8f0-4e7d-8605-f0268aad7a61",
+    "approved": true,
+    "decision": "approved",
+    "evidenceCommit": "ff2e868ae0360b706c57c3ef2d21741fe5f9dd9c",
+    "createdAt": "2026-09-23T03:46:26.515Z"
+  },
+  "approvalEventId": "evt_dfff1210-6713-4ae5-a089-0997fb73ffbf",
+  "runStatus": "completed",
+  "acceptance": "accepted"
+}

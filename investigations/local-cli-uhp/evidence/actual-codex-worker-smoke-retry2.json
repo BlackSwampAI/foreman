@@ -1,0 +1,70 @@
+{
+  "evidenceVersion": 1,
+  "provenance": "single_live_codex_worker_call",
+  "status": "failed",
+  "uhpSubmissionAttempts": 1,
+  "liveCliInvocations": 1,
+  "completedModelTurns": 0,
+  "providerRequestCount": "unavailable",
+  "executionStage": "cli_execution",
+  "executionBoundary": {
+    "proven": true,
+    "evidence": "outside sentinel unreadable and unmodifiable; assigned workspace writable",
+    "harness": "codex-cli",
+    "workspace_writable": true,
+    "host_auth_mounted_read_only": true
+  },
+  "terminalStatus": "failed",
+  "terminalError": "Codex CLI exited without completing a turn",
+  "cliOutputText": "",
+  "snapshot": {
+    "complete": false,
+    "entryCount": 1,
+    "errors": [
+      {
+        "path": ".",
+        "error": "task_status_failed"
+      }
+    ]
+  },
+  "scopeVerified": false,
+  "controllerValidation": {
+    "status": "not_run",
+    "reason": "Worker response did not provide a complete snapshot for Foreman verification"
+  },
+  "runId": "run_ffa20dd3-e5d9-467f-96d7-aab095eac721",
+  "pinnedBaseCommit": "b321b35f5d69e098828ac8e28a272e620cf7390a",
+  "requestedModel": "gpt-6-sol",
+  "actualModelStatus": "unavailable",
+  "actualModel": null,
+  "cliInvocation": {
+    "executable": "/opt/codex-vendor/x86_64-unknown-linux-musl/bin/codex",
+    "hostExecutable": "/home/chris/.local/share/fnm/node-versions/v24.18.0/installation/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex",
+    "args": [
+      "--ask-for-approval",
+      "never",
+      "exec",
+      "--json",
+      "--ephemeral",
+      "--sandbox",
+      "workspace-write",
+      "--ignore-user-config",
+      "--skip-git-repo-check",
+      "--model",
+      "gpt-6-sol",
+      "-"
+    ]
+  },
+  "responseId": "resp_ec9c9d4c-fa0c-4600-8384-20b152ec2e8c",
+  "sessionId": "01a0cc9f-da14-7920-b00d-e5dc5c730fcd",
+  "measuredUsage": null,
+  "failure": "Codex CLI exited without completing a turn",
+  "retry": "forbidden_by_durable_call_lock",
+  "capturedAt": "2026-09-23T04:57:19.986Z",
+  "actualModelDisplay": "actual model unavailable",
+  "cliExit": {
+    "exit_code": 1,
+    "signal": null
+  },
+  "cliFailureCategory": "network"
+}

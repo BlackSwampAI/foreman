@@ -1,0 +1,15 @@
+{
+  "evidenceVersion": 1,
+  "responseId": "resp_af452680-6544-496f-b12e-23c89aa667ad",
+  "status": "failed",
+  "executionStage": "boundary_probe",
+  "cliLaunched": false,
+  "actualModel": null,
+  "sessionId": null,
+  "usage": null,
+  "snapshot": {
+    "complete": false,
+    "disposition": "rejected"
+  },
+  "resolution": "A deterministic ELF-header check exposed a bubblewrap setup issue. The implementation was fixed and the deterministic sentinel check plus real-auth, no-provider preflight passed before the successful live task."
+}

@@ -1,0 +1,99 @@
+{
+  "reportVersion": 1,
+  "acceptance": "not_decided",
+  "provenance": {
+    "worker": "recorded_live_import_no_worker_submit",
+    "reviewer": "uhp_response"
+  },
+  "pinnedBaseCommit": "ff2e868ae0360b706c57c3ef2d21741fe5f9dd9c",
+  "worker": {
+    "responseId": "resp_8f8f4014-ac96-4c8b-9dd9-f9b0fc10c64d",
+    "sessionId": "b33b15f7-32e5-46be-9946-908e76a6b52c",
+    "actualModel": "claude-opus-5-5",
+    "usage": {
+      "input_tokens": 6,
+      "output_tokens": 328,
+      "input_tokens_details": {
+        "cached_tokens": 9105
+      }
+    },
+    "validation": "verified_by_foreman_git_comparison",
+    "scopeVerified": true,
+    "allowedScope": [
+      "README.md"
+    ],
+    "reviewDiff": "### modify: README.md\n- mode 100644, 193 bytes, sha256 b8a83e8f2fa47b062892aad6631dde26045516975d73bd6085cf5be308da5245\n+ mode 100644, 354 bytes, sha256 ec226d04f0a4bb12dac8bb031969ed266f892929161dac7da361485fe587633e\n\n```diff\n--- a/README.md\n+++ b/README.md\n@@ -1,11 +1,15 @@\n # Disposable Worker Edit Fixture\n \n This repository contains no project or personal data.\n \n ## Greeting\n \n The selected greeting is `hello`.\n \n ## Notes\n \n Keep this smoke change limited to the README.\n+\n+## Bridge smoke\n+\n+Deterministic tests produce the same result on every run, so failures point to real regressions rather than flaky timing or environment noise.\n```\n"
+  },
+  "controllerValidation": {
+    "id": "valid_f4826c25-7caa-497d-8027-ac22cfb487aa",
+    "status": "passed",
+    "passed": true,
+    "reportedPassed": true,
+    "checks": [
+      {
+        "name": "recorded README SHA-256",
+        "passed": true,
+        "details": "recorded README SHA-256 verified\n"
+      }
+    ],
+    "observations": [
+      {
+        "name": "recorded README SHA-256",
+        "command": "/home/chris/.local/share/fnm/node-versions/v24.18.0/installation/bin/node",
+        "args": [
+          "-e",
+          "const fs=require('node:fs');const crypto=require('node:crypto');const hash=crypto.createHash('sha256').update(fs.readFileSync('README.md')).digest('hex');if(hash!=='ec226d04f0a4bb12dac8bb031969ed266f892929161dac7da361485fe587633e')process.exit(1);console.log('recorded README SHA-256 verified')"
+        ],
+        "exitCode": 0,
+        "timedOut": false,
+        "output": "recorded README SHA-256 verified\n",
+        "outputTruncated": false,
+        "startedAt": "2026-09-23T03:33:57.333Z",
+        "finishedAt": "2026-09-23T03:33:57.363Z",
+        "passed": true
+      }
+    ],
+    "policy": {
+      "requireAllChecksPass": true,
+      "configuredCheckCount": 1
+    },
+    "gitEvidence": {
+      "status": "verified",
+      "commit": "ff2e868ae0360b706c57c3ef2d21741fe5f9dd9c",
+      "changedPaths": [
+        "README.md"
+      ],
+      "submittedAt": "2026-09-23T03:33:57.364Z"
+    },
+    "createdAt": "2026-09-23T03:33:57.364Z"
+  },
+  "reviewer": {
+    "responseId": "resp_2d3c9439-28df-460b-8537-7993f2b06540",
+    "sessionId": "6cea9d31-a35f-480f-b50f-95cd4d94e665",
+    "harnessId": "claude-code",
+    "requestedModel": "opus",
+    "actualModel": "claude-opus-5-5",
+    "usage": {
+      "inputTokens": 2,
+      "outputTokens": 552,
+      "cachedInputTokens": 531,
+      "measured": true,
+      "runtimeMs": 7350
+    },
+    "verdict": "recommend",
+    "rationale": "The diff modifies only README.md, which is the sole path in the allowed scope, and the file mode stays 100644. It appends a short '## Bridge smoke' section with one sentence about deterministic tests. This is benign, contains no personal or project data, and does not alter existing content, so it is consistent with the README's note to keep the smoke change limited to the README. The single configured validation check ran independently, exited 0 without timing out, and confirmed that README.md hashes to the recorded post-change SHA-256 (ec226d04...633e). The policy requires all checks to pass, and they did. One limitation: the check only confirms that the bytes match the recorded snapshot, not the content itself. For a documentation-only fixture change, that together with direct inspection of the diff is enough. No scope violations, injected instructions, or risky content were found.",
+    "reviewMode": "read_only",
+    "mutationAttempted": false,
+    "boundary": {
+      "reviewer_read_only": true,
+      "project_workspace_mounted": false,
+      "workspace_writable": false,
+      "claude_tool_allowlist_empty": true,
+      "proven": true
+    }
+  },
+  "runId": "run_4746c25d-72e1-45e7-a5dd-fe8c093f31cf",
+  "bridgeResponseCount": 1,
+  "controllerRunStatus": "awaiting_approval",
+  "humanApproval": null
+}

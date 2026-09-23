@@ -1,0 +1,52 @@
+{
+  "evidenceVersion": 1,
+  "validation": "verified_by_foreman_git_comparison",
+  "acceptance": "not_decided",
+  "baseCommit": "ff2e868ae0360b706c57c3ef2d21741fe5f9dd9c",
+  "scopeVerified": true,
+  "completeSnapshot": {
+    "reportedComplete": true,
+    "reportedErrors": 0,
+    "entryCount": 4
+  },
+  "bridgeClaim": {
+    "baseCommit": "ff2e868ae0360b706c57c3ef2d21741fe5f9dd9c"
+  },
+  "allowedScope": [
+    "README.md"
+  ],
+  "changes": [
+    {
+      "kind": "modify",
+      "path": "README.md",
+      "before": {
+        "kind": "file",
+        "mode": "100644",
+        "size": 193,
+        "sha256": "b8a83e8f2fa47b062892aad6631dde26045516975d73bd6085cf5be308da5245",
+        "contentBase64": "IyBEaXNwb3NhYmxlIFdvcmtlciBFZGl0IEZpeHR1cmUKClRoaXMgcmVwb3NpdG9yeSBjb250YWlucyBubyBwcm9qZWN0IG9yIHBlcnNvbmFsIGRhdGEuCgojIyBHcmVldGluZwoKVGhlIHNlbGVjdGVkIGdyZWV0aW5nIGlzIGBoZWxsb2AuCgojIyBOb3RlcwoKS2VlcCB0aGlzIHNtb2tlIGNoYW5nZSBsaW1pdGVkIHRvIHRoZSBSRUFETUUuCg=="
+      },
+      "after": {
+        "kind": "file",
+        "mode": "100644",
+        "size": 354,
+        "sha256": "ec226d04f0a4bb12dac8bb031969ed266f892929161dac7da361485fe587633e",
+        "contentBase64": "IyBEaXNwb3NhYmxlIFdvcmtlciBFZGl0IEZpeHR1cmUKClRoaXMgcmVwb3NpdG9yeSBjb250YWlucyBubyBwcm9qZWN0IG9yIHBlcnNvbmFsIGRhdGEuCgojIyBHcmVldGluZwoKVGhlIHNlbGVjdGVkIGdyZWV0aW5nIGlzIGBoZWxsb2AuCgojIyBOb3RlcwoKS2VlcCB0aGlzIHNtb2tlIGNoYW5nZSBsaW1pdGVkIHRvIHRoZSBSRUFETUUuCgojIyBCcmlkZ2Ugc21va2UKCkRldGVybWluaXN0aWMgdGVzdHMgcHJvZHVjZSB0aGUgc2FtZSByZXN1bHQgb24gZXZlcnkgcnVuLCBzbyBmYWlsdXJlcyBwb2ludCB0byByZWFsIHJlZ3Jlc3Npb25zIHJhdGhlciB0aGFuIGZsYWt5IHRpbWluZyBvciBlbnZpcm9ubWVudCBub2lzZS4K"
+      }
+    }
+  ],
+  "reviewDiff": "### modify: README.md\n- mode 100644, 193 bytes, sha256 b8a83e8f2fa47b062892aad6631dde26045516975d73bd6085cf5be308da5245\n+ mode 100644, 354 bytes, sha256 ec226d04f0a4bb12dac8bb031969ed266f892929161dac7da361485fe587633e\n\n```diff\n--- a/README.md\n+++ b/README.md\n@@ -1,11 +1,15 @@\n # Disposable Worker Edit Fixture\n \n This repository contains no project or personal data.\n \n ## Greeting\n \n The selected greeting is `hello`.\n \n ## Notes\n \n Keep this smoke change limited to the README.\n+\n+## Bridge smoke\n+\n+Deterministic tests produce the same result on every run, so failures point to real regressions rather than flaky timing or environment noise.\n```\n",
+  "responseId": "resp_8f8f4014-ac96-4c8b-9dd9-f9b0fc10c64d",
+  "sessionId": "b33b15f7-32e5-46be-9946-908e76a6b52c",
+  "actualModel": "claude-opus-5-5",
+  "requestedModel": "opus",
+  "modelFallback": true,
+  "usage": {
+    "input_tokens": 6,
+    "output_tokens": 328,
+    "input_tokens_details": {
+      "cached_tokens": 9105
+    }
+  },
+  "workspaceId": "ws_819c1c7b-46d8-4e78-812d-e6acd6931de9"
+}
