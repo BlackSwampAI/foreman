@@ -1,0 +1,40 @@
+{
+  "evidenceVersion": 1,
+  "provenance": "single_live_gemini-cli_worker_call",
+  "status": "failed",
+  "harnessId": "gemini-cli",
+  "requestedModel": "gemini-3.5-flash",
+  "cliVersion": "0.60.0",
+  "cliVersionSource": "provided_for_installed_host_cli",
+  "responseId": "resp_64510ecd-21a2-43f4-b8a2-14cca62f8093",
+  "sessionId": null,
+  "runId": "run_42038f5b-f52d-43b2-a56f-1b68e1a00ea6",
+  "taskId": "tsk_8300f052-477c-4007-84fc-aaf6e3195f4d",
+  "workspaceId": "ws_14246816-c3aa-491c-9787-717cdbc12c1d",
+  "pinnedBaseCommit": "f90af92ee2ef7261983215e77b66e2aeb4bf56b5",
+  "taskDigest": "31ef14d35c1578dbb383784b0bfbf7f7ad77a4bcfad5618d44cf76d7b70ec650",
+  "uhpSubmissionAttempts": 1,
+  "liveCliInvocations": 0,
+  "providerRequestCount": "unavailable",
+  "wallTimeMs": 61,
+  "failureCategory": "workspace_or_permission",
+  "terminalStatus": "failed",
+  "modelStatus": "unavailable",
+  "executionStage": "boundary_probe",
+  "boundaryDiagnostic": {
+    "category": "runtime_path_unavailable",
+    "exitCode": 1,
+    "signal": null
+  },
+  "measuredUsage": null,
+  "toolAndPermissionEvidence": {
+    "events": [],
+    "permissions": {
+      "status": "not_reported_by_bridge",
+      "harnessId": "gemini-cli"
+    }
+  },
+  "retry": "forbidden_by_durable_call_lock",
+  "tokenAccountingCaveat": "The task text bytes are identical. AGY adds its existing Worker agent instructions; Gemini CLI uses its own system prompt. CLI token accounting fields may therefore differ in both scope and definition.",
+  "capturedAt": "2026-09-23T18:01:26.675Z"
+}

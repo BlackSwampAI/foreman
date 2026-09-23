@@ -1,18 +1,17 @@
-# Three-harness workflow
+# Host CLI workflow
 
 This guide describes the local workflow wired through Foreman's UI and the
-experimental host-side UHP CLI bridge. The bridge invokes the installed
-Claude Code, Codex CLI, and Antigravity CLI (`agy`) as the current OS user. It
-uses their existing host sign-ins. Do not configure provider API keys for this
-workflow, and do not copy credentials into Foreman, a task workspace, or a
-bridge workspace. The bridge keeps the configured auth directories read-only
-and isolates each task workspace.
+experimental host-side UHP CLI bridge. The bridge invokes installed Claude
+Code, Codex CLI, and Antigravity CLI (`agy`) as the current OS user. It uses
+their existing host sign-ins. Do not configure
+provider API keys for this workflow, and do not copy credentials into Foreman,
+a task workspace, or a bridge workspace. The bridge keeps configured auth
+directories read-only and isolates each task workspace.
 
 ## Start the bridge and Foreman
 
-Use Node 24 and pnpm 11. Confirm the three CLIs and the Linux isolation tool are
-available, and confirm that AGY's model listing on this host includes the
-explicit Worker model:
+Use Node 24 and pnpm 11. Confirm the CLIs you intend to use and the Linux
+isolation tool are available. Confirm AGY lists the explicit Worker model:
 
 ```sh
 claude --version
@@ -20,6 +19,22 @@ codex --version
 agy models
 bwrap --version
 ```
+
+Gemini CLI was investigated but is not enabled in this checkout. The installed
+version is 0.60.0, and host settings select `gemini-api-key`; the active Google
+account is null and no OAuth credential file is present. The operator
+confirmed that account login is unavailable. Although this CLI version
+supports `oauth-personal`, no legitimate cached OAuth session is available.
+Do not copy credentials, expose the configured API key to the production
+bridge, or make unverified keychain credentials available to a task workspace.
+AGY remains the default Worker.
+
+The [identical-task comparison attempt](../investigations/worker-comparison/RESULT.md)
+created separate pinned workspaces but stopped in a bridge boundary probe
+before Gemini CLI launched. It supplies no token comparison or evidence about
+why the previous AGY Worker reported 109,676 tokens. The CLI's API-key
+configuration was authorized only for that one-off attempt and does not make
+Gemini a selectable production harness.
 
 Use a disposable Git repository for the Worker source.
 The bridge and Foreman must point at the same repository. Set the validation
@@ -127,7 +142,9 @@ returned snapshot with the pinned Git base.
    budgets and Worker attempt limit. Defaults are Planner 3, Orchestrator 2,
    Worker 1, Reviewer 1, and one Worker attempt. These limits count CLI turns
    and Worker attempts; AGY token usage and internal steps are unbounded per
-   CLI invocation, and AGY `max_step` is ignored. The controller automatically
+   CLI invocation, and AGY `max_step` is ignored. CLI counters are harness
+   reports, may use different accounting, and do not establish provider
+   request counts or cost. The controller automatically
    sends the recorded Planner request and guidance to Orchestrator. Orchestrator
    must return a strict JSON object containing a bounded `workerTask`; only a
    successful, bound proposal can advance the run.
