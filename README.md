@@ -16,9 +16,10 @@ including any discovered AGY Flash model, with global, project, and run-level
 choices in the UI. Gemini CLI is not enabled in this checkout because the
 available host profile uses API-key auth and no supported OAuth login is
 available. The [Gemini investigation](docs/gemini-cli-worker-investigation.md)
-records the host-login boundary. A [bounded comparison attempt](investigations/worker-comparison/RESULT.md)
-stopped before CLI execution, so no Gemini-versus-AGY token result is
-available. Foreman does not copy credentials or require a provider API key.
+records the host-login boundary; Gemini CLI was discarded for this Worker
+path. The [AGY usage follow-up](docs/agy-worker-usage-followup.md) records four
+verified same-task Worker turns and an optional low-effort setting. Foreman
+does not copy credentials or require a provider API key.
 
 Follow [the host CLI workflow guide](docs/three-harness-workflow.md) to
 start the local bridge and configure a validation policy. Talk with the Planner

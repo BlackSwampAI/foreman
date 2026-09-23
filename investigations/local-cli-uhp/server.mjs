@@ -29,6 +29,10 @@ const MAX_REVIEW_DIFF = 48_000;
 const SSE_KEEPALIVE_MS = (() => { const value = Number(process.env.LOCAL_CLI_UHP_KEEPALIVE_MS); return Number.isFinite(value) && value > 0 ? Math.min(value, 60_000) : 10_000; })();
 const AGY_WORKER_AGENT = 'foreman-worker';
 const AGY_WORKER_TOOLS = Object.freeze(['view_file','replace_file_content','multi_replace_file_content','write_to_file','finish']);
+const AGY_WORKER_EFFORT = process.env.AGY_WORKER_EFFORT;
+if (AGY_WORKER_EFFORT !== undefined && !['low', 'medium', 'high'].includes(AGY_WORKER_EFFORT)) {
+  throw new Error('AGY_WORKER_EFFORT must be low, medium, or high');
+}
 const HARNESS = {
   claude: { id: 'claude-code', bin: process.env.CLAUDE_BIN ?? 'claude', authDir: process.env.CLAUDE_CONFIG_DIR, model: process.env.CLAUDE_MODEL },
   codex: { id: 'codex-cli', bin: process.env.CODEX_BIN ?? 'codex', authDir: process.env.CODEX_HOME, model: process.env.CODEX_MODEL },
@@ -142,7 +146,8 @@ function parseAgy(text, stderr = '') {
   const initTools = Array.isArray(initInfo.tools) ? initInfo.tools.filter(t => typeof t === 'string' && /^[A-Za-z0-9_.-]{1,80}$/.test(t)).slice(0, 80) : [];
   const cwd = typeof initInfo.cwd === 'string' ? (initInfo.cwd === '/workspace' ? 'assigned_workspace' : 'other') : 'unreported';
   const reportedCliTurns = Number.isSafeInteger(result?.num_turns) && result.num_turns >= 0 && result.num_turns <= 1000000 ? result.num_turns : undefined;
-  return { text: responseText, model, session: conversation, turnCompleted: !!result, isError: result?.status !== 'SUCCESS', mutationAttempted, malformedOutput, unrecognizedOutput, usage: result?.usage && typeof result.usage === 'object' ? result.usage : undefined, diagnostic:{ permission_mode:permissionMode, observed_agent:agent ?? 'unreported', cwd, available_tools:initTools, available_tools_semantics:'headless_init_tools_available_to_cli_not_profile_allowlist', tool_events:toolEvents, reported_cli_turns:reportedCliTurns, soft_denial_observed:softDenialObserved, result_status:typeof result?.status === 'string' && /^(SUCCESS|ERROR|CANCELED|INTERRUPTED|INVALID|WAITING|RUNNING)$/.test(result.status) ? result.status : 'unreported', response_empty:responseText.length === 0, streamed_agent_text_characters:chunks.reduce((n,s)=>n+s.length,0) } };
+  const distinctToolSteps = new Set(toolEvents.map((update, ordinal) => Number.isSafeInteger(update.step_index) ? String(update.step_index) : `unindexed:${ordinal}`));
+  return { text: responseText, model, session: conversation, turnCompleted: !!result, isError: result?.status !== 'SUCCESS', mutationAttempted, malformedOutput, unrecognizedOutput, usage: result?.usage && typeof result.usage === 'object' ? result.usage : undefined, diagnostic:{ permission_mode:permissionMode, observed_agent:agent ?? 'unreported', cwd, available_tools:initTools, available_tools_semantics:'headless_init_tools_available_to_cli_not_profile_allowlist', tool_events:toolEvents, tool_lifecycle_update_count:toolUpdates.length, distinct_tool_step_count:distinctToolSteps.size, reported_cli_turns:reportedCliTurns, soft_denial_observed:softDenialObserved, result_status:typeof result?.status === 'string' && /^(SUCCESS|ERROR|CANCELED|INTERRUPTED|INVALID|WAITING|RUNNING)$/.test(result.status) ? result.status : 'unreported', response_empty:responseText.length === 0, response_characters:responseText.length, streamed_agent_text_characters:chunks.reduce((n,s)=>n+s.length,0) } };
 }
 function cliArgs(kind, model, timeout, maxStep, reviewer = false, sessionId, persistentContext = false) {
   if (kind === 'claude') return reviewer
@@ -151,7 +156,7 @@ function cliArgs(kind, model, timeout, maxStep, reviewer = false, sessionId, per
   return ['--ask-for-approval', 'never', 'exec', ...(sessionId ? ['resume', sessionId] : []), '--json', ...(!persistentContext ? ['--ephemeral'] : []), '--sandbox', reviewer || persistentContext ? 'read-only' : 'workspace-write', '--ignore-user-config', ...(reviewer ? ['--ignore-rules'] : []), '--skip-git-repo-check', '--model', model, '-'];
 }
 function agyArgs(model, timeout, conversationId, reviewer = false, worker = false) {
-  return ['--output-format', 'stream-json', '--model', model, '--print-timeout', `${timeout}s`, `--mode=${reviewer ? 'plan' : 'accept-edits'}`, ...(worker ? ['--add-dir','/workspace','--agent', AGY_WORKER_AGENT] : []), ...(conversationId ? ['--conversation', conversationId] : [])];
+  return ['--output-format', 'stream-json', '--model', model, '--print-timeout', `${timeout}s`, `--mode=${reviewer ? 'plan' : 'accept-edits'}`, ...(worker ? ['--add-dir','/workspace','--agent', AGY_WORKER_AGENT, ...(AGY_WORKER_EFFORT ? ['--effort', AGY_WORKER_EFFORT] : [])] : []), ...(conversationId ? ['--conversation', conversationId] : [])];
 }
 
 function agyWorkerAgentDocument() {
@@ -163,6 +168,12 @@ function agyWorkerToolPolicy(observedAgent, toolEvents) {
   const expected = [...AGY_WORKER_TOOLS].sort();
   const unsafeToolEvents = [...new Set(observed.filter(name => !AGY_WORKER_TOOLS.includes(name)))];
   return { expected_profile_tools:expected, selected_agent:typeof observedAgent === 'string' ? observedAgent : 'unreported', selected_agent_matches:observedAgent === AGY_WORKER_AGENT, observed_executed_tool_events:observed, unsafe_tool_events:unsafeToolEvents, executed_tools_within_profile:unsafeToolEvents.length === 0 };
+}
+
+function agyWorkerPolicyFailureMessage(diagnostic) {
+  return diagnostic?.observed_agent === 'unreported'
+    ? 'AGY Worker did not emit an initialization event identifying the selected agent'
+    : 'AGY Worker selected the wrong agent or executed an out-of-profile tool';
 }
 
 function agyWorkerPrompt(prompt) {
@@ -651,6 +662,7 @@ async function runTask(record, prompt) {
   }
   if (kind === 'claude' && persistentRole) record.metadata.cli_invocation = { executable: '/opt/claude', host_executable: h.bin, args: [...args] };
   const input = reviewer ? reviewerPrompt(prompt, record.metadata.review_evidence) : kind === 'agy' && !persistentRole ? agyWorkerPrompt(prompt) : prompt;
+  if (kind !== 'claude' && !reviewer) record.metadata.submitted_prompt_sha256 = createHash('sha256').update(input).digest('hex');
   const reviewerState = reviewer ? { dir: work, authDir: kind === 'claude' ? await realpath(h.authDir) : undefined } : undefined;
   let codexRuntime;
   if (kind === 'codex-cli') {
@@ -733,7 +745,7 @@ async function runTask(record, prompt) {
   if (kind === 'codex-cli' || kind === 'agy') record.metadata.ignored_fields = ['max_step'];
   if (kind === 'agy') record.metadata.actual_model_status = parsed.model ? 'observed' : 'unavailable';
   if (kind === 'agy') {
-    record.metadata.agy_diagnostic = { ...parsed.diagnostic, ...(agyWorker ? { requested_agent:AGY_WORKER_AGENT } : {}), requested_execution_mode:reviewer || persistentRole ? 'plan' : 'accept-edits', outcome:parsed.diagnostic.soft_denial_observed ? parsed.diagnostic.response_empty ? 'soft_denied_without_response' : 'soft_denial_with_response' : parsed.diagnostic.response_empty ? 'completed_without_response' : 'response_received' };
+    record.metadata.agy_diagnostic = { ...parsed.diagnostic, ...(agyWorker ? { requested_agent:AGY_WORKER_AGENT, agent_definition_sha256:createHash('sha256').update(agyWorkerAgentDocument()).digest('hex') } : {}), requested_execution_mode:reviewer || persistentRole ? 'plan' : 'accept-edits', outcome:parsed.diagnostic.soft_denial_observed ? parsed.diagnostic.response_empty ? 'soft_denied_without_response' : 'soft_denial_with_response' : parsed.diagnostic.response_empty ? 'completed_without_response' : 'response_received' };
     if (!reviewer && !persistentRole) record.metadata.agy_permission_policy = { read_file_allow:'read_file(/workspace)', write_file_allow:'write_file(/workspace)', directory_listing:'not allowed; task must name exact relative file paths', terminal_sandbox_disabled_for_nested_runtime:true, outer_bubblewrap_isolation:true };
   }
   if (record.model && record.model !== record.requested_model) {
@@ -742,7 +754,7 @@ async function runTask(record, prompt) {
   }
   if (reviewer) { record.metadata.foreman_review_mode = 'read_only'; record.metadata.reviewer_mutation_attempted = parsed.mutationAttempted === true; record.metadata.reviewer_output_overflow = cliOutputOverflow; record.metadata.reviewer_validation = record.metadata.review_evidence.controllerValidation; if (kind === 'agy') record.metadata.reviewer_boundary = { ...record.metadata.reviewer_boundary, tool_attempts_blocked: parsed.mutationAttempted === true, proven: true }; }
   if (kind !== 'claude' && !reviewer) record.metadata.cli_output_overflow = cliOutputOverflow;
-  if (record.status !== 'completed') record.error = { message: spawnError ? 'CLI could not be started' : invalidAgyWorkerPolicy ? 'AGY Worker selected the wrong agent or executed an out-of-profile tool' : reviewer && parsed.mutationAttempted ? 'Reviewer attempted to use a tool or mutate state' : cliOutputOverflow ? 'CLI output exceeded the bounded stream limit' : (reviewer || kind !== 'claude') && (parsed.malformedOutput || parsed.unrecognizedOutput) ? 'CLI output contained malformed or unrecognized stream records' : kind === 'codex-cli' && !reviewer && !parsed.session ? exit.code !== 0 || exit.signal ? 'Codex CLI exited before reporting a session id' : 'Codex CLI did not report a session id' : (kind === 'codex-cli' || kind === 'agy') && !reviewer && !parsed.turnCompleted ? `${kind === 'agy' ? 'Antigravity CLI' : 'Codex CLI'} exited without completing a turn` : parsed.isError ? kind === 'claude' ? 'Claude Code reported an unsuccessful task' : kind === 'agy' ? 'Antigravity CLI reported an unsuccessful task' : 'Codex CLI reported an unsuccessful task' : missingReportedIdentity ? 'CLI did not report an actual model and session id' : active.cancelRequested ? 'CLI task was cancelled' : exit.signal ? `CLI terminated by ${exit.signal}` : 'CLI exited unsuccessfully' };
+  if (record.status !== 'completed') record.error = { message: spawnError ? 'CLI could not be started' : invalidAgyWorkerPolicy ? agyWorkerPolicyFailureMessage(parsed.diagnostic) : reviewer && parsed.mutationAttempted ? 'Reviewer attempted to use a tool or mutate state' : cliOutputOverflow ? 'CLI output exceeded the bounded stream limit' : (reviewer || kind !== 'claude') && (parsed.malformedOutput || parsed.unrecognizedOutput) ? 'CLI output contained malformed or unrecognized stream records' : kind === 'codex-cli' && !reviewer && !parsed.session ? exit.code !== 0 || exit.signal ? 'Codex CLI exited before reporting a session id' : 'Codex CLI did not report a session id' : (kind === 'codex-cli' || kind === 'agy') && !reviewer && !parsed.turnCompleted ? `${kind === 'agy' ? 'Antigravity CLI' : 'Codex CLI'} exited without completing a turn` : parsed.isError ? kind === 'claude' ? 'Claude Code reported an unsuccessful task' : kind === 'agy' ? 'Antigravity CLI reported an unsuccessful task' : 'Codex CLI reported an unsuccessful task' : missingReportedIdentity ? 'CLI did not report an actual model and session id' : active.cancelRequested ? 'CLI task was cancelled' : exit.signal ? `CLI terminated by ${exit.signal}` : 'CLI exited unsuccessfully' };
   if (persistentRole && parsed.session) {
     record.metadata.role_session = { binding: record.metadata.role_session_binding, cli_session_id: parsed.session, state_path: record.metadata.role_session_state_path };
   }

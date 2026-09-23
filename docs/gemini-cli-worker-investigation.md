@@ -1,5 +1,10 @@
 # Gemini CLI Worker investigation
 
+The operator discarded Gemini CLI for this Worker path after a direct greeting
+stalled for about 2.5 minutes. Follow-up work and live measurement focus on
+[AGY Flash](agy-worker-usage-followup.md). The findings below remain a record
+of the earlier one-off attempt and production authentication boundary.
+
 ## Result
 
 The installed Gemini CLI is version **0.60.0** (`@google/gemini-cli` package;

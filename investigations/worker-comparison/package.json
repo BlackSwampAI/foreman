@@ -7,6 +7,6 @@
     "node": ">=24"
   },
   "scripts": {
-    "test": "node --test test/label.check.ts"
+    "test": "node --test test/attempts.check.mjs test/label.check.ts"
   }
 }

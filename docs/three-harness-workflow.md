@@ -29,12 +29,20 @@ Do not copy credentials, expose the configured API key to the production
 bridge, or make unverified keychain credentials available to a task workspace.
 AGY remains the default Worker.
 
-The [identical-task comparison attempt](../investigations/worker-comparison/RESULT.md)
-created separate pinned workspaces but stopped in a bridge boundary probe
-before Gemini CLI launched. It supplies no token comparison or evidence about
-why the previous AGY Worker reported 109,676 tokens. The CLI's API-key
-configuration was authorized only for that one-off attempt and does not make
-Gemini a selectable production harness.
+The initial [Gemini comparison attempt](../investigations/worker-comparison/RESULT.md)
+stopped before CLI execution. The operator subsequently discarded Gemini CLI
+for this Worker path. The [AGY usage follow-up](agy-worker-usage-followup.md)
+records four verified same-task AGY runs, including two with explicit low
+effort. The CLI's API-key configuration was authorized only for the one-off
+Gemini attempt and does not make Gemini a selectable production harness.
+
+`AGY_WORKER_EFFORT=low` is an optional bridge setting for AGY Worker turns.
+It adds an explicit `--effort low` flag without changing the requested model or
+Planner, Orchestrator, and Reviewer turns. Leave it unset for existing behavior.
+Two low-effort bounded edits passed the same Foreman checks and reported
+23,809–23,855 total tokens, versus 24,124–25,964 without the flag. These
+four runs do not establish savings on larger tasks or explain the historical
+109,676-token Worker report.
 
 Use a disposable Git repository for the Worker source.
 The bridge and Foreman must point at the same repository. Set the validation

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Same-task AGY/Gemini Worker comparison. Prepare is model-call-free. Each
-// execute-once invocation takes a durable per-harness lock before submission.
+// AGY Worker diagnostic runner. Preparation is model-call-free.
+// Every explicit attempt ID has its own fresh workspace, lock and evidence.
 // Reports contain bounded evidence only: never raw CLI output or credentials.
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
@@ -13,34 +13,38 @@ import { Controller } from '../../dist/controller.js';
 import { JsonStore } from '../../dist/store.js';
 import { UhpClient } from '../../dist/uhp.js';
 import { fetchBridgeSnapshot, validateWorkerOutput, verifyWorkerSnapshot } from '../../dist/verified-workspace.js';
+import { attemptIdFor, comparisonClientTimeouts, parseAttemptCount, parseAttemptId, parseComparisonTimeoutSeconds } from './attempts.mjs';
 
 const exec = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
 const fixtureRoot = here;
 const [mode, ...args] = process.argv.slice(2);
-const usage = 'Usage: node compare.mjs --prepare-only <loopback-uhp-url> <disposable-repo> <base-sha> <gemini-model> <agy-model> <gemini-cli-version|unavailable> <agy-cli-version|unavailable>\n       node compare.mjs --execute-once <gemini-cli|antigravity-cli> <loopback-uhp-url> <disposable-repo> <base-sha> <gemini-model> <agy-model> <gemini-cli-version|unavailable> <agy-cli-version|unavailable>';
+const usage = 'Usage: FOREMAN_WORKER_COMPARISON_ATTEMPTS=1..10 node compare.mjs --prepare-only <loopback-uhp-url> <disposable-repo> <base-sha> <agy-model> <agy-cli-version|unavailable>\n       node compare.mjs --execute-attempt antigravity-cli <attempt-001..010> <loopback-uhp-url> <disposable-repo> <base-sha> <agy-model> <agy-cli-version|unavailable>';
 if (mode === '--help' || mode === '-h') { process.stdout.write(`${usage}\n`); process.exit(0); }
-const executeHarness = mode === '--execute-once' ? args.shift() : undefined;
-if (!['--prepare-only', '--execute-once'].includes(mode) || (mode === '--execute-once' && !['gemini-cli', 'antigravity-cli'].includes(executeHarness)) || args.length !== 7) throw new Error(usage);
+const executeHarness = mode === '--execute-attempt' ? args.shift() : undefined;
+const attemptId = mode === '--execute-attempt' ? args.shift() : undefined;
+const attemptCount = parseAttemptCount(process.env.FOREMAN_WORKER_COMPARISON_ATTEMPTS);
+if (!['--prepare-only', '--execute-attempt'].includes(mode) || (mode === '--execute-attempt' && (executeHarness !== 'antigravity-cli' || !attemptId)) || args.length !== 5) throw new Error(usage);
+if (mode === '--execute-attempt') parseAttemptId(attemptId, attemptCount);
 
-const [baseUrl, repoArg, baseCommitArg, geminiModel, agyModel, geminiCliVersion, agyCliVersion] = args;
+const [baseUrl, repoArg, baseCommitArg, agyModel, agyCliVersion] = args;
 const repoPath = resolve(repoArg);
 const baseCommit = baseCommitArg.toLowerCase();
 if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(baseCommit)) throw new Error('A full Git base commit SHA is required');
 if (!/^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?(?:\/.*)?$/.test(baseUrl)) throw new Error('The UHP bridge URL must be loopback-only');
-if (!geminiModel.trim() || !agyModel.trim()) throw new Error('Both requested model IDs must be explicit and non-empty');
-if (geminiModel !== 'gemini-3.5-flash' || agyModel !== 'gemini-3.8-flash-low') throw new Error('This comparison is pinned to Gemini CLI gemini-3.5-flash and AGY gemini-3.8-flash-low; model substitutions are not allowed');
+if (!agyModel.trim()) throw new Error('AGY model ID must be explicit and non-empty');
 const allowedScope = ['src/label.ts', 'test/label.check.ts'];
 const validationCommands = [{ name: 'pnpm test', command: 'pnpm', args: ['test'] }];
 const taskText = await readFile(join(repoPath, 'TASK.txt'), 'utf8');
 const taskDigest = createHash('sha256').update(taskText).digest('hex');
-const baseModels = { 'gemini-cli': geminiModel, 'antigravity-cli': agyModel };
-const cliVersions = { 'gemini-cli': geminiCliVersion, 'antigravity-cli': agyCliVersion };
+const baseModels = { 'antigravity-cli': agyModel };
+const cliVersions = { 'antigravity-cli': agyCliVersion };
 const stateDir = resolve(process.env.FOREMAN_WORKER_COMPARISON_STATE ?? join(tmpdir(), `foreman-worker-comparison-state-${baseCommit.slice(0, 12)}`));
 const preparedPath = join(stateDir, 'prepared.json');
 const evidenceDir = join(stateDir, 'evidence');
 const statePath = join(stateDir, 'foreman-state.json');
-const client = new UhpClient({ baseUrl, timeoutMs: 90_000, streamInactivityTimeoutMs: 75_000 });
+const timeoutSeconds = parseComparisonTimeoutSeconds(process.env.FOREMAN_WORKER_COMPARISON_TIMEOUT_SECONDS);
+const client = new UhpClient({ baseUrl, ...comparisonClientTimeouts(timeoutSeconds) });
 const controller = new Controller(new JsonStore(statePath), client, false, true, undefined, undefined, 75);
 controller.configureVerifiedWorkspace({
   repoPath,
@@ -93,26 +97,8 @@ function safeUsage(value) {
   }
   return result;
 }
-function safeNumericTree(value, depth = 0) {
-  if (depth > 4 || !value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-  const output = {};
-  for (const [key, item] of Object.entries(value).slice(0, 100)) {
-    if (!/^[A-Za-z0-9_.:-]{1,80}$/.test(key)) continue;
-    if (typeof item === 'number' && Number.isFinite(item)) output[key] = item;
-    else if (item && typeof item === 'object' && !Array.isArray(item)) {
-      const child = safeNumericTree(item, depth + 1);
-      if (child && Object.keys(child).length) output[key] = child;
-    }
-  }
-  return Object.keys(output).length ? output : undefined;
-}
-function geminiPerModelUsage(metadata) {
-  const models = metadata?.gemini_usage?.models ?? metadata?.gemini_diagnostic?.stats?.models ?? metadata?.gemini_stats?.models ?? metadata?.stats?.models;
-  if (!models || typeof models !== 'object' || Array.isArray(models)) return null;
-  return Object.fromEntries(Object.entries(models).slice(0, 20).map(([model, stats]) => [model.replace(/[^A-Za-z0-9_.:-]/g, '_').slice(0, 100), safeNumericTree(stats)]).filter(([, stats]) => stats));
-}
 function toolEvidence(metadata, harnessId) {
-  const diagnostics = [metadata?.gemini_diagnostic, metadata?.gemini_cli_diagnostic, metadata?.agy_diagnostic, metadata?.worker_diagnostic].filter(value => value && typeof value === 'object');
+  const diagnostics = [metadata?.agy_diagnostic, metadata?.worker_diagnostic].filter(value => value && typeof value === 'object');
   const rawEvents = diagnostics.flatMap(value => [
     ...(Array.isArray(value.tool_events) ? value.tool_events : []),
     ...(Array.isArray(value.tool_steps) ? value.tool_steps : []),
@@ -140,7 +126,17 @@ function toolEvidence(metadata, harnessId) {
   }
   const denied = metadata?.denied_actions;
   if (Array.isArray(denied)) permissions.deniedActionCount = denied.length;
-  return { events, permissions: Object.keys(permissions).length ? permissions : { status: 'not_reported_by_bridge', harnessId } };
+  const diagnostic = diagnostics.at(-1) ?? {};
+  const numeric = key => Number.isFinite(diagnostic[key]) ? diagnostic[key] : null;
+  return {
+    events,
+    permissions: Object.keys(permissions).length ? permissions : { status: 'not_reported_by_bridge', harnessId },
+    toolLifecycleUpdateCount: numeric('tool_lifecycle_update_count'),
+    distinctToolStepCount: numeric('distinct_tool_step_count'),
+    reportedCliTurns: numeric('reported_cli_turns'),
+    terminalResultStatus: typeof diagnostic.result_status === 'string' ? diagnostic.result_status.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 40) : 'not_reported_by_bridge',
+    responseCharacters: numeric('response_characters'),
+  };
 }
 function failureCategory(error) {
   const text = String(error).toLowerCase();
@@ -156,12 +152,15 @@ function responseEnvelope(response, harnessId, submitted) {
   const actualModel = typeof response?.model === 'string' && response.model ? response.model : null;
   const actualModelStatus = actualModel ? 'observed' : metadata.actual_model_status === 'unavailable' ? 'unavailable' : 'unreported';
   const usage = safeUsage(response?.usage);
-  const diagnosticUsage = safeUsage(metadata.cli_reported_usage ?? metadata.gemini_usage ?? metadata.gemini_usage_cumulative ?? metadata.agy_usage_cumulative ?? metadata.reported_usage);
-  const perModelUsage = geminiPerModelUsage(metadata);
-  const configuredInitModel = metadata.gemini_diagnostic?.init_model ?? metadata.gemini_diagnostic?.configured_model ?? metadata.gemini_cli_diagnostic?.init_model ?? metadata.configured_init_model;
+  const diagnosticUsage = safeUsage(metadata.cli_reported_usage ?? metadata.agy_usage_cumulative ?? metadata.reported_usage);
+  const configuredInitModel = metadata.configured_init_model;
   const invocationArgs = metadata.cli_invocation?.args;
   const modelIndex = Array.isArray(invocationArgs) ? invocationArgs.findIndex((arg, index) => (arg === '--model' || arg === '-m') && typeof invocationArgs[index + 1] === 'string') : -1;
   const cliModelArgument = modelIndex >= 0 ? String(invocationArgs[modelIndex + 1]).slice(0, 120) : null;
+  const effortIndex = Array.isArray(invocationArgs) ? invocationArgs.findIndex((arg, index) => arg === '--effort' && typeof invocationArgs[index + 1] === 'string') : -1;
+  const cliEffortArgument = effortIndex >= 0 && ['low', 'medium', 'high'].includes(invocationArgs[effortIndex + 1]) ? invocationArgs[effortIndex + 1] : null;
+  const toolAndPermissionEvidence = toolEvidence(metadata, harnessId);
+  if (toolAndPermissionEvidence.responseCharacters === null && typeof response?.output_text === 'string') toolAndPermissionEvidence.responseCharacters = response.output_text.length;
   return {
     status: response?.status ?? submitted?.status ?? 'failed',
     harnessId,
@@ -175,12 +174,13 @@ function responseEnvelope(response, harnessId, submitted) {
     runtimeMs: Number.isFinite(submitted?.runtimeMs) ? submitted.runtimeMs : null,
     configuredInitModel: typeof configuredInitModel === 'string' ? configuredInitModel.slice(0, 120) : null,
     configuredInitModelStatus: typeof configuredInitModel === 'string' ? 'reported_by_bridge' : 'not_exposed_by_bridge',
+    promptEvidence: { submittedPromptSha256: typeof metadata.submitted_prompt_sha256 === 'string' && /^[a-f0-9]{64}$/i.test(metadata.submitted_prompt_sha256) ? metadata.submitted_prompt_sha256 : null, agyAgentDefinitionSha256: typeof metadata.agy_diagnostic?.agent_definition_sha256 === 'string' && /^[a-f0-9]{64}$/i.test(metadata.agy_diagnostic.agent_definition_sha256) ? metadata.agy_diagnostic.agent_definition_sha256 : null },
     cliModelArgument,
+    cliEffortArgument,
     cliModelArgumentMatchesRequest: cliModelArgument === (submitted?.requestedModel ?? response?.requested_model ?? metadata.requested_model ?? null),
-    perModelUsageNames: perModelUsage ? Object.keys(perModelUsage) : [],
-    reportedUsage: { uhpUsageFields: usage, cliUsageFields: diagnosticUsage, geminiPerModelStats: perModelUsage },
+    reportedUsage: { uhpUsageFields: usage, cliUsageFields: diagnosticUsage },
     providerRequestCount: 'unavailable',
-    toolAndPermissionEvidence: toolEvidence(metadata, harnessId),
+    toolAndPermissionEvidence,
     executionBoundary: metadata.execution_boundary && typeof metadata.execution_boundary === 'object' ? {
       proven: metadata.execution_boundary.proven === true,
       workspaceWritable: metadata.execution_boundary.workspace_writable === true,
@@ -222,41 +222,45 @@ if (mode === '--prepare-only') {
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
   try {
     const existing = JSON.parse(await readFile(preparedPath, 'utf8'));
-    if (existing.baseUrl !== baseUrl || existing.repoPath !== repoPath || existing.baseCommit !== baseCommit || existing.taskDigest !== taskDigest || JSON.stringify(existing.models) !== JSON.stringify(baseModels)) throw new Error('Existing comparison preparation binds different inputs; use a fresh state directory');
-    process.stdout.write(`${JSON.stringify({ status: 'already_prepared', preparationOnly: true, providerCalls: 0, baseCommit, workspaces: Object.fromEntries(Object.entries(existing.harnesses).map(([id, item]) => [id, item.workspaceId])), executeGemini: `node compare.mjs --execute-once gemini-cli ${baseUrl} ${repoPath} ${baseCommit} ${geminiModel} ${agyModel} ${geminiCliVersion} ${agyCliVersion}` }, null, 2)}\n`);
+    if (existing.baseUrl !== baseUrl || existing.repoPath !== repoPath || existing.baseCommit !== baseCommit || existing.taskDigest !== taskDigest || JSON.stringify(existing.models) !== JSON.stringify(baseModels) || existing.attemptCount !== attemptCount) throw new Error('Existing comparison preparation binds different inputs; use a fresh state directory');
+    process.stdout.write(`${JSON.stringify({ status: 'already_prepared', preparationOnly: true, providerCalls: 0, attemptCount, baseCommit, workspaces: Object.fromEntries(Object.entries(existing.harnesses).map(([id, attempts]) => [id, attempts.map(item => ({ attemptId: item.attemptId, workspaceId: item.workspaceId }))])), execute: `FOREMAN_WORKER_COMPARISON_ATTEMPTS=${attemptCount} node compare.mjs --execute-attempt antigravity-cli attempt-001 ${baseUrl} ${repoPath} ${baseCommit} ${agyModel} ${agyCliVersion}` }, null, 2)}\n`);
     process.exit(0);
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
 
   const discovery = await client.discover(true);
   if (discovery.capabilities.idempotency !== true || discovery.capabilities.streaming !== true) throw new Error('Bridge must advertise streaming and idempotency');
-  const discovered = {
-    'gemini-cli': modeDiscovery(discovery, 'gemini-cli', geminiModel),
-    'antigravity-cli': modeDiscovery(discovery, 'antigravity-cli', agyModel),
-  };
+  const discovered = { 'antigravity-cli': modeDiscovery(discovery, 'antigravity-cli', agyModel) };
   await controller.refreshDiscovery();
   const project = await controller.createProject('Disposable identical Flash Worker comparison');
   const harnesses = {};
-  for (const harnessId of ['gemini-cli', 'antigravity-cli']) {
-    const task = await controller.createTask(project.id, 'Update the label greeting and its test');
-    const run = await controller.createRun(task.id);
-    const model = baseModels[harnessId];
-    await controller.selectRoleConfig('worker', { harnessId, model }, undefined, run.id);
-    const workspace = await controller.prepareWorkerWorkspace(run.id, baseCommit);
-    harnesses[harnessId] = {
-      model,
-      cliVersion: safeVersion(cliVersions[harnessId]),
-      taskId: task.id,
-      runId: run.id,
-      workspaceId: workspace.workspaceId,
-      pinnedBaseCommit: workspace.pinnedBaseCommit,
-      bridgeHarnessName: typeof discovered[harnessId].name === 'string' ? discovered[harnessId].name.slice(0, 100) : harnessId,
-      workerSystemPromptBoundary: harnessId === 'antigravity-cli' ? 'existing AGY Worker agent instructions are bridge-added' : 'Gemini CLI system prompt is CLI-managed and not exposed by the bridge',
-    };
-    if (workspace.pinnedBaseCommit.toLowerCase() !== baseCommit || !workspace.workspaceId) throw new Error(`${harnessId} workspace did not pin the requested base`);
+  for (const harnessId of ['antigravity-cli']) {
+    harnesses[harnessId] = [];
+    for (let index = 1; index <= attemptCount; index++) {
+      const attempt = attemptIdFor(index);
+      const task = await controller.createTask(project.id, 'Update the label greeting and its test');
+      const run = await controller.createRun(task.id);
+      const model = baseModels[harnessId];
+      await controller.selectRoleConfig('worker', { harnessId, model }, undefined, run.id);
+      const workspace = await controller.prepareWorkerWorkspace(run.id, baseCommit);
+      harnesses[harnessId].push({
+        attemptId: attempt,
+        model,
+        cliVersion: safeVersion(cliVersions[harnessId]),
+        taskId: task.id,
+        runId: run.id,
+        workspaceId: workspace.workspaceId,
+        pinnedBaseCommit: workspace.pinnedBaseCommit,
+        bridgeHarnessName: typeof discovered[harnessId].name === 'string' ? discovered[harnessId].name.slice(0, 100) : harnessId,
+        workerSystemPromptBoundary: 'existing AGY Worker agent instructions are bridge-added',
+      });
+      if (workspace.pinnedBaseCommit.toLowerCase() !== baseCommit || !workspace.workspaceId) throw new Error(`${harnessId} workspace did not pin the requested base`);
+    }
   }
-  if (harnesses['gemini-cli'].workspaceId === harnesses['antigravity-cli'].workspaceId) throw new Error('Comparison requires separate Worker workspaces');
+  const allWorkspaces = Object.values(harnesses).flat().map(item => item.workspaceId);
+  if (new Set(allWorkspaces).size !== allWorkspaces.length) throw new Error('Every comparison attempt requires a distinct Worker workspace');
   const record = {
-    version: 1,
+    version: 2,
+    attemptCount,
     baseUrl,
     repoPath,
     baseCommit,
@@ -270,25 +274,21 @@ if (mode === '--prepare-only') {
     taskBytesIdentical: true,
     allowedScope,
     validation: { name: 'pnpm test', command: 'pnpm', args: ['test'] },
-    tokenAccountingCaveat: 'The task text bytes are identical. AGY adds its existing Worker agent instructions; Gemini CLI uses its own system prompt. CLI token accounting fields may therefore differ in both scope and definition.',
+    tokenAccountingCaveat: 'AGY adds its existing Worker agent instructions to the submitted task. CLI token accounting fields may differ from the submitted task byte count in scope and definition.',
     preparedAt: new Date().toISOString(),
   };
   await writeFile(preparedPath, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
-  process.stdout.write(`${JSON.stringify({ status: 'prepared_only', providerCalls: 0, credentialsRead: false, baseCommit, taskDigest, taskBytes: record.taskBytes, allowedScope, validation: record.validation, workspaces: Object.fromEntries(Object.entries(harnesses).map(([id, item]) => [id, item.workspaceId])), executeGemini: `node compare.mjs --execute-once gemini-cli ${baseUrl} ${repoPath} ${baseCommit} ${geminiModel} ${agyModel} ${geminiCliVersion} ${agyCliVersion}` }, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify({ status: 'prepared_only', providerCalls: 0, credentialsRead: false, attemptCount, baseCommit, taskDigest, taskBytes: record.taskBytes, allowedScope, validation: record.validation, workspaces: Object.fromEntries(Object.entries(harnesses).map(([id, attempts]) => [id, attempts.map(item => ({ attemptId: item.attemptId, workspaceId: item.workspaceId }))])), execute: `FOREMAN_WORKER_COMPARISON_ATTEMPTS=${attemptCount} node compare.mjs --execute-attempt antigravity-cli attempt-001 ${baseUrl} ${repoPath} ${baseCommit} ${agyModel} ${agyCliVersion}` }, null, 2)}\n`);
   process.exit(0);
 }
 
 const harnessId = executeHarness;
 const prepared = JSON.parse(await readFile(preparedPath, 'utf8'));
-if (prepared.baseUrl !== baseUrl || prepared.repoPath !== repoPath || prepared.baseCommit !== baseCommit || prepared.taskDigest !== taskDigest || JSON.stringify(prepared.models) !== JSON.stringify(baseModels)) throw new Error('Prepared comparison state does not match these explicit inputs');
-if (harnessId === 'antigravity-cli') {
-  const geminiEvidence = JSON.parse(await readFile(join(evidenceDir, 'gemini-cli.json'), 'utf8').catch(() => 'null'));
-  if (geminiEvidence?.status !== 'verified') throw new Error('AGY execution refused: the Gemini attempt must first complete Foreman scope verification and pnpm test validation successfully');
-}
-const preparedHarness = prepared.harnesses[harnessId];
+if (prepared.baseUrl !== baseUrl || prepared.repoPath !== repoPath || prepared.baseCommit !== baseCommit || prepared.taskDigest !== taskDigest || JSON.stringify(prepared.models) !== JSON.stringify(baseModels) || prepared.attemptCount !== attemptCount || Number(attemptId.slice(-3)) > prepared.attemptCount) throw new Error('Prepared comparison state does not match these explicit inputs');
+const preparedHarness = prepared.harnesses[harnessId]?.find(item => item.attemptId === attemptId);
 if (!preparedHarness || preparedHarness.model !== baseModels[harnessId] || preparedHarness.pinnedBaseCommit?.toLowerCase() !== baseCommit) throw new Error('Prepared harness binding is missing or mismatched');
-const callLock = join(stateDir, `${harnessId}.live-worker-call.lock`);
-await writeFile(callLock, `${JSON.stringify({ harnessId, runId: preparedHarness.runId, workspaceId: preparedHarness.workspaceId, model: preparedHarness.model, taskDigest, startedAt: new Date().toISOString() })}\n`, { mode: 0o600, flag: 'wx' });
+const callLock = join(stateDir, `${harnessId}.${attemptId}.live-worker-call.lock`);
+await writeFile(callLock, `${JSON.stringify({ harnessId, attemptId, runId: preparedHarness.runId, workspaceId: preparedHarness.workspaceId, model: preparedHarness.model, taskDigest, startedAt: new Date().toISOString() })}\n`, { mode: 0o600, flag: 'wx' });
 
 let submissionAttempted = false;
 const started = performance.now();
@@ -307,7 +307,7 @@ try {
     taskId: preparedHarness.taskId,
     projectId: prepared.projectId,
     prompt: prepared.taskText,
-    config: { harnessId, model: preparedHarness.model, workspaceId: preparedHarness.workspaceId, timeoutSeconds: 60, maxStep: 1 },
+    config: { harnessId, model: preparedHarness.model, workspaceId: preparedHarness.workspaceId, timeoutSeconds, maxStep: 1 },
     idempotencyKey: `comparison-${harnessId}-${randomUUID()}`,
     onEvent: event => {
       if (event.type === 'response.created') {
@@ -331,7 +331,8 @@ try {
   const status = verified.scopeVerified && taskAcceptance.passed && validation.passed ? 'verified' : 'failed';
   const report = {
     evidenceVersion: 1,
-    provenance: `single_live_${harnessId}_worker_call`,
+    provenance: `live_${harnessId}_${attemptId}_worker_call`,
+    attemptId,
     status,
     harnessId,
     requestedModel: preparedHarness.model,
@@ -347,7 +348,7 @@ try {
     pinnedBaseCommit: baseCommit,
     taskDigest,
     taskBytes: prepared.taskBytes,
-    taskBytesIdenticalAcrossHarnesses: prepared.taskBytesIdentical,
+    taskBytesIdenticalAcrossAttempts: prepared.taskBytesIdentical,
     taskScope: allowedScope,
     validationCommand: 'pnpm test',
     uhpSubmissionAttempts: 1,
@@ -355,24 +356,27 @@ try {
     providerRequestCount: 'unavailable',
     wallTimeMs: { workerSubmission: Math.round(submissionRuntimeMs), snapshotAndVerificationAndValidation: validationRuntimeMs, total: Math.round(performance.now() - started) },
     reportedUsage: responseEnvelope(response, harnessId, submitted).reportedUsage,
+    promptEvidence: responseEnvelope(response, harnessId, submitted).promptEvidence,
     toolAndPermissionEvidence: responseEnvelope(response, harnessId, submitted).toolAndPermissionEvidence,
+    diagnosticCounts: { toolLifecycleUpdateCount: responseEnvelope(response, harnessId, submitted).toolAndPermissionEvidence.toolLifecycleUpdateCount, distinctToolStepCount: responseEnvelope(response, harnessId, submitted).toolAndPermissionEvidence.distinctToolStepCount, reportedCliTurns: responseEnvelope(response, harnessId, submitted).toolAndPermissionEvidence.reportedCliTurns, terminalResultStatus: responseEnvelope(response, harnessId, submitted).toolAndPermissionEvidence.terminalResultStatus, responseCharacters: responseEnvelope(response, harnessId, submitted).toolAndPermissionEvidence.responseCharacters },
     executionBoundary: responseEnvelope(response, harnessId, submitted).executionBoundary,
-    actualModelEvidence: { requestedModelArgument: preparedHarness.model, cliModelArgument: responseEnvelope(response, harnessId, submitted).cliModelArgument, cliModelArgumentMatchesRequest: responseEnvelope(response, harnessId, submitted).cliModelArgumentMatchesRequest, configuredInitModel: responseEnvelope(response, harnessId, submitted).configuredInitModel, configuredInitModelStatus: responseEnvelope(response, harnessId, submitted).configuredInitModelStatus, perModelUsageNames: responseEnvelope(response, harnessId, submitted).perModelUsageNames, actualModelStatus: responseEnvelope(response, harnessId, submitted).actualModelStatus },
+    actualModelEvidence: { requestedModelArgument: preparedHarness.model, cliModelArgument: responseEnvelope(response, harnessId, submitted).cliModelArgument, cliEffortArgument: responseEnvelope(response, harnessId, submitted).cliEffortArgument, cliModelArgumentMatchesRequest: responseEnvelope(response, harnessId, submitted).cliModelArgumentMatchesRequest, configuredInitModel: responseEnvelope(response, harnessId, submitted).configuredInitModel, configuredInitModelStatus: responseEnvelope(response, harnessId, submitted).configuredInitModelStatus, actualModelStatus: responseEnvelope(response, harnessId, submitted).actualModelStatus },
     foremanVerification: { provenance: verified.provenance, completeSnapshot: verified.completeSnapshot, scopeVerified: verified.scopeVerified, allowedScope: verified.allowedScope, changedPaths: verified.changes.map(change => change.path), changes: summarizeChanges(verified.changes), exactReviewDiff: verified.reviewDiff },
     taskAcceptance,
     foremanValidation: { passed: validation.passed, checks: validation.checks.map(check => ({ name: check.name, exitCode: check.exitCode, signal: check.signal ?? null, timedOut: check.timedOut, outputTruncated: check.outputTruncated, startedAt: check.startedAt, finishedAt: check.finishedAt })) },
-    taskTextIdenticalAcrossHarnesses: true,
+    taskTextIdenticalAcrossAttempts: true,
     tokenAccountingCaveat: prepared.tokenAccountingCaveat,
     capturedAt: new Date().toISOString(),
   };
-  const evidenceFile = await persistReport(harnessId, report);
-  process.stdout.write(`${JSON.stringify({ status, harnessId, requestedModel: report.requestedModel, actualModel: report.actualModel ?? 'unavailable', responseId: report.responseId, sessionId: report.sessionId, measuredUsage: report.reportedUsage, changedPaths: report.foremanVerification.changedPaths, scopeVerified: report.foremanVerification.scopeVerified, validationPassed: report.foremanValidation.passed, evidenceFile }, null, 2)}\n`);
+  const evidenceFile = await persistReport(`${harnessId}.${attemptId}`, report);
+  process.stdout.write(`${JSON.stringify({ status, harnessId, attemptId, requestedModel: report.requestedModel, actualModel: report.actualModel ?? 'unavailable', responseId: report.responseId, sessionId: report.sessionId, measuredUsage: report.reportedUsage, changedPaths: report.foremanVerification.changedPaths, scopeVerified: report.foremanVerification.scopeVerified, validationPassed: report.foremanValidation.passed, evidenceFile }, null, 2)}\n`);
   if (status !== 'verified') process.exitCode = 1;
 } catch (error) {
   if (!response && createdResponseId) response = await client.retrieve(createdResponseId).catch(() => undefined);
   const summary = {
     evidenceVersion: 1,
-    provenance: `single_live_${harnessId}_worker_call`,
+    provenance: `live_${harnessId}_${attemptId}_worker_call`,
+    attemptId,
     status: 'failed',
     harnessId,
     requestedModel: preparedHarness.model,
@@ -399,12 +403,15 @@ try {
       signal: typeof response.metadata.execution_boundary_diagnostic.signal === 'string' ? response.metadata.execution_boundary_diagnostic.signal.slice(0, 32) : null,
     } : null,
     measuredUsage: safeUsage(response?.usage),
+    reportedUsage: responseEnvelope(response, harnessId, submitted).reportedUsage,
+    promptEvidence: responseEnvelope(response, harnessId, submitted).promptEvidence,
+    diagnosticCounts: { toolLifecycleUpdateCount: responseEnvelope(response, harnessId, submitted).toolAndPermissionEvidence.toolLifecycleUpdateCount, distinctToolStepCount: responseEnvelope(response, harnessId, submitted).toolAndPermissionEvidence.distinctToolStepCount, reportedCliTurns: responseEnvelope(response, harnessId, submitted).toolAndPermissionEvidence.reportedCliTurns, terminalResultStatus: responseEnvelope(response, harnessId, submitted).toolAndPermissionEvidence.terminalResultStatus, responseCharacters: responseEnvelope(response, harnessId, submitted).toolAndPermissionEvidence.responseCharacters },
     toolAndPermissionEvidence: toolEvidence(response?.metadata ?? {}, harnessId),
-    retry: 'forbidden_by_durable_call_lock',
+    retry: 'use_a_new_prepared_attempt_id_and_workspace',
     tokenAccountingCaveat: prepared.tokenAccountingCaveat,
     capturedAt: new Date().toISOString(),
   };
-  const evidenceFile = await persistReport(harnessId, summary);
-  process.stdout.write(`${JSON.stringify({ status: 'failed', harnessId, submissionAttempts: summary.uhpSubmissionAttempts, responseId: summary.responseId, failureCategory: summary.failureCategory, retry: summary.retry, evidenceFile }, null, 2)}\n`);
+  const evidenceFile = await persistReport(`${harnessId}.${attemptId}`, summary);
+  process.stdout.write(`${JSON.stringify({ status: 'failed', harnessId, attemptId, submissionAttempts: summary.uhpSubmissionAttempts, responseId: summary.responseId, failureCategory: summary.failureCategory, retry: summary.retry, evidenceFile }, null, 2)}\n`);
   process.exitCode = 1;
 }

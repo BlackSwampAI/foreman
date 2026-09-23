@@ -1,5 +1,9 @@
 # Bounded Gemini CLI and AGY Worker comparison
 
+This records the original one-off Gemini attempt. The operator later discarded
+Gemini CLI for the Worker path. Four subsequent same-task AGY Worker turns
+completed through Foreman; see the [AGY usage follow-up](../../docs/agy-worker-usage-followup.md).
+
 ## Outcome on 2026-09-23
 
 The identical task was prepared, but the comparison produced **no model-side
@@ -57,8 +61,7 @@ successful run would need to keep AGY and Gemini CLI accounting separate:
 the requested Flash model IDs differ, their system prompts differ, and neither
 CLI exposes an authoritative provider-request count or cost.
 
-**Recommendation:** keep AGY as the existing default Worker. A lower-usage
-Gemini CLI Flash path and the cause of AGY's high token report remain unknown.
-First fix and re-prove the bridge's runtime mount without model calls; a future
-live comparison requires new authorization because this attempt's stop rule
-forbids another live call in this comparison.
+**Original recommendation:** keep AGY as the existing default Worker. The
+operator later lifted the one-call rule and discarded Gemini CLI. Follow-up
+AGY trials are recorded separately in the linked usage report; this original
+Gemini attempt remains an unsuccessful comparison record.
