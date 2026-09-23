@@ -45,4 +45,4 @@ pnpm test
 pnpm build
 ```
 
-The deterministic UHP fixture tests do not call a model provider. The pinned local HarnessRouter probe and its observed protocol version are recorded in the bridge report. Gemini CLI had no active cached authentication. Claude Code and Codex CLI have host account logins, but the pinned router has no provider integration and does not inherit those logins, so no live UHP smoke task was sent. The test suite never makes provider calls.
+The deterministic UHP fixture tests do not call a model provider. The pinned local HarnessRouter probe and its observed protocol version are recorded in the [workspace report](docs/workspace-bridge.md). Gemini CLI had no active cached authentication. Claude Code and Codex CLI have host account logins, but the pinned router has no provider integration and does not inherit those logins. An [experimental host-side UHP bridge](docs/subscription-cli-uhp.md) completed one separately authorized Claude Code smoke task using the existing subscription login; it is not a HarnessRouter capability or a Worker-to-Git workspace bridge. The test suite never makes provider calls.
