@@ -28,6 +28,17 @@ function completeAutomaticEvidence(run:any,worker:Assignment){run.workerEvidence
 afterEach(async()=>{await Promise.all([...fixtures.splice(0).map(f=>f.close()),...bridgeServers.splice(0).map(s=>new Promise<void>(resolve=>s.close(()=>resolve()))),...dirs.splice(0).map(d=>rm(d,{recursive:true,force:true}))]);});
 
 describe('controller persistence and state transitions',()=>{
+  it('keeps a repository-scoped controller within its project',async()=>{
+    const {controller,store,uhp}=await setup();
+    const first=await controller.createProject('First') as {id:string};
+    const second=await controller.createProject('Second') as {id:string};
+    const secondTask=await controller.createTask(second.id,'Second task') as {id:string};
+    const scoped=new Controller(store,uhp,false,false,undefined,undefined,120,first.id);
+    await expect(scoped.createTask(second.id,'Wrong project')).rejects.toThrow('Project not found');
+    await expect(scoped.createRun(secondTask.id)).rejects.toThrow('Task not found');
+    await expect(scoped.selectRoleConfig('worker',{harnessId:'fixture',model:'model-fixture'},second.id)).rejects.toThrow('Project not found');
+    expect((await scoped.createTask(first.id,'First task') as {id:string}).id).toMatch(/^tsk_/);
+  });
   it('defaults automatic runs to one Worker turn and one Worker attempt',async()=>{
     const {controller,store}=await setup({submit:async()=>({externalId:'held',status:'completed',outputText:'held'})});controller.configureVerifiedWorkspace({repoPath:'/fixture/repo',bridgeBaseUrl:'http://127.0.0.1:1',allowedScope:['README.md'],commands:[{name:'fixture check',command:'true',args:[]}]});const project:any=await controller.createProject('Budget defaults'),task:any=await controller.createTask(project.id,'Inspect the default budget'),run:any=await controller.createRun(task.id);
     await store.mutate(s=>{const current=s.projects[0]!.tasks[0]!.runs[0]!,planner:Assignment={id:'planner-success',roleId:'planner',status:'succeeded',prompt:'plan',result:'Ready',requestedConfig:{harnessId:'fixture',model:'model-fixture'},submissionId:'planner-submission',idempotencyKey:'planner-key',createdAt:new Date().toISOString()};current.pinnedBaseCommit='a'.repeat(40);current.workspaceId='prepared-fixture-workspace';current.assignments.push(planner);current.guidance.push({id:'guidance-success',sequence:1,text:'Ready',status:'delivered',plannerAssignmentId:planner.id,plannerReply:'Ready',createdAt:new Date().toISOString()});});
@@ -38,9 +49,9 @@ describe('controller persistence and state transitions',()=>{
     const harnesses=[{id:'claude-code',models:[{id:'claude-sonnet-4',available:true}]},{id:'codex-cli',models:[{id:'gpt-6-sol',available:true}]},{id:'antigravity-cli',models:[{id:'gemini-3.8-flash-medium',available:true},{id:'gemini-3.8-flash-low',available:true}]}];
     const controller=new Controller(store,{discover:async()=>({version:'fixture',capabilities:{},harnesses}),submit:async()=>({externalId:'unused'}),cancel:async()=>({status:'cancelled'})},false,true);
     await controller.refreshDiscovery();let state=await store.load();
-    expect(state.roles.find(r=>r.id==='planner')?.config).toEqual({harnessId:'claude-code',model:'claude-sonnet-4'});
-    expect(state.roles.find(r=>r.id==='orchestrator')?.config).toEqual({harnessId:'claude-code',model:'claude-sonnet-4'});
-    expect(state.roles.find(r=>r.id==='reviewer')?.config).toEqual({harnessId:'claude-code',model:'claude-sonnet-4'});
+    expect(state.roles.find(r=>r.id==='planner')?.config).toEqual({harnessId:'codex-cli',model:'gpt-6-sol'});
+    expect(state.roles.find(r=>r.id==='orchestrator')?.config).toEqual({harnessId:'codex-cli',model:'gpt-6-sol'});
+    expect(state.roles.find(r=>r.id==='reviewer')?.config).toEqual({harnessId:'codex-cli',model:'gpt-6-sol'});
     expect(state.roles.find(r=>r.id==='worker')?.config).toEqual({harnessId:'antigravity-cli',model:'gemini-3.8-flash-low'});
     await controller.selectRoleConfig('planner',{harnessId:'codex-cli',model:'gpt-6-sol'});await controller.refreshDiscovery();state=await store.load();
     expect(state.roles.find(r=>r.id==='planner')?.config).toEqual({harnessId:'codex-cli',model:'gpt-6-sol'});

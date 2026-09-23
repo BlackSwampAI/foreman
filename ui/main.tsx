@@ -20,7 +20,11 @@ type Session = { localId: string; roleId: string; generation: number; status: st
 type RunBudgets = { roleTurns: {planner:number;orchestrator:number;worker:number;reviewer:number}; workerAttempts:number };
 type Run = { id: string; status?: string; controller?: {startedAt?:string;phase?:'orchestrating'|'dispatching'|'verifying'|'validating'|'reviewing'|'stopped'|'awaiting_approval';budgets?:RunBudgets;stoppedReason?:string;active?:boolean}; reviewerRetryAuthorized?:boolean; pinnedBaseCommit?: string; workspaceId?: string; plannerSessionId?: string; orchestratorSessionId?: string; sessions?: {planner?:Session;orchestrator?:Session}; roleConfigs?: Record<string,RoleConfig>; usage?: UsageMetrics; usageByRole?: Record<string,UsageMetrics>; usageByHarnessModel?: Record<string,UsageMetrics>; guidance?: Guidance[]; workerProposal?: WorkerProposal; workerProposalHistory?:WorkerProposal[]; rejectedWorkerAttempts?:RejectedWorkerAttempt[]; orchestratorInbox?: OrchestratorInbox; orchestratorInboxHistory?: OrchestratorInbox[]; assignments?: Assignment[]; reviews?: Review[]; workerEvidence?: WorkerEvidence; workerEvidenceHistory?: WorkerEvidence[]; reviewerRecommendation?: ReviewerRecommendation; reviewerRecommendationHistory?: ReviewerRecommendation[]; validation?: Validation; validationHistory?: Validation[]; approval?: Approval; promotion?: Promotion; createdAt?: string; updatedAt?: string };
 type Task = { id: string; title: string; status?: string; runs?: Run[] };
-type Project = { id: string; name: string; status?: string; defaultRoleConfigs?: Record<string,RoleConfig>; usage?: UsageMetrics; usageByHarnessModel?: Record<string,UsageMetrics>; tasks?: Task[] };
+type Project = { id: string; name: string; repoPath?:string; status?: string; defaultRoleConfigs?: Record<string,RoleConfig>; usage?: UsageMetrics; usageByHarnessModel?: Record<string,UsageMetrics>; tasks?: Task[] };
+type RepoEntry={name:string;path:string;isGitRepo:boolean};
+type RepoBrowse={currentPath:string;parentPath?:string;entries:RepoEntry[];roots:{name:string;path:string}[];truncated:boolean};
+type WorkspaceSetup={repoPath:string;head:string;dirty:boolean;allowedScope:string[];validationCommands:{name:string;command:string;args:string[]}[];bridgeStatus?:string};
+type RepoInspect={repoPath:string;head:string;dirty:boolean;suggestedAllowedScope:string[];suggestedValidationCommands:{name:string;command:string;args:string[]}[];trackedFiles:string[]};
 type Role = { id: string; name: string; kind?: string; enabled: boolean; configSchema?: unknown; config?: RoleConfig; availableConfigs?: RoleConfig[]; usage?: UsageMetrics; usageByHarnessModel?: Record<string,UsageMetrics> };
 type EventItem = { id: string; type: string; entityType?: string; entityId?: string; at: string; data?: Record<string, unknown> };
 type State = { projects: Project[]; roles?: Role[]; events?: EventItem[] };
@@ -29,7 +33,12 @@ type Services = { uhp?: ServiceState; memory?: ServiceState };
 
 const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(path, { ...init, headers: { 'content-type': 'application/json', ...init?.headers } });
-  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  if (!response.ok) {
+    let detail = `${response.status} ${response.statusText}`;
+    try { const body = await response.json() as { error?: string; message?: string }; detail = body.error ?? body.message ?? detail; }
+    catch { /* Keep the HTTP status when the response has no JSON error. */ }
+    throw new Error(detail);
+  }
   return response.status === 204 ? undefined as T : response.json();
 };
 const label = (value?: string) => value ? value.replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : 'Unknown';
@@ -51,15 +60,26 @@ function App() {
   const [online, setOnline] = useState(false);
   const [eventCount, setEventCount] = useState(0);
   const [configScope, setConfigScope] = useState<'global'|'project'|'run'>('run');
+  const [repoDialog,setRepoDialog]=useState(false);
+  const [repoAdvancedOpen,setRepoAdvancedOpen]=useState(false);
+  const [browse,setBrowse]=useState<RepoBrowse>();
+  const [browsePath,setBrowsePath]=useState('');
+  const [repoPath,setRepoPath]=useState('');
+  const [scopePaths,setScopePaths]=useState<string[]>(['']);
+  const [checks,setChecks]=useState<{name:string;command:string;args:string}[]>([{name:'Tests',command:'npm',args:'test'}]);
+  const [workspaceSetup,setWorkspaceSetup]=useState<WorkspaceSetup>();
+  const [repoInspect,setRepoInspect]=useState<RepoInspect>();
+  const [addingTask,setAddingTask]=useState(false);
+  const [taskTitle,setTaskTitle]=useState('');
 
   const refresh = useCallback(async () => {
     try {
       const next = await api<State>('/api/state');
       setState({ projects: next.projects ?? [], roles: next.roles ?? [], events: next.events ?? [] });
-      try { setServices(await api<Services>('/api/status')); } catch { setServices(undefined); }
+      try { setServices(await api<Services>(`/api/status${selectedProject ? `?projectId=${encodeURIComponent(selectedProject)}` : ''}`)); } catch { setServices(undefined); }
       setOnline(true); setError('');
     } catch (e) { setOnline(false); setError(e instanceof Error ? e.message : 'Could not load state'); }
-  }, []);
+  }, [selectedProject]);
   useEffect(() => { void refresh(); const timer = window.setInterval(refresh, 15000); return () => clearInterval(timer); }, [refresh]);
   useEffect(() => {
     const source = new EventSource('/api/events');
@@ -77,6 +97,7 @@ function App() {
   useEffect(() => { if (task && task.id !== selectedTask) setSelectedTask(task.id); }, [task?.id]);
   useEffect(() => { if (run && run.id !== selectedRun) setSelectedRun(run.id); }, [run?.id]);
   useEffect(() => { setBaseCommit(run?.pinnedBaseCommit ?? ''); setBudgets(run?.controller?.budgets??{roleTurns:{planner:3,orchestrator:2,worker:1,reviewer:1},workerAttempts:1}); }, [run?.id]);
+  useEffect(()=>{if(!project)return;void api<WorkspaceSetup>(`/api/projects/${project.id}/workspace-setup`).then(setWorkspaceSetup).catch(()=>setWorkspaceSetup(undefined));},[project?.id]);
 
   const totals = useMemo(() => ({ projects: state.projects.length, tasks: state.projects.reduce((n,p)=>n+(p.tasks?.length ?? 0),0), runs: state.projects.reduce((n,p)=>n+(p.tasks?.reduce((m,t)=>m+(t.runs?.length ?? 0),0) ?? 0),0) }), [state.projects]);
   const create = async (kind: 'projects'|'tasks'|'runs', name?: string) => {
@@ -164,8 +185,13 @@ function App() {
     catch (e) { setError(e instanceof Error ? e.message : 'Could not authorize Reviewer retry'); }
     finally { setPending(false); }
   };
-  const addProject = () => { const name = window.prompt('Project name'); if (name?.trim()) void create('projects', name.trim()); };
-  const addTask = () => { const title = window.prompt('Task title'); if (title?.trim()) void create('tasks', title.trim()); };
+  const loadBrowse = async(path?:string)=>{setPending(true);setError('');try{const query=path?`?path=${encodeURIComponent(path)}`:'';const next=await api<RepoBrowse>(`/api/repositories/browse${query}`);setBrowse(next);setBrowsePath(next.currentPath);}catch(e){setError(e instanceof Error?e.message:'Could not browse local folders');}finally{setPending(false);}};
+  const openRepoDialog=()=>{setRepoDialog(true);setRepoAdvancedOpen(false);setRepoPath('');setRepoInspect(undefined);setScopePaths(['']);setChecks([]);void loadBrowse();};
+  const selectRepo=async(path:string)=>{setRepoPath(path);setRepoInspect(undefined);setPending(true);setError('');try{const info=await api<RepoInspect>(`/api/repositories/inspect?path=${encodeURIComponent(path)}`);setRepoInspect(info);setRepoAdvancedOpen(info.suggestedValidationCommands.length===0);setScopePaths(info.suggestedAllowedScope.length?info.suggestedAllowedScope:['']);setChecks(info.suggestedValidationCommands.map(c=>({...c,args:c.args.join(' ')})));}catch(e){setError(e instanceof Error?e.message:'Could not inspect repository');}finally{setPending(false);}};
+  const openRepository=async()=>{if(!repoPath)return;setPending(true);setError('');try{const opened=await api<Project>('/api/projects/open',{method:'POST',body:JSON.stringify({repoPath,allowedScope:scopePaths.map(x=>x.trim()).filter(Boolean),validationCommands:checks.filter(c=>c.command.trim()).map(c=>({name:c.name||c.command,command:c.command.trim(),args:c.args.trim()?c.args.trim().split(/\s+/):[]}))})});await refresh();setSelectedProject(opened.id);setSelectedTask('');setSelectedRun('');setRepoDialog(false);setView('overview');}catch(e){setError(e instanceof Error?e.message:'Could not open repository');}finally{setPending(false);}};
+  const addProject = openRepoDialog;
+  const addTask = () => { setTaskTitle(''); setAddingTask(true); };
+  const submitTask = async (event:FormEvent) => { event.preventDefault(); if(!taskTitle.trim())return; await create('tasks',taskTitle.trim()); setTaskTitle('');setAddingTask(false); };
   const configKey = (config?: RoleConfig) => config?.harnessId&&config.model ? JSON.stringify([config.harnessId,config.model]) : '';
   const decodeConfig = (value: string): RoleConfig|undefined => { if(!value) return undefined; try { const [harnessId,model]=JSON.parse(value) as [string,string]; return {harnessId,model}; } catch { return undefined; } };
   const scopeConfig = (roleId: string) => {const global=state.roles?.find(r=>r.id===roleId)?.config,projectConfig=project?.defaultRoleConfigs?.[roleId],runConfig=run?.roleConfigs?.[roleId];return configScope==='global'?global:configScope==='project'?projectConfig??global:runConfig??projectConfig??global;};
@@ -229,17 +255,18 @@ function App() {
     </header>
     <nav className="rail">{[['▦','Projects'],['◷','Runs'],['♙','Roles'],['▤','Events'],['⌁','Usage']].map(([icon,name],i)=><button key={name} className={i===0?'active':''} onClick={()=>i===3&&document.getElementById('events')?.scrollIntoView({behavior:'smooth'})}><span>{icon}</span>{name}</button>)}<div className="rail-bottom"><span className={`dot ${online?'green':'muted'}`}/>Local process<br/><small>{online?'Connected':'Unavailable'}</small></div></nav>
     <main>
-      <section className="heading"><div><div className="eyebrow">WORKSPACE / {project?.id ?? 'NO PROJECT'}</div><h1>{project?.name ?? 'Your workspace'}</h1><p>{project ? 'Plan, coordinate, and inspect local engineering work.' : 'Create a project to start organizing work.'}</p></div><div className="metrics"><div><b>{totals.tasks}</b><span>Tasks</span></div><div><b>{totals.runs}</b><span>Runs</span></div><div><b>{state.roles?.length ?? 0}</b><span>Roles</span></div><button className="primary small" onClick={addProject} disabled={pending}>＋ New project</button></div></section>
+      <section className="heading"><div><div className="eyebrow">WORKSPACE / {project?.id ?? 'NO PROJECT'}</div><h1>{project?.name ?? 'Your workspace'}</h1><p>{project ? 'Plan and track work in your repository.' : 'Choose a local Git repository to get started.'}</p></div><div className="metrics"><div><b>{totals.tasks}</b><span>Tasks</span></div><div><b>{totals.runs}</b><span>Runs</span></div><div><b>{state.roles?.length ?? 0}</b><span>Roles</span></div><button className="primary" onClick={openRepoDialog} disabled={pending}>＋ Open repository</button></div></section>
+      {project&&<section className="repo-summary"><div><span className="overline">ACTIVE REPOSITORY</span><b>{workspaceSetup?.repoPath??project.repoPath??project.name}</b><small>{workspaceSetup?`${workspaceSetup.dirty?'Uncommitted changes':'Clean'} · HEAD ${workspaceSetup.head.slice(0,10)}`:'Repository setup unavailable'}</small></div><div><span className="overline">ALLOWED FILES</span><b>{workspaceSetup?.allowedScope.join(', ')||'Not configured'}</b><small>Next: add a task describing the change you want.</small></div><button className="outline small" onClick={openRepoDialog}>Switch repo</button></section>}
       {error && <div className="error"><span>Could not complete request: {error}</span><button onClick={()=>setError('')}>Dismiss</button></div>}
       <div className="layout">
         <aside className="tree card">
-          <div className="card-title"><div><span className="overline">HIERARCHY</span><h2>Project tree</h2></div><button className="outline small" onClick={addProject}>＋ New</button></div>
-          {state.projects.length === 0 ? <div className="empty"><span className="empty-icon">▱</span><b>No projects yet</b><p>Create a project to establish the workspace hierarchy.</p><button className="primary small" onClick={addProject}>Create project</button></div> : state.projects.map(p=><div key={p.id} className="project-node">
+          <div className="card-title"><div><span className="overline">HIERARCHY</span><h2>Project tree</h2></div><button className="outline small" onClick={openRepoDialog}>＋ Open repo</button></div>
+          {state.projects.length === 0 ? <div className="empty"><span className="empty-icon">▱</span><b>No repository open</b><p>Open a local Git repository to begin.</p><button className="primary small" onClick={openRepoDialog}>Open repository</button></div> : state.projects.map(p=><div key={p.id} className="project-node">
             <button className={`node project ${project?.id===p.id?'selected':''}`} onClick={()=>{setSelectedProject(p.id);setSelectedTask('');setSelectedRun('');setView('overview')}}><span className="folder">▰</span><b>{p.name}</b><span className="node-count">{p.tasks?.length ?? 0}</span></button>
             {project?.id===p.id && <div className="children">{p.tasks?.map(t=><div key={t.id}>
               <button className={`node task ${task?.id===t.id?'selected':''}`} onClick={()=>{setSelectedTask(t.id);setSelectedRun('');setView('overview')}}><span className="task-icon">◉</span><span className="truncate">{t.title}</span><span className="node-count">{t.runs?.length ?? 0}</span></button>
               {task?.id===t.id && <div className="runs">{t.runs?.map(r=><button key={r.id} className={`node run ${run?.id===r.id?'selected':''}`} onClick={()=>{setSelectedRun(r.id);setView('run')}}><span className={`status-ring ${r.status==='running'?'busy':''}`}/><span>Run <code>{r.id.slice(0,8)}</code></span><span className={`pill ${r.status==='running'?'live':''}`}>{label(r.status)}</span></button>)}<button className="add-run" onClick={()=>void create('runs')} disabled={pending}>＋ Start run</button></div>}
-            </div>)}<button className="add-task" onClick={addTask}>＋ Add task</button></div>}
+            </div>)}{addingTask?<form className="add-task-form" onSubmit={submitTask}><input autoFocus aria-label="Task description" placeholder="What should Foreman change?" value={taskTitle} onChange={e=>setTaskTitle(e.target.value)} /><button className="primary small" type="submit" disabled={pending||!taskTitle.trim()}>{pending?'Adding…':'Add task'}</button><button className="outline small" type="button" onClick={()=>setAddingTask(false)}>Cancel</button></form>:<button className="add-task" onClick={addTask}>＋ Add task</button>}</div>}
           </div>)}
           <div className="tree-foot"><span className="dot green"/> Hierarchy from local state</div>
         </aside>
@@ -283,6 +310,7 @@ function App() {
           <section className="card inspector-card events-card" id="events"><div className="card-title"><div><span className="overline">LIVE ACTIVITY</span><h2>Recent events</h2></div><span className="count-badge">{eventCount}</span></div>{state.events?.slice(-5).reverse().map(ev=><div className="event-row" key={ev.id}><span className="event-dot"/><div><b>{label(ev.type)}</b><small>{ev.entityType ? `${label(ev.entityType)} · ` : ''}{ev.entityId ?? 'System'}</small></div><time>{stamp(ev.at)}</time></div>)}{!state.events?.length&&<div className="aside-empty">Waiting for events from the local system.</div>}</section>
         </aside>
       </div>
+      {repoDialog&&<div className="repo-backdrop" role="presentation" onMouseDown={e=>{if(e.target===e.currentTarget)setRepoDialog(false);}}><section className="repo-modal" role="dialog" aria-modal="true" aria-labelledby="repo-title"><header><div><span className="overline">LOCAL PROJECT</span><h2 id="repo-title">Open a repository</h2></div><button className="icon-button" onClick={()=>setRepoDialog(false)} aria-label="Close">×</button></header><p className="repo-intro">Choose a Git repository on this computer.</p><div className="repo-roots">{browse?.roots.map(root=><button key={root.path} className="outline small" onClick={()=>void loadBrowse(root.path)}>{root.name}</button>)}</div><div className="repo-crumbs">{(browsePath.split('/').filter(Boolean).length?['/',...browsePath.split('/').filter(Boolean)]:['/']).map((part,index,parts)=>{const path=part==='/'?'/':'/'+parts.slice(1,index+1).join('/');return <React.Fragment key={`${path}-${index}`}><button onClick={()=>void loadBrowse(path)}>{part==='/'?'Computer':part}</button>{index<parts.length-1&&<span>›</span>}</React.Fragment>})}</div><div className="repo-list">{pending&&!browse?<p>Loading folders…</p>:browse?.entries.map(entry=><div className={`repo-entry ${entry.isGitRepo?'git':''}`} key={entry.path}><button className="repo-folder" onClick={()=>void loadBrowse(entry.path)}><span>{entry.isGitRepo?'◈':'▰'}</span><b>{entry.name}</b><small>{entry.isGitRepo?'Git repository':'Folder'}</small></button>{entry.isGitRepo&&<button className="primary small" onClick={()=>void selectRepo(entry.path)}>{repoPath===entry.path?'Selected':'Choose'}</button>}</div>)}{browse?.truncated&&<small className="repo-note">Showing the first folders here.</small>}</div>{repoPath&&<><div className="repo-picked"><b>Selected repository</b><code>{repoPath}</code>{repoInspect&&<small>HEAD {repoInspect.head.slice(0,10)} · {repoInspect.dirty?'Uncommitted changes':'Clean'}</small>}</div><details className="repo-advanced" open={repoAdvancedOpen} onToggle={e=>setRepoAdvancedOpen(e.currentTarget.open)}><summary>Files and checks</summary><div className="repo-fields"><div><b>Allowed file paths</b><small>Files Foreman may change. Check the defaults before opening.</small>{scopePaths.map((path,i)=><div className="repo-field-row" key={`scope-${i}`}><input value={path} onChange={e=>setScopePaths(current=>current.map((v,j)=>j===i?e.target.value:v))} placeholder="src/example.ts"/><button className="outline small" type="button" onClick={()=>setScopePaths(current=>current.filter((_,j)=>j!==i))}>Remove</button></div>)}<button className="outline small" type="button" onClick={()=>setScopePaths(current=>[...current,''])}>＋ Add path</button></div><div><b>Validation checks</b><small>These commands run on the proposed changes. Add a real test or check for this repository.</small>{checks.map((check,i)=><div className="repo-check" key={`check-${i}`}><input aria-label="Check name" value={check.name} placeholder="Test suite" onChange={e=>setChecks(current=>current.map((v,j)=>j===i?{...v,name:e.target.value}:v))}/><input aria-label="Executable" value={check.command} placeholder="pnpm" onChange={e=>setChecks(current=>current.map((v,j)=>j===i?{...v,command:e.target.value}:v))}/><input aria-label="Arguments" value={check.args} placeholder="test" onChange={e=>setChecks(current=>current.map((v,j)=>j===i?{...v,args:e.target.value}:v))}/><button className="outline small" type="button" onClick={()=>setChecks(current=>current.filter((_,j)=>j!==i))}>Remove</button></div>)}{!checks.some(c=>c.command.trim())&&<small className="repo-note">No test command was detected. Add the test command your project uses to continue.</small>}<button className="outline small" type="button" onClick={()=>setChecks(current=>[...current,{name:'',command:'',args:''}])}>＋ Add check</button></div></div></details></>}<footer><button className="outline" onClick={()=>setRepoDialog(false)}>Cancel</button><button className="primary" onClick={()=>void openRepository()} disabled={pending||!repoInspect||!repoPath||!scopePaths.some(p=>p.trim())||!checks.some(c=>c.command.trim()&&c.name.trim())}>{pending?'Opening…':'Open repository'}</button></footer></section></div>}
       <footer>Foreman v2 <span>·</span> Local control plane <span>·</span> Live events {online?'connected':'disconnected'} <span className="foot-right">Usage values appear only when the system reports them.</span></footer>
     </main>
   </div>;
