@@ -195,7 +195,7 @@ test('AGY success with an empty response distinguishes headless soft denial from
   const events=await submit(base,'antigravity-cli','gemini-3.8-flash-medium','agy-soft-denied-key',baseCommit); const response=events.at(-1).response;
   assert.equal(events.at(-1).type,'response.failed',JSON.stringify(events));
   assert.equal(response.output_text,''); assert.equal(response.usage.input_tokens,14);
-  assert.deepEqual(response.metadata.agy_diagnostic,{permission_mode:'request-review',observed_agent:'foreman-worker',cwd:'assigned_workspace',available_tools:['ask_permission','run_command','write_to_file','view_file','list_dir','replace_file_content','multi_replace_file_content','finish'],available_tools_semantics:'headless_init_tools_available_to_cli_not_profile_allowlist',tool_events:[{name:'list_dir',state:'DONE',error_category:'permission_denied'}],soft_denial_observed:true,result_status:'SUCCESS',response_empty:true,streamed_agent_text_characters:0,requested_agent:'foreman-worker',requested_execution_mode:'accept-edits',outcome:'soft_denied_without_response'});
+  assert.deepEqual(response.metadata.agy_diagnostic,{permission_mode:'request-review',observed_agent:'foreman-worker',cwd:'assigned_workspace',available_tools:['ask_permission','run_command','write_to_file','view_file','list_dir','replace_file_content','multi_replace_file_content','finish'],available_tools_semantics:'headless_init_tools_available_to_cli_not_profile_allowlist',tool_events:[{step_index:1,name:'list_dir',state:'DONE',error_category:'permission_denied'}],soft_denial_observed:true,result_status:'SUCCESS',response_empty:true,streamed_agent_text_characters:0,requested_agent:'foreman-worker',requested_execution_mode:'accept-edits',outcome:'soft_denied_without_response'});
   assert.deepEqual(response.metadata.agy_worker_tool_policy.unsafe_tool_events,['list_dir']);
   assert.equal(response.metadata.agy_worker_tool_policy.execution_observations_passed,false);
   assert.equal(response.metadata.cli_invocation.args.includes('--agent'),true);
@@ -222,8 +222,8 @@ test('AGY successful no-edit response is distinct from a headless soft denial', 
   assert.deepEqual(evidence.changes,[]);
 });
 
-test('AGY Worker permits selected custom agent with global tool catalog, but rejects an executed shell tool', async t => {
-  const body=`if(process.argv[2]==='models'){console.log('gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)');process.exit(0)}const conversation_id='agy-command-tool-attempt';console.log(JSON.stringify({event:'init',conversation_id,agent:'foreman-worker',init:{cwd:'/workspace',model:'gemini-3.8-flash-medium',permission_mode:'request-review',tools:['ask_permission','run_command','write_to_file','view_file','list_dir','replace_file_content','multi_replace_file_content','finish']}}));for(let i=0;i<41;i++){const name=i===40?'run_command':'view_file';console.log(JSON.stringify({event:'step_update',step_update:{conversation_id,step_index:i,state:'DONE',step_type:'tool',tool_name:name,tool_info:{name,error:name==='run_command'?{type:'PermissionDenied',message:'Approval required'}:undefined}}}))}console.log(JSON.stringify({event:'result',result:{conversation_id,status:'SUCCESS',response:'No work performed.',model:'gemini-3.8-flash-medium'}}));`;
+test('AGY Worker permits selected custom agent with global tool catalog, but rejects an attempted shell tool', async t => {
+  const body=`if(process.argv[2]==='models'){console.log('gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)');process.exit(0)}const conversation_id='agy-command-tool-attempt';console.log(JSON.stringify({event:'init',conversation_id,agent:'foreman-worker',init:{cwd:'/workspace',model:'gemini-3.8-flash-medium',permission_mode:'request-review',tools:['ask_permission','run_command','write_to_file','view_file','list_dir','replace_file_content','multi_replace_file_content','finish']}}));for(let i=0;i<41;i++){const name=i===40?'run_command':'view_file';console.log(JSON.stringify({event:'step_update',step_update:{conversation_id,step_index:i,state:name==='run_command'?'ACTIVE':'DONE',step_type:'tool',tool_name:name,tool_info:{name,error:name==='run_command'?{type:'PermissionDenied',message:'Approval required'}:undefined}}}));if(i===0)console.log(JSON.stringify({event:'step_update',step_update:{conversation_id,step_index:i,state:'DONE',step_type:'tool',tool_name:name,tool_info:{name}}}))}console.log(JSON.stringify({event:'result',result:{conversation_id,status:'SUCCESS',response:'No work performed.',model:'gemini-3.8-flash-medium'}}));`;
   const {base,baseCommit}=await setup(t,{agyEnabled:true,agyBody:body});
   const events=await submit(base,'antigravity-cli','gemini-3.8-flash-medium','agy-command-advertised-key',baseCommit); const response=events.at(-1).response;
   assert.equal(events.at(-1).type,'response.failed',JSON.stringify(events));
@@ -236,8 +236,26 @@ test('AGY Worker permits selected custom agent with global tool catalog, but rej
   assert.deepEqual(response.metadata.agy_diagnostic.available_tools,['ask_permission','run_command','write_to_file','view_file','list_dir','replace_file_content','multi_replace_file_content','finish']);
   assert.equal(response.metadata.agy_diagnostic.tool_events.length,41);
   assert.equal(response.metadata.agy_diagnostic.tool_events[40].name,'run_command');
+  assert.equal(response.metadata.agy_diagnostic.tool_events[40].state,'ACTIVE');
+  assert.equal(response.metadata.agy_diagnostic.tool_events[40].step_index,40);
   const snapshot=await (await fetch(`${base}/extensions/foreman-workspace/v1/workspaces/${response.metadata.workspace_id}/snapshot`)).json();
   assert.equal(snapshot.complete,false);
+});
+
+test('AGY lifecycle updates collapse by step while ACTIVE unsafe attempts remain visible', async t => {
+  const body=`if(process.argv[2]==='models'){console.log('gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)');process.exit(0)}const conversation_id='agy-lifecycle-dedup';console.log(JSON.stringify({event:'init',conversation_id,agent:'foreman-worker',init:{cwd:'/workspace',permission_mode:'request-review'}}));for(const [step_index,state,tool_name,error] of [[3,'ACTIVE','view_file',undefined],[3,'ERROR','view_file',{type:'PermissionDenied',message:'Approval required'}],[4,'ACTIVE','view_file',undefined],[4,'DONE','view_file',undefined],[5,'ACTIVE','run_command',undefined]])console.log(JSON.stringify({event:'step_update',step_update:{conversation_id,step_index,state,step_type:'tool',tool_name,tool_info:{name:tool_name,error}}}));console.log(JSON.stringify({event:'result',result:{conversation_id,status:'SUCCESS',response:'Done.',num_turns:2}}));`;
+  const {base,baseCommit}=await setup(t,{agyEnabled:true,agyBody:body});
+  const events=await submit(base,'antigravity-cli','gemini-3.8-flash-medium','agy-lifecycle-dedup-key',baseCommit); const response=events.at(-1).response;
+  assert.equal(events.at(-1).type,'response.failed',JSON.stringify(events));
+  assert.deepEqual(response.metadata.agy_diagnostic.tool_events,[
+    {step_index:3,name:'view_file',state:'ERROR',error_category:'permission_denied'},
+    {step_index:4,name:'view_file',state:'DONE'},
+    {step_index:5,name:'run_command',state:'ACTIVE'},
+  ]);
+  assert.equal(response.metadata.agy_diagnostic.reported_cli_turns,2);
+  assert.deepEqual(response.metadata.agy_worker_tool_policy.observed_executed_tool_events,['view_file','view_file','run_command']);
+  assert.deepEqual(response.metadata.agy_worker_tool_policy.unsafe_tool_events,['run_command']);
+  assert.equal(response.metadata.agy_worker_tool_policy.execution_observations_passed,false);
 });
 
 test('AGY Worker rejects a different init.agent even when it executes only an allowed file tool', async t => {

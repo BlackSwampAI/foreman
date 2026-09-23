@@ -114,14 +114,23 @@ function parseAgy(text, stderr = '') {
   const init = events.find(e => e.event === 'init');
   const conversation = result?.conversation_id ?? init?.conversation_id ?? events.map(e => e.step_update?.conversation_id).find(Boolean);
   const model = reportedModel(result?.model) ?? reportedModel(init?.model) ?? reportedModel(init?.init?.model);
-  const toolEvents = events.filter(e => e.event === 'step_update' && e.step_update?.step_type === 'tool').map(e => {
+  const toolUpdates = events.filter(e => e.event === 'step_update' && e.step_update?.step_type === 'tool').map(e => {
     const step = e.step_update;
     const name = step.tool_name ?? step.tool_info?.name;
     const nameSafe = typeof name === 'string' && /^[A-Za-z0-9_.-]{1,80}$/.test(name) ? name : 'unknown_tool';
     const errorText = `${step.tool_info?.error?.type ?? ''} ${step.tool_info?.error?.message ?? ''}`.toLowerCase();
     const errorCategory = /permission|approval|denied/.test(errorText) ? 'permission_denied' : /read.only|write|filesystem|file access/.test(errorText) ? 'file_access' : step.tool_info?.error ? 'tool_error' : undefined;
-    return { name:nameSafe, state:typeof step.state === 'string' && /^[A-Z_]{1,24}$/.test(step.state) ? step.state : 'unknown', error_category:errorCategory };
+    return { step_index:Number.isSafeInteger(step.step_index) && step.step_index >= 0 && step.step_index <= 1000000 ? step.step_index : undefined, name:nameSafe, state:typeof step.state === 'string' && /^[A-Z_]{1,24}$/.test(step.state) ? step.state : 'unknown', error_category:errorCategory };
   });
+  // AGY emits lifecycle updates (for example ACTIVE then DONE) for one tool
+  // step. Keep the latest sanitized observation per step/name so diagnostics
+  // count actions, while a distinct unsafe name at the same index still fails.
+  const latestToolUpdate = new Map();
+  toolUpdates.forEach((update, ordinal) => {
+    const key = update.step_index === undefined ? `unindexed:${ordinal}` : `${update.step_index}:${update.name}`;
+    latestToolUpdate.set(key, update);
+  });
+  const toolEvents = [...latestToolUpdate.values()];
   const mutationAttempted = toolEvents.length > 0;
   const initInfo = init?.init ?? {};
   const chunks = events.filter(e => e.event === 'step_update' && e.step_update?.step_type === 'agent_response').map(e => e.step_update?.text_delta).filter(x => typeof x === 'string');
@@ -132,7 +141,8 @@ function parseAgy(text, stderr = '') {
   const agent = typeof agentValue === 'string' && /^[A-Za-z0-9_.-]{1,80}$/.test(agentValue) ? agentValue : undefined;
   const initTools = Array.isArray(initInfo.tools) ? initInfo.tools.filter(t => typeof t === 'string' && /^[A-Za-z0-9_.-]{1,80}$/.test(t)).slice(0, 80) : [];
   const cwd = typeof initInfo.cwd === 'string' ? (initInfo.cwd === '/workspace' ? 'assigned_workspace' : 'other') : 'unreported';
-  return { text: responseText, model, session: conversation, turnCompleted: !!result, isError: result?.status !== 'SUCCESS', mutationAttempted, malformedOutput, unrecognizedOutput, usage: result?.usage && typeof result.usage === 'object' ? result.usage : undefined, diagnostic:{ permission_mode:permissionMode, observed_agent:agent ?? 'unreported', cwd, available_tools:initTools, available_tools_semantics:'headless_init_tools_available_to_cli_not_profile_allowlist', tool_events:toolEvents, soft_denial_observed:softDenialObserved, result_status:typeof result?.status === 'string' && /^(SUCCESS|ERROR|CANCELED|INTERRUPTED|INVALID|WAITING|RUNNING)$/.test(result.status) ? result.status : 'unreported', response_empty:responseText.length === 0, streamed_agent_text_characters:chunks.reduce((n,s)=>n+s.length,0) } };
+  const reportedCliTurns = Number.isSafeInteger(result?.num_turns) && result.num_turns >= 0 && result.num_turns <= 1000000 ? result.num_turns : undefined;
+  return { text: responseText, model, session: conversation, turnCompleted: !!result, isError: result?.status !== 'SUCCESS', mutationAttempted, malformedOutput, unrecognizedOutput, usage: result?.usage && typeof result.usage === 'object' ? result.usage : undefined, diagnostic:{ permission_mode:permissionMode, observed_agent:agent ?? 'unreported', cwd, available_tools:initTools, available_tools_semantics:'headless_init_tools_available_to_cli_not_profile_allowlist', tool_events:toolEvents, reported_cli_turns:reportedCliTurns, soft_denial_observed:softDenialObserved, result_status:typeof result?.status === 'string' && /^(SUCCESS|ERROR|CANCELED|INTERRUPTED|INVALID|WAITING|RUNNING)$/.test(result.status) ? result.status : 'unreported', response_empty:responseText.length === 0, streamed_agent_text_characters:chunks.reduce((n,s)=>n+s.length,0) } };
 }
 function cliArgs(kind, model, timeout, maxStep, reviewer = false, sessionId, persistentContext = false) {
   if (kind === 'claude') return reviewer

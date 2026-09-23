@@ -33,10 +33,45 @@ above. Codex's observed model was unavailable. Cost and underlying provider
 request count were unavailable; neither is inferred from the Foreman call
 count.
 
-AGY reported 109,676 total tokens for its one Worker turn, despite the trivial
-README edit. A sanitized bridge diagnostic showed repeated allowed file-tool
-actions and one permission-denied initial `view_file` before a later successful
-edit. The cause of the high usage is unproven; no provider cost is inferred.
+AGY reported 109,676 total tokens for the one Worker CLI invocation
+(99,794 input; 9,882 output; 9,191 thinking; zero cached). This is much higher
+than the earlier comparable AGY Worker proof, which reported 18,726 total
+(18,442 input; 284 output). The earlier task and result are recorded in
+[three-harness-workflow.md](three-harness-workflow.md). The current task was a
+one-line `README.md` edit on `gemini-3.8-flash-low`.
+
+The sanitized diagnostic contained 20 `step_update` records representing 10
+distinct tool steps: six `view_file` steps (one denied), one
+`replace_file_content`, and three `write_to_file` steps. AGY emits `ACTIVE` and
+terminal updates for the same `step_index`. Before this correction Foreman
+counted each update as an action; the bridge now collapses lifecycle updates by
+sanitized step index and tool name, retaining the latest outcome. The earlier
+proof's checked-in summary records three tool steps as `view_file`,
+`replace_file_content`, and `view_file`; its raw tool metadata is not included
+here. This explains the inflated diagnostic action count, but does not explain
+the reported tokens. The latest diagnostic
+also recorded an initial `view_file` step that was denied before a later
+`view_file` succeeded; the denial's cause is unknown.
+AGY documents execution mode (`--mode=accept-edits`) separately from tool
+permission mode (`init.permission_mode=request-review`), so those values do not
+establish a bridge policy mismatch. Its permissions documentation says
+`read_file(/workspace)` grants recursive access to files beneath that path;
+the observed denial therefore does not establish a mount defect. See the
+[headless CLI event format](https://antigravity.google/docs/cli/headless/) and
+[AGY permissions](https://antigravity.google/docs/permissions?tab=cli).
+
+The bridge supplies a private `/workspace` mount and generated
+`foreman-worker` profile with only the file tools needed for exact named paths;
+host AGY credentials remain read-only. The task prompt also prohibits directory
+enumeration and shell commands. The evidence establishes repeated tool
+lifecycle events and one denied read, but does not establish whether the
+remaining file actions were avoidable prompting, model/CLI behavior, or another
+cause. AGY's terminal `result.usage` is the reported usage for this invocation;
+one CLI invocation does not establish one provider request. The bridge has no
+reliable AGY token or step limit: its timeout bounds wall time, while current
+per-run limits count CLI turns and Worker attempts, and `max_step` is ignored.
+Token totals do not establish monetary cost. The usage difference and its cause
+remain unresolved.
 
 A read-only Chrome UI check confirmed that the Planner conversation, controller
 `awaiting_approval` state, Reviewer recommendation, and pending human decision
