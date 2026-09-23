@@ -24,6 +24,11 @@ Open `http://127.0.0.1:4399`. The service serves the built React UI, local REST 
 | `UHP_BASE_URL`, `UHP_TOKEN`, `UHP_HARNESS_ID`, `UHP_MODEL` | UHP server, optional bearer credential, and optional explicit initial harness/model pair. Without a reachable server, harness/model options are unavailable. |
 | `HINDSIGHT_BASE_URL`, `HINDSIGHT_TOKEN` | Hindsight API and optional credential. Outages show degraded memory status and do not stop workflow state changes. |
 | `FOREMAN_REQUEST_TIMEOUT_MS`, `FOREMAN_TASK_TIMEOUT_MS` | Bounded service requests and task policy. |
+| `FOREMAN_WORKSPACE_SOURCE_REPO` | Local Git repository used to read the pinned base and verify the complete Worker snapshot. |
+| `FOREMAN_WORKSPACE_BRIDGE_URL` | Optional loopback URL for the external workspace bridge; needed to seed and fetch a live Worker workspace, not to replay recorded evidence. |
+| `FOREMAN_WORKSPACE_ALLOWED_SCOPE` | Comma-separated exact paths or directory prefixes ending in `/` allowed in the Worker result. |
+| `FOREMAN_VALIDATION_COMMANDS` | Non-empty JSON array of `{ "name", "command", "args", "cwd?" }` entries run by Foreman in the disposable validation workspace. |
+| `FOREMAN_VALIDATION_TIMEOUT_MS`, `FOREMAN_VALIDATION_MAX_OUTPUT_BYTES` | Per-command time limit and output capture bound. Defaults are 120,000 ms and 1 MiB. |
 
 The supported configuration shape is recorded in `config.schema.json`. Keep credentials in `.env`, which Git ignores. The API is bound to loopback by default; it is not a hosted account service.
 
@@ -33,7 +38,7 @@ The durable hierarchy is project → task → run → role → assignment → ev
 
 UHP metadata discovery supplies available configured harness/model pairs. A selection is rejected when that pair is unavailable; Foreman does not silently choose another model. Submission intent and an idempotency key are persisted before sending work. Retries depend on the server advertising idempotency. Actual response/session IDs, terminal status, and usage are recorded only when supplied by UHP.
 
-The workspace bridge remains an explicit investigation. A task completing in UHP does not establish a Git changeset. Foreman can read an exact pinned Git base and compare a supplied complete result manifest with scope limits, including binary bytes and filesystem modes. HarnessRouter has not supplied a proven complete result snapshot, so the controller keeps review, validation, Git evidence, and human approval unverified. See [workspace bridge investigation](docs/workspace-bridge.md) for tested file cases, missing runtime evidence, and the next implementation step.
+The controller now records the external CLI bridge's Worker response and complete snapshot, verifies it against a pinned Git base and allowed scope, computes the diff, materializes that result in a disposable validation workspace, and runs configured checks itself with bounded time and captured output. Every command in the configured validation list must pass; commands absent from the list are not run or inferred. Reviewer feedback is stored as a separate recommendation; its prose cannot change the verified diff or mark it accepted, and Foreman does not apply Reviewer changes. Only the explicit human approval transition can accept the result after snapshot, scope, validation, and recommendation evidence gates pass. The recorded Worker smoke result has not been approved. Deterministic replay and simulated Reviewer fixtures exercise the integration without another model call; they are not additional live Worker or Reviewer runs. A live Reviewer through the current host bridge remains unavailable without a read-only Reviewer path or another configured harness. The host CLI bridge remains outside Foreman core and uses the existing subscription login boundary. See [workspace bridge evidence and remaining gaps](docs/workspace-bridge.md).
 
 The [Planner dashboard](docs/screenshots/planner-dashboard.png) and [evidence and usage view](docs/screenshots/evidence-and-usage.png) show a real persisted project, task, run, and queued guidance. They intentionally show unavailable service and usage values where no harness has reported them.
 

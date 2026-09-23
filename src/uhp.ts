@@ -187,7 +187,7 @@ export class UhpClient implements UhpAdapter {
         body: JSON.stringify({
           input: input.prompt,
           model: model.id,
-          metadata: { harness_id: harness.id, foreman_submission_id: input.submissionId, foreman_assignment_id: input.assignmentId, foreman_run_id: input.runId, foreman_role_id: input.roleId, foreman_task_id: input.taskId, foreman_project_id: input.projectId },
+          metadata: { harness_id: harness.id, foreman_submission_id: input.submissionId, foreman_assignment_id: input.assignmentId, foreman_run_id: input.runId, foreman_role_id: input.roleId, foreman_task_id: input.taskId, foreman_project_id: input.projectId, ...(input.roleId==='worker'&&typeof input.config.workspaceId==='string'?{workspace_id:input.config.workspaceId}:{}) },
           stream: true,
           store: true,
           timeout_seconds: timeoutSeconds,

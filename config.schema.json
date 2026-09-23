@@ -12,6 +12,12 @@
     "UHP_MODEL": { "type": "string", "description": "Optional explicit initial model choice; pair with UHP_HARNESS_ID" },
     "HINDSIGHT_BASE_URL": { "type": "string", "format": "uri", "description": "Configured Hindsight server base URL; absent means degraded memory" },
     "FOREMAN_REQUEST_TIMEOUT_MS": { "type": "integer", "minimum": 100, "maximum": 120000, "default": 10000 },
-    "FOREMAN_TASK_TIMEOUT_MS": { "type": "integer", "minimum": 1000, "maximum": 600000, "default": 300000 }
+    "FOREMAN_TASK_TIMEOUT_MS": { "type": "integer", "minimum": 1000, "maximum": 600000, "default": 300000 },
+    "FOREMAN_WORKSPACE_SOURCE_REPO": { "type": "string", "description": "Local Git source repository used for pinned Worker snapshot verification" },
+    "FOREMAN_WORKSPACE_BRIDGE_URL": { "type": "string", "format": "uri", "description": "Loopback URL for the external workspace bridge" },
+    "FOREMAN_WORKSPACE_ALLOWED_SCOPE": { "type": "string", "description": "Comma-separated exact paths or directory prefixes ending in / allowed for Worker changes" },
+    "FOREMAN_VALIDATION_COMMANDS": { "type": "string", "description": "JSON array of validation command objects with explicit command and args" },
+    "FOREMAN_VALIDATION_TIMEOUT_MS": { "type": "integer", "minimum": 1, "maximum": 600000, "default": 120000 },
+    "FOREMAN_VALIDATION_MAX_OUTPUT_BYTES": { "type": "integer", "minimum": 1, "maximum": 16777216, "default": 1048576 }
   }
 }
