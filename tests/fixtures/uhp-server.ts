@@ -5,6 +5,7 @@ export interface UhpFixtureOptions {
   capabilityIdempotency?: boolean;
   terminalStatus?: "completed" | "failed" | "incomplete" | "cancelled";
   holdUntilCancel?: boolean;
+  holdRole?: string;
   uniqueResponseIds?: boolean;
   protocol?: string;
   versions?: string[];
@@ -14,12 +15,16 @@ export interface UhpFixture {
   baseUrl: string;
   server: Server;
   requests: Array<{ method: string; path: string; headers: Record<string, string | string[] | undefined>; body: string }>;
+  readonly executionCount: number;
   close(): Promise<void>;
 }
 
 export async function startUhpFixture(options: UhpFixtureOptions = {}): Promise<UhpFixture> {
   const requests: UhpFixture["requests"] = [];
-  const pending = new Map<string, ServerResponse>();
+  const pending = new Map<string, ServerResponse[]>();
+  const idempotency = new Map<string, { created: unknown; terminal?: unknown; terminalType?: string; response: Record<string, unknown> }>();
+  const responses = new Map<string, Record<string, unknown>>();
+  let executionCount = 0;
   const server = createServer((req, res) => {
     let body = "";
     req.setEncoding("utf8");
@@ -43,27 +48,54 @@ export async function startUhpFixture(options: UhpFixtureOptions = {}): Promise<
         const active = pending.get(responseId);
         if (active) {
           const cancelled = { id: responseId, object: "response", status: "cancelled", model: "model-fixture", metadata: { session_id: `hsess_${responseId.slice(5)}`, harness_id: "chrn_fixture" }, usage: null, output_text: "partial fixture result", output: [] };
-          active.write(`event: response.failed\ndata: ${JSON.stringify({ type: "response.failed", sequence_number: 1, response: cancelled })}\n\n`);
-          active.end(); pending.delete(responseId);
+          responses.set(responseId, cancelled);
+          const terminal = { type: "response.failed", sequence_number: 1, response: cancelled };
+          const ledgerEntry = [...idempotency.values()].find((entry) => entry.response.id === responseId);
+          if (ledgerEntry) { ledgerEntry.response = cancelled; ledgerEntry.terminal = terminal; ledgerEntry.terminalType = "response.failed"; }
+          for (const stream of active) {
+            stream.write(`event: response.failed\ndata: ${JSON.stringify(terminal)}\n\n`);
+            stream.end();
+          }
+          pending.delete(responseId);
         }
         json(res, 200, { status: "cancelled" });
       } else if (path === "/v1/responses" && req.method === "POST") {
+        const keyHeader = req.headers["idempotency-key"];
+        const key = typeof keyHeader === "string" ? keyHeader : "";
+        const existing = key ? idempotency.get(key) : undefined;
+        if (existing) {
+          res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "UHP-Version": "2026-09-12" });
+          res.write(`event: response.created\ndata: ${JSON.stringify(existing.created)}\n\n`);
+          if (existing.terminal) res.end(`event: ${existing.terminalType}\ndata: ${JSON.stringify(existing.terminal)}\n\n`);
+          else {
+            const streams = pending.get(String(existing.response.id)) ?? [];
+            streams.push(res);
+            pending.set(String(existing.response.id), streams);
+          }
+          return;
+        }
+        executionCount++;
         res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "UHP-Version": "2026-09-12" });
         const request = JSON.parse(body || "{}") as { metadata?: Record<string, string> };
         const suffix = options.uniqueResponseIds ? String(request.metadata?.foreman_assignment_id ?? request.metadata?.foreman_role_id ?? "fixture").replace(/[^a-zA-Z0-9_-]/g, "_") : "fixture";
         const responseId = `resp_${suffix}`;
         const sessionId = `hsess_${suffix}`;
-        const status = options.holdUntilCancel ? "cancelled" : options.terminalStatus ?? "completed";
+        const metadata = request.metadata ?? {};
+        const shouldHold = options.holdUntilCancel === true && (!options.holdRole || metadata.foreman_role_id === options.holdRole);
+        const status = shouldHold ? "in_progress" : options.terminalStatus ?? "completed";
         const response = { id: responseId, object: "response", status, model: "model-fixture", metadata: { session_id: sessionId, harness_id: "chrn_fixture" }, usage: { input_tokens: 7, output_tokens: 3, total_tokens: 10, input_tokens_details: { cached_tokens: 2 } }, output_text: "fixture result", output: [{ type: "message", content: [{ type: "output_text", text: "fixture result" }] }] };
         const created = { type: "response.created", sequence_number: 0, response: { id: responseId, status: "in_progress", metadata: { session_id: sessionId } } };
-        if (options.holdUntilCancel) { res.write(`event: response.created\ndata: ${JSON.stringify(created)}\n\n`); pending.set(responseId, res); return; }
         const terminalType = status === "cancelled" ? "response.failed" : `response.${status}`;
         const terminal = { type: terminalType, sequence_number: 1, response };
+        responses.set(responseId, response);
+        if (key) idempotency.set(key, { created, terminal: shouldHold ? undefined : terminal, terminalType: shouldHold ? undefined : terminalType, response });
+        if (shouldHold) { res.write(`event: response.created\ndata: ${JSON.stringify(created)}\n\n`); pending.set(responseId, [res]); return; }
         res.end(`event: response.created\ndata: ${JSON.stringify(created)}\n\nevent: ${terminalType}\ndata: ${JSON.stringify(terminal)}\n\n`);
       } else if (/^\/v1\/responses\/[^/]+$/.test(path) && req.method === "GET") {
         const responseId = decodeURIComponent(path.split("/")[3] ?? "resp_fixture");
         const suffix = responseId === "resp_fixture" ? "fixture" : responseId.slice(5);
-        json(res, 200, { id: responseId, status: options.holdUntilCancel ? "cancelled" : options.terminalStatus ?? "completed", model: "model-fixture", metadata: { session_id: `hsess_${suffix}`, harness_id: "chrn_fixture" }, output_text: "retrieved result" });
+        const stored = responses.get(responseId);
+        json(res, 200, stored ? { ...stored, output_text: stored.status === "in_progress" ? stored.output_text : "retrieved result" } : { id: responseId, status: "completed", model: "model-fixture", metadata: { session_id: `hsess_${suffix}`, harness_id: "chrn_fixture" }, output_text: "retrieved result" });
       } else json(res, 404, { error: { code: "not_found" } });
     });
   });
@@ -71,7 +103,7 @@ export async function startUhpFixture(options: UhpFixtureOptions = {}): Promise<
   await once(server, "listening");
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Fixture server did not bind a TCP port");
-  return { baseUrl: `http://127.0.0.1:${address.port}`, server, requests, close: () => new Promise<void>((resolve, reject) => { server.closeAllConnections(); server.close((error) => error ? reject(error) : resolve()); }) };
+  return { baseUrl: `http://127.0.0.1:${address.port}`, server, requests, get executionCount() { return executionCount; }, close: () => new Promise<void>((resolve, reject) => { server.closeAllConnections(); server.close((error) => error ? reject(error) : resolve()); }) };
 }
 
 function json(response: ServerResponse, status: number, data: unknown): void {

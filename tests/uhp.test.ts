@@ -41,6 +41,19 @@ describe("UHP adapter", () => {
     expect(server.requests.some((request) => request.path === "/v1/responses/resp_fixture" && request.method === "GET")).toBe(true);
   });
 
+  it("replays a duplicate idempotency key without executing the task again", async () => {
+    const server = await fixture({ uniqueResponseIds: true });
+    const client = new UhpClient({ baseUrl: server.baseUrl, harnessId: "chrn_fixture", model: "model-fixture" });
+    const input = { submissionId: "sub-retry", assignmentId: "assignment-retry", runId: "run", roleId: "worker", taskId: "task", projectId: "project", prompt: "work", config: {}, idempotencyKey: "stable-submit-key" };
+    const first = await client.submit(input);
+    const replay = await client.submit({ ...input, submissionId: "sub-retry-after-restart" });
+    expect(first.responseId).toBe("resp_assignment-retry");
+    expect(replay.responseId).toBe(first.responseId);
+    expect(replay.sessionId).toBe(first.sessionId);
+    expect(server.executionCount).toBe(1);
+    expect(server.requests.filter((request) => request.method === "POST" && request.path === "/v1/responses")).toHaveLength(2);
+  });
+
   it("supports cancellation only when a persisted response ID is supplied", async () => {
     const server = await fixture();
     const client = new UhpClient({ baseUrl: server.baseUrl, token: "token", harnessId: "chrn_fixture", model: "model-fixture" });
@@ -50,13 +63,16 @@ describe("UHP adapter", () => {
   });
 
   it("persists the created response ID before terminal completion and cancels the live stream", async () => {
-    const server = await fixture({ holdUntilCancel: true, uniqueResponseIds: true });
+    const server = await fixture({ holdUntilCancel: true, holdRole: "worker", uniqueResponseIds: true });
     const client = new UhpClient({ baseUrl: server.baseUrl, token: "token", harnessId: "chrn_fixture", model: "model-fixture" });
     let resolveCreated!: (event: { responseId?: string; sessionId?: string }) => void;
     const created = new Promise<{ responseId?: string; sessionId?: string }>((resolve) => { resolveCreated = resolve; });
-    const running = client.submit({ submissionId: "sub-live", assignmentId: "assignment-live", runId: "run", roleId: "planner", taskId: "task", projectId: "project", prompt: "work", config: {}, idempotencyKey: "submit-key", onEvent: (event) => { if (event.type === "response.created") resolveCreated(event); } });
+    const running = client.submit({ submissionId: "sub-live", assignmentId: "assignment-live", runId: "run", roleId: "worker", taskId: "task", projectId: "project", prompt: "work", config: {}, idempotencyKey: "submit-key", onEvent: (event) => { if (event.type === "response.created") resolveCreated(event); } });
     const early = await created;
     expect(early).toMatchObject({ responseId: "resp_assignment-live", sessionId: "hsess_assignment-live" });
+    await expect(client.submit({ submissionId: "sub-planner", assignmentId: "assignment-planner", runId: "run", roleId: "planner", taskId: "task", projectId: "project", prompt: "work", config: {}, idempotencyKey: "planner-key" })).resolves.toMatchObject({ status: "completed" });
+    const inProgress = await client.retrieve(early.responseId!);
+    expect(inProgress.status).toBe("in_progress");
     const cancelled = await client.cancel({ submissionId: "sub-live", externalId: early.responseId, idempotencyKey: "cancel-key" });
     expect(cancelled.status).toBe("cancelled");
     await expect(running).resolves.toMatchObject({ externalId: early.responseId, sessionId: early.sessionId, status: "cancelled" });
