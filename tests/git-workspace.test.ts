@@ -73,7 +73,17 @@ describe('canonical Git snapshots', () => {
     await expect(verifyGitSnapshotScope(cwd, base.commit, result, ['allowed'])).rejects.toThrow('outside the allowed scope: outside/new.txt');
     const rename = base.entries.filter(e => e.path !== 'rename-before.txt').map(e => ({ ...e }));
     rename.push(entry('allowed/rename-after.txt', 'same bytes'));
-    await expect(verifyGitSnapshotScope(cwd, base.commit, rename, ['allowed'])).rejects.toThrow('outside the allowed scope: rename-before.txt');
+    await expect(verifyGitSnapshotScope(cwd, base.commit, rename, ['allowed/'])).rejects.toThrow('outside the allowed scope: rename-before.txt');
+    await expect(verifyGitSnapshotScope(cwd, base.commit, [...base.entries, entry('allowed.txt/child', 'bad')], ['allowed.txt'])).rejects.toThrow('outside the allowed scope: allowed.txt/child');
+  });
+
+  it('bounds untrusted result manifests before comparing them', async () => {
+    const cwd = await repo();
+    await addBaseFiles(cwd);
+    const base = await snapshotGitCommit(cwd, commit(cwd));
+    await expect(verifyGitSnapshotScope(cwd, base.commit, base.entries, ['.'], { maxEntries: 2 })).rejects.toThrow('result snapshot entry limit');
+    await expect(verifyGitSnapshotScope(cwd, base.commit, [entry('large.bin', 'a'.repeat(32))], ['large.bin'], { maxBlobBytes: 8 })).rejects.toThrow('result snapshot blob size limit');
+    await expect(verifyGitSnapshotScope(cwd, base.commit, [entry('a', '1234'), entry('b', '5678')], ['.'], { maxTotalBlobBytes: 7 })).rejects.toThrow('result snapshot byte limit');
   });
 
   it('requires a full pinned commit SHA and fails closed on submodules and resource bounds', async () => {

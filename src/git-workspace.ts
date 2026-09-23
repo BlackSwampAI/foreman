@@ -81,18 +81,30 @@ export async function verifyGitSnapshotScope(
   limits: GitSnapshotLimits = {}
 ): Promise<GitScopeVerification> {
   if (!allowedScope.length) throw new Error('At least one explicitly allowed path or directory is required');
+  const bound = { ...DEFAULTS, ...limits };
+  for (const [key, value] of Object.entries(bound)) if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`Invalid Git snapshot limit: ${key}`);
+  if (resultEntries.length > bound.maxEntries) throw new Error('Git result snapshot entry limit exceeded');
+  let resultBytes = 0;
+  for (const entry of resultEntries) {
+    if (typeof entry.contentBase64 !== 'string' || entry.contentBase64.length > Math.ceil(bound.maxBlobBytes / 3) * 4) throw new Error(`Git result snapshot blob size limit exceeded: ${entry.path}`);
+    const size = Buffer.from(entry.contentBase64, 'base64').length;
+    if (size > bound.maxBlobBytes || resultBytes + size > bound.maxTotalBlobBytes) throw new Error(`Git result snapshot byte limit exceeded: ${entry.path}`);
+    resultBytes += size;
+  }
+  // Validate unsafe paths, duplicate paths and canonical encodings before accepting a result manifest.
+  compareCompleteSnapshots([], resultEntries);
   const normalizedScope = allowedScope.map(normalizeScopePath);
-  const base = await snapshotGitCommit(repoPath, fullBaseCommitSha, limits);
+  const base = await snapshotGitCommit(repoPath, fullBaseCommitSha, bound);
   const changes = compareCompleteSnapshots(base.entries, resultEntries);
   for (const change of changes) {
     const touched = change.previousPath ? [change.path, change.previousPath] : [change.path];
     for (const path of touched) {
-      if (!normalizedScope.some(scope => path === scope || path.startsWith(`${scope}/`))) {
+      if (!normalizedScope.some(scope => scope.recursive ? path.startsWith(`${scope.path}/`) : path === scope.path)) {
         throw new Error(`Git change is outside the allowed scope: ${path}`);
       }
     }
   }
-  return { ...base, changes, allowedScope: normalizedScope, scopeVerified: true };
+  return { ...base, changes, allowedScope: normalizedScope.map(scope => scope.original), scopeVerified: true };
 }
 
 interface TreeRecord { mode: string; type: string; objectId: string; path: string }
@@ -120,12 +132,13 @@ function parseTree(bytes: Buffer, maxEntries: number): TreeRecord[] {
   return records;
 }
 
-function normalizeScopePath(path: string): string {
-  const normalized = path.endsWith('/') ? path.slice(0, -1) : path;
+function normalizeScopePath(path: string): { path: string; recursive: boolean; original: string } {
+  const recursive = path.endsWith('/');
+  const normalized = recursive ? path.slice(0, -1) : path;
   if (!normalized || normalized.startsWith('/') || normalized.includes('\\') || normalized.includes('\0') || normalized.split('/').some(part => !part || part === '.' || part === '..' || part === '.git')) {
     throw new Error(`Unsafe allowed scope path: ${path}`);
   }
-  return normalized;
+  return { path: normalized, recursive, original: path };
 }
 
 function git(repoPath: string, args: string[], timeoutMs: number, maxBytes: number): Promise<Buffer> {
