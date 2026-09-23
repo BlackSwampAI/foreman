@@ -33,7 +33,9 @@ The durable hierarchy is project → task → run → role → assignment → ev
 
 UHP metadata discovery supplies available configured harness/model pairs. A selection is rejected when that pair is unavailable; Foreman does not silently choose another model. Submission intent and an idempotency key are persisted before sending work. Retries depend on the server advertising idempotency. Actual response/session IDs, terminal status, and usage are recorded only when supplied by UHP.
 
-The workspace bridge remains an explicit investigation. A task completing in UHP does not establish a Git changeset. Foreman cannot accept code until it independently pins the base, verifies a complete result snapshot, checks scope, runs validation, records a Reviewer verdict, and presents the result for human approval. See [workspace bridge investigation](docs/workspace-bridge.md) for tested file cases, missing runtime evidence, and the next implementation step.
+The workspace bridge remains an explicit investigation. A task completing in UHP does not establish a Git changeset. Foreman can read an exact pinned Git base and compare a supplied complete result manifest with scope limits, including binary bytes and filesystem modes. HarnessRouter has not supplied a proven complete result snapshot, so the controller keeps review, validation, Git evidence, and human approval unverified. See [workspace bridge investigation](docs/workspace-bridge.md) for tested file cases, missing runtime evidence, and the next implementation step.
+
+The [Planner dashboard](docs/screenshots/planner-dashboard.png) and [evidence and usage view](docs/screenshots/evidence-and-usage.png) show a real persisted project, task, run, and queued guidance. They intentionally show unavailable service and usage values where no harness has reported them.
 
 ## Verify
 
@@ -43,4 +45,4 @@ pnpm test
 pnpm build
 ```
 
-The deterministic UHP fixture tests do not call a model provider. If a local HarnessRouter and authenticated Gemini CLI are configured, the single authorized live smoke can be run and recorded separately; the test suite does not make provider calls.
+The deterministic UHP fixture tests do not call a model provider. The pinned local HarnessRouter probe and its observed protocol version are recorded in the bridge report. Gemini CLI had no active cached authentication during this foundation work, so no live smoke task was sent. The test suite never makes provider calls.
