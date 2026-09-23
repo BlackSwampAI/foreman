@@ -1,0 +1,12 @@
+{
+  "name": "foreman-worker-comparison-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test test/attempts.check.mjs test/label.check.ts"
+  }
+}

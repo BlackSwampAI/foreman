@@ -4,7 +4,7 @@ Foreman is a local, web-first engineering control plane for one operator. A Plan
 
 This repository began with a new Git root. No v1 code or Git history was migrated.
 
-## Three-harness workflow
+## Host CLI workflow
 
 Foreman can use the host-side CLI bridge for Claude Code, Codex CLI, and
 Antigravity CLI (`agy`). Each harness uses its existing host sign-in; Foreman
@@ -13,9 +13,15 @@ are Claude Code or Codex CLI for Planner, Orchestrator, and Reviewer, and the
 explicit AGY model `gemini-3.8-flash-low` for Worker when `agy models` reports
 it on the host. Every role can select any discovered harness/model pair,
 including any discovered AGY Flash model, with global, project, and run-level
-choices in the UI.
+choices in the UI. Gemini CLI is not enabled in this checkout because the
+available host profile uses API-key auth and no supported OAuth login is
+available. The [Gemini investigation](docs/gemini-cli-worker-investigation.md)
+records the host-login boundary; Gemini CLI was discarded for this Worker
+path. The [AGY usage follow-up](docs/agy-worker-usage-followup.md) records four
+verified same-task Worker turns and an optional low-effort setting. Foreman
+does not copy credentials or require a provider API key.
 
-Follow [the three-harness workflow guide](docs/three-harness-workflow.md) to
+Follow [the host CLI workflow guide](docs/three-harness-workflow.md) to
 start the local bridge and configure a validation policy. Talk with the Planner
 in the UI, then start the bounded controller run: Foreman carries the Planner
 guidance through Orchestrator, Worker, complete-snapshot verification,
@@ -74,4 +80,4 @@ pnpm test
 pnpm build
 ```
 
-The deterministic UHP fixture tests do not call a model provider. The pinned local HarnessRouter probe and its observed protocol version are recorded in the [workspace report](docs/workspace-bridge.md). Gemini CLI had no active cached authentication. Claude Code and Codex CLI have host account logins, but the pinned router has no provider integration and does not inherit those logins. An [experimental host-side UHP bridge](docs/subscription-cli-uhp.md) completed one separately authorized Claude Code smoke task using the existing subscription login; it is not a HarnessRouter capability. The Codex workspace-write fixture and three-attempt live proof are described in the [Codex Worker smoke report](docs/codex-worker-smoke.md). The test suite never makes provider calls.
+The deterministic UHP fixture tests do not call a model provider. The pinned local HarnessRouter probe and its observed protocol version are recorded in the [workspace report](docs/workspace-bridge.md). Gemini CLI has no eligible cached Google-account login on this host; its current API-key configuration was limited to a one-off comparison attempt. Claude Code and Codex CLI have host account logins, but the pinned router has no provider integration and does not inherit those logins. An [experimental host-side UHP bridge](docs/subscription-cli-uhp.md) completed one separately authorized Claude Code smoke task using the existing subscription login; it is not a HarnessRouter capability. The Codex workspace-write fixture and three-attempt live proof are described in the [Codex Worker smoke report](docs/codex-worker-smoke.md). The test suite never makes provider calls.

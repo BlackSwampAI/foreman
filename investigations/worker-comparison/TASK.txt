@@ -1,0 +1,1 @@
+Edit only these paths: `src/label.ts` and `test/label.check.ts`. Change `formatLabel` so it returns `Welcome, ${name}!` instead of `Hello, ${name}!`, and update its test to assert the new output. Do not modify any other file. Foreman will run `pnpm test` after the edit; do not run commands.

@@ -38,8 +38,9 @@ async function setup(t, options = {}) {
   await mkdir(join(dir,'claude-auth'));
   if (!options.claudeAuthRoleDirsAbsent) for (const name of ['projects','session-env','file-history','todos','plans','tasks']) await mkdir(join(dir,'claude-auth',name));
   await mkdir(join(dir,'codex-auth')); await writeFile(join(dir,'codex-auth','auth.json'),'{"fixture":true}',{mode:0o600});
-  const env = { ...process.env, ANTHROPIC_API_KEY:'fixture-only-do-not-forward', OPENAI_API_KEY:'fixture-only-do-not-forward', AWS_ACCESS_KEY_ID:'fixture-only-do-not-forward', GOOGLE_API_KEY:'fixture-only-do-not-forward', CLAUDE_CODE_USE_BEDROCK:'1', CLAUDE_CODE_USE_VERTEX:'1', CLAUDE_CODE_USE_FOUNDRY:'1', CODEX_API_KEY:'fixture-only-do-not-forward', ...(options.claudeNetworkRequirements ? {HTTP_PROXY:'http://fixture-proxy.invalid:8080'} : {}), ...(Number.isFinite(options.keepaliveMs) ? {LOCAL_CLI_UHP_KEEPALIVE_MS:String(options.keepaliveMs)} : {}), LOCAL_CLI_UHP_PORT: String(port), LOCAL_CLI_UHP_STATE: join(dir, 'state.json'), LOCAL_CLI_UHP_WORK: join(dir, 'work'), CLAUDE_CONFIG_DIR: join(dir, 'claude-auth'), CODEX_HOME: join(dir, 'codex-auth'), CLAUDE_MODEL: options.noClaudeModel ? '' : 'claude-requested', CODEX_MODEL: 'codex-requested', CLAUDE_BIN: options.claudeBin ?? (options.spawnError ? join(dir,'missing-cli') : claude), CODEX_BIN: codex, AGY_BIN:join(dir,'missing-agy'), ...(options.agyEnabled ? { AGY_CONFIG_DIR: join(dir,'agy-auth'), ...(options.noAgyModel ? {} : {AGY_MODEL:options.agyModel ?? 'gemini-3.8-flash-medium'}), AGY_BIN:agy } : {}), ...agyDiscoveryEnv, LOCAL_CLI_UHP_SOURCE_REPO: options.sourceRepo ?? fixture.repo, LOCAL_CLI_UHP_BWRAP: options.bwrapBin ?? 'bwrap' };
+  const env = { ...process.env, ANTHROPIC_API_KEY:'fixture-only-do-not-forward', OPENAI_API_KEY:'fixture-only-do-not-forward', AWS_ACCESS_KEY_ID:'fixture-only-do-not-forward', GOOGLE_API_KEY:'fixture-only-do-not-forward', CLAUDE_CODE_USE_BEDROCK:'1', CLAUDE_CODE_USE_VERTEX:'1', CLAUDE_CODE_USE_FOUNDRY:'1', CODEX_API_KEY:'fixture-only-do-not-forward', ...(options.claudeNetworkRequirements ? {HTTP_PROXY:'http://fixture-proxy.invalid:8080'} : {}), ...(Number.isFinite(options.keepaliveMs) ? {LOCAL_CLI_UHP_KEEPALIVE_MS:String(options.keepaliveMs)} : {}), ...(options.agyWorkerEffort ? {AGY_WORKER_EFFORT:options.agyWorkerEffort} : {}), LOCAL_CLI_UHP_PORT: String(port), LOCAL_CLI_UHP_STATE: join(dir, 'state.json'), LOCAL_CLI_UHP_WORK: join(dir, 'work'), CLAUDE_CONFIG_DIR: join(dir, 'claude-auth'), CODEX_HOME: join(dir, 'codex-auth'), CLAUDE_MODEL: options.noClaudeModel ? '' : 'claude-requested', CODEX_MODEL: 'codex-requested', CLAUDE_BIN: options.claudeBin ?? (options.spawnError ? join(dir,'missing-cli') : claude), CODEX_BIN: codex, AGY_BIN:join(dir,'missing-agy'), ...(options.agyEnabled ? { AGY_CONFIG_DIR: join(dir,'agy-auth'), ...(options.noAgyModel ? {} : {AGY_MODEL:options.agyModel ?? 'gemini-3.8-flash-medium'}), AGY_BIN:agy } : {}), ...agyDiscoveryEnv, LOCAL_CLI_UHP_SOURCE_REPO: options.sourceRepo ?? fixture.repo, LOCAL_CLI_UHP_BWRAP: options.bwrapBin ?? 'bwrap' };
   if (options.noAgyModel) delete env.AGY_MODEL;
+  if (!options.agyWorkerEffort) delete env.AGY_WORKER_EFFORT;
   if (options.agyEnabled) Object.assign(env,{AGY_CONFIG_DIR:join(dir,'agy-auth'),...(options.noAgyModel?{}:{AGY_MODEL:options.agyModel ?? 'gemini-3.8-flash-medium'}),AGY_BIN:agy});
   let proc = spawn(process.execPath, [join(here, 'server.mjs')], { env, stdio: 'ignore' });
   t.after(async () => { if (proc.exitCode === null) { proc.kill('SIGTERM'); await new Promise(r => proc.once('exit', r)); } await rm(dir, { recursive: true, force: true }); });
@@ -136,6 +137,29 @@ test('Codex parser returns reported output and leaves unavailable model/usage ab
   assert.equal((await readFile(countFor(r.metadata.workspace_id),'utf8')).trim(),'x:provider-env-absent:model=codex-requested:ignore-user-config=true:skip-git-repo-check=true');
 });
 
+test('AGY Worker effort is an explicit optional flag and leaves the requested model unchanged', async t => {
+  for (const effort of ['low', 'medium', 'high']) {
+    const {base,baseCommit}=await setup(t,{agyEnabled:true,agyWorkerEffort:effort});
+    const events=await submit(base,'antigravity-cli','gemini-3.8-flash-high',`agy-effort-${effort}`,baseCommit,undefined,'Edit README.md with the requested fixture change.');
+    const response=events.at(-1).response;
+    assert.equal(response.status,'completed',JSON.stringify(events));
+    assert.equal(response.requested_model,'gemini-3.8-flash-high');
+    assert.equal(response.model,'gemini-3.8-flash-high');
+    const args=response.metadata.cli_invocation.args;
+    assert.equal(args[args.indexOf('--effort')+1],effort);
+    assert.equal(args.filter(arg=>arg==='--effort').length,1);
+    assert.equal(args[args.indexOf('--model')+1],'gemini-3.8-flash-high');
+  }
+});
+
+test('AGY_WORKER_EFFORT rejects unsupported values at startup', async () => {
+  const child=spawn(process.execPath,[join(here,'server.mjs')],{env:{...process.env,AGY_WORKER_EFFORT:'urgent',LOCAL_CLI_UHP_WORK:join(tmpdir(),`local-cli-uhp-invalid-${process.pid}`)},stdio:['ignore','ignore','pipe']});
+  let stderr=''; child.stderr.setEncoding('utf8'); child.stderr.on('data',chunk=>stderr+=chunk);
+  const code=await new Promise((resolveCode,reject)=>{child.once('error',reject);child.once('exit',resolveCode);});
+  assert.equal(code,1);
+  assert.match(stderr,/AGY_WORKER_EFFORT must be low, medium, or high/);
+});
+
 test('AGY discovery pins only listed models and its stream result edits only the pinned workspace', async t => {
   const {base,baseCommit,env}=await setup(t,{agyEnabled:true});
   const harnesses=await (await fetch(`${base}/v1/harnesses`)).json(); assert.ok(harnesses.harnesses.some(h=>h.id==='antigravity-cli'));
@@ -154,6 +178,7 @@ test('AGY discovery pins only listed models and its stream result edits only the
   assert.equal(response.metadata.agy_permission_policy.write_file_allow,'write_file(/workspace)');
   assert.equal(response.metadata.agy_permission_policy.directory_listing,'not allowed; task must name exact relative file paths');
   assert.deepEqual(response.metadata.cli_invocation.args.slice(-5),['--mode=accept-edits','--add-dir','/workspace','--agent','foreman-worker']);
+  assert.equal(response.metadata.cli_invocation.args.includes('--effort'),false);
   assert.deepEqual(response.usage,{input_tokens:11,output_tokens:4,total_tokens:15,thinking_tokens:2,input_tokens_details:{cached_tokens:3}});
   assert.equal(response.metadata.execution_boundary.proven,true);
   const snapshot=await (await fetch(`${base}/extensions/foreman-workspace/v1/workspaces/${response.metadata.workspace_id}/snapshot`)).json();
@@ -195,7 +220,8 @@ test('AGY success with an empty response distinguishes headless soft denial from
   const events=await submit(base,'antigravity-cli','gemini-3.8-flash-medium','agy-soft-denied-key',baseCommit); const response=events.at(-1).response;
   assert.equal(events.at(-1).type,'response.failed',JSON.stringify(events));
   assert.equal(response.output_text,''); assert.equal(response.usage.input_tokens,14);
-  assert.deepEqual(response.metadata.agy_diagnostic,{permission_mode:'request-review',observed_agent:'foreman-worker',cwd:'assigned_workspace',available_tools:['ask_permission','run_command','write_to_file','view_file','list_dir','replace_file_content','multi_replace_file_content','finish'],available_tools_semantics:'headless_init_tools_available_to_cli_not_profile_allowlist',tool_events:[{step_index:1,name:'list_dir',state:'DONE',error_category:'permission_denied'}],soft_denial_observed:true,result_status:'SUCCESS',response_empty:true,streamed_agent_text_characters:0,requested_agent:'foreman-worker',requested_execution_mode:'accept-edits',outcome:'soft_denied_without_response'});
+  assert.deepEqual(response.metadata.agy_diagnostic,{permission_mode:'request-review',observed_agent:'foreman-worker',cwd:'assigned_workspace',available_tools:['ask_permission','run_command','write_to_file','view_file','list_dir','replace_file_content','multi_replace_file_content','finish'],available_tools_semantics:'headless_init_tools_available_to_cli_not_profile_allowlist',tool_events:[{step_index:1,name:'list_dir',state:'DONE',error_category:'permission_denied'}],tool_lifecycle_update_count:1,distinct_tool_step_count:1,soft_denial_observed:true,result_status:'SUCCESS',response_empty:true,response_characters:0,streamed_agent_text_characters:0,requested_agent:'foreman-worker',agent_definition_sha256:response.metadata.agy_diagnostic.agent_definition_sha256,requested_execution_mode:'accept-edits',outcome:'soft_denied_without_response'});
+  assert.match(response.metadata.agy_diagnostic.agent_definition_sha256,/^[a-f0-9]{64}$/);
   assert.deepEqual(response.metadata.agy_worker_tool_policy.unsafe_tool_events,['list_dir']);
   assert.equal(response.metadata.agy_worker_tool_policy.execution_observations_passed,false);
   assert.equal(response.metadata.cli_invocation.args.includes('--agent'),true);
@@ -252,7 +278,13 @@ test('AGY lifecycle updates collapse by step while ACTIVE unsafe attempts remain
     {step_index:4,name:'view_file',state:'DONE'},
     {step_index:5,name:'run_command',state:'ACTIVE'},
   ]);
+  assert.equal(response.metadata.agy_diagnostic.tool_lifecycle_update_count,5);
+  assert.equal(response.metadata.agy_diagnostic.distinct_tool_step_count,3);
   assert.equal(response.metadata.agy_diagnostic.reported_cli_turns,2);
+  assert.equal(response.metadata.agy_diagnostic.response_characters,5);
+  assert.equal(response.metadata.agy_diagnostic.result_status,'SUCCESS');
+  assert.match(response.metadata.submitted_prompt_sha256,/^[a-f0-9]{64}$/);
+  assert.match(response.metadata.agy_diagnostic.agent_definition_sha256,/^[a-f0-9]{64}$/);
   assert.deepEqual(response.metadata.agy_worker_tool_policy.observed_executed_tool_events,['view_file','view_file','run_command']);
   assert.deepEqual(response.metadata.agy_worker_tool_policy.unsafe_tool_events,['run_command']);
   assert.equal(response.metadata.agy_worker_tool_policy.execution_observations_passed,false);
@@ -266,6 +298,16 @@ test('AGY Worker rejects a different init.agent even when it executes only an al
   assert.equal(response.error.message,'AGY Worker selected the wrong agent or executed an out-of-profile tool');
   assert.equal(response.metadata.agy_worker_tool_policy.selected_agent,'default');
   assert.equal(response.metadata.agy_worker_tool_policy.selected_agent_matches,false);
+  assert.deepEqual(response.metadata.agy_worker_tool_policy.unsafe_tool_events,[]);
+});
+
+test('AGY Worker reports missing initialization separately from a mismatched agent', async t => {
+  const body=`if(process.argv[2]==='models'){console.log('gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)');process.exit(0)}console.log(JSON.stringify({event:'result',result:{conversation_id:'agy-no-init',status:'SUCCESS',response:'Done.'}}));`;
+  const {base,baseCommit}=await setup(t,{agyEnabled:true,agyBody:body});
+  const events=await submit(base,'antigravity-cli','gemini-3.8-flash-medium','agy-no-init-key',baseCommit); const response=events.at(-1).response;
+  assert.equal(events.at(-1).type,'response.failed',JSON.stringify(events));
+  assert.equal(response.error.message,'AGY Worker did not emit an initialization event identifying the selected agent');
+  assert.equal(response.metadata.agy_diagnostic.observed_agent,'unreported');
   assert.deepEqual(response.metadata.agy_worker_tool_policy.unsafe_tool_events,[]);
 });
 
