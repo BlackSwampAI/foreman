@@ -12,6 +12,6 @@
     "UHP_MODEL": { "type": "string", "description": "Optional explicit initial model choice; pair with UHP_HARNESS_ID" },
     "HINDSIGHT_BASE_URL": { "type": "string", "format": "uri", "description": "Configured Hindsight server base URL; absent means degraded memory" },
     "FOREMAN_REQUEST_TIMEOUT_MS": { "type": "integer", "minimum": 100, "maximum": 120000, "default": 10000 },
-    "FOREMAN_TASK_TIMEOUT_MS": { "type": "integer", "minimum": 1000, "maximum": 3600000, "default": 300000 }
+    "FOREMAN_TASK_TIMEOUT_MS": { "type": "integer", "minimum": 1000, "maximum": 600000, "default": 300000 }
   }
 }

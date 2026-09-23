@@ -50,6 +50,6 @@ export function loadConfig(): ForemanConfig {
     uhpModel,
     hindsightBaseUrl: optionalHttpUrl('HINDSIGHT_BASE_URL'),
     requestTimeoutMs: integer('FOREMAN_REQUEST_TIMEOUT_MS', 10000, 100, 120000),
-    taskTimeoutMs: integer('FOREMAN_TASK_TIMEOUT_MS', 300000, 1000, 3600000)
+    taskTimeoutMs: integer('FOREMAN_TASK_TIMEOUT_MS', 300000, 1000, 600000)
   };
 }
