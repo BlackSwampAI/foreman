@@ -9,6 +9,13 @@ async function fixture(options: Parameters<typeof startUhpFixture>[0] = {}): Pro
 afterEach(async () => { await Promise.all(fixtures.splice(0).map((server) => server.close())); });
 
 describe("UHP adapter", () => {
+  it("uses the 120 second submission timeout when neither Foreman nor the harness specifies one", async () => {
+    const server = await fixture({ omitHarnessTimeout: true });
+    const client = new UhpClient({ baseUrl: server.baseUrl, harnessId: "chrn_fixture", model: "model-fixture" });
+    await client.submit({ submissionId: "default-timeout-sub", assignmentId: "default-timeout-as", runId: "default-timeout-run", roleId: "planner", taskId: "task", projectId: "project", prompt: "bounded task", config: {}, idempotencyKey: "default-timeout-key" });
+    const posted=server.requests.find(request=>request.method==='POST'&&request.path==='/v1/responses');
+    expect(JSON.parse(posted!.body).timeout_seconds).toBe(120);
+  });
   it("keeps requested Codex model separate when CLI supplies no authoritative actual model", async () => {
     const server = await fixture({ codexCli: true, missingActualModel: true });
     const client = new UhpClient({ baseUrl: server.baseUrl, harnessId: "codex-cli", model: "codex-available" });
@@ -16,6 +23,21 @@ describe("UHP adapter", () => {
     expect(result).toMatchObject({ status: "completed", requestedModel: "codex-available", actualModelStatus: "unavailable", selectedHarnessId: "codex-cli", sessionId: "hsess_fixture", cliInvocation: { executable: "/opt/codex", hostExecutable: "/usr/bin/codex", args: ["exec", "--model", "codex-available"] }, usage: { inputTokens: 7, outputTokens: 3 } });
     expect(result.actualModel).toBeUndefined();
     expect(result.modelFallback).toBe(false);
+  });
+
+  it("accepts a bound Antigravity unavailable-model report for every role and preserves reported usage", async () => {
+    const server = await fixture({ antigravityCli: true, missingActualModel: true, capabilities: { readOnlyReviewer: true } });
+    const client = new UhpClient({ baseUrl: server.baseUrl, harnessId: "antigravity-cli", model: "gemini-3.8-flash-medium" });
+    const evidence = { reviewDiff: "bounded diff", controllerValidation: { passed: true } };
+    const results = await Promise.all((['planner','orchestrator','worker','reviewer'] as const).map((roleId) => client.submit({
+      submissionId: `${roleId}-sub`, assignmentId: `${roleId}-as`, runId: 'agy-run', roleId, taskId: 'task', projectId: 'project', prompt: 'bounded task',
+      config: roleId === 'reviewer' ? { reviewMode: 'read_only', reviewEvidence: evidence } : {}, idempotencyKey: `${roleId}-key`,
+    })));
+    for (const result of results) {
+      expect(result).toMatchObject({ status: 'completed', requestedModel: 'gemini-3.8-flash-medium', actualModelStatus: 'unavailable', selectedHarnessId: 'antigravity-cli', reportedHarnessId: 'antigravity-cli', cliInvocation: { executable: '/opt/agy', hostExecutable: '/usr/bin/agy', args: expect.arrayContaining(['--model', 'gemini-3.8-flash-medium']) }, usage: { inputTokens: 8, outputTokens: 5, totalTokens: 13, thinkingTokens: 2, cachedInputTokens: 3 } });
+      expect(result.actualModel).toBeUndefined();
+    }
+    expect(results[3]).toMatchObject({ reviewerExecution: { mode: 'read_only', mutationAttempted: false, validation: evidence.controllerValidation } });
   });
 
   it("records terminal Codex CLI failure without inventing model or session evidence", async () => {

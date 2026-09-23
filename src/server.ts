@@ -40,7 +40,12 @@ const server=createServer(async(req,res)=>{
     m=path.match(/^\/api\/runs\/([^/]+)\/roles\/([^/]+)\/config$/);if(req.method==='PUT'&&m){const b=await body(req);json(res,200,await controller.selectRoleConfig(decodeURIComponent(m[2]!),b.config,undefined,decodeURIComponent(m[1]!)));return;}
     m=path.match(/^\/api\/projects\/([^/]+)\/tasks$/);if(req.method==='POST'&&m){const b=await body(req);json(res,201,await controller.createTask(decodeURIComponent(m[1]!),String(b.title??'')));return;}
     m=path.match(/^\/api\/tasks\/([^/]+)\/runs$/);if(req.method==='POST'&&m){json(res,201,await controller.createRun(decodeURIComponent(m[1]!)));return;}
+    m=path.match(/^\/api\/runs\/([^/]+)\/start$/);if(req.method==='POST'&&m){json(res,202,await controller.startWork(decodeURIComponent(m[1]!),await body(req)));return;}
     m=path.match(/^\/api\/runs\/([^/]+)\/guidance$/);if(req.method==='POST'&&m){const b=await body(req);json(res,201,await controller.addGuidance(decodeURIComponent(m[1]!),String(b.text??'')));return;}
+    m=path.match(/^\/api\/runs\/([^/]+)\/orchestrator$/);if(req.method==='POST'&&m){const b=await body(req);json(res,201,await controller.orchestrate(decodeURIComponent(m[1]!),String(b.prompt??'')));return;}
+    m=path.match(/^\/api\/runs\/([^/]+)\/orchestrator\/follow-up$/);if(req.method==='POST'&&m){const b=await body(req);json(res,201,await controller.followUpOrchestrator(decodeURIComponent(m[1]!),String(b.prompt??'')));return;}
+    m=path.match(/^\/api\/runs\/([^/]+)\/worker-dispatch$/);if(req.method==='POST'&&m){const b=await body(req);json(res,201,await controller.dispatchWorkerProposal(decodeURIComponent(m[1]!),String(b.proposalId??'')));return;}
+    m=path.match(/^\/api\/runs\/([^/]+)\/worker-retry$/);if(req.method==='POST'&&m){const b=await body(req);json(res,201,await controller.retryWorkerProposal(decodeURIComponent(m[1]!),String(b.proposalId??'')));return;}
     m=path.match(/^\/api\/runs\/([^/]+)\/guidance\/checkpoint$/);if(req.method==='POST'&&m){json(res,200,await controller.deliverGuidanceCheckpoint(decodeURIComponent(m[1]!)));return;}
     m=path.match(/^\/api\/guidance\/([^/]+)\/ack$/);if(req.method==='POST'&&m){const b=await body(req);json(res,200,await controller.acknowledgeGuidance(decodeURIComponent(m[1]!),b.acknowledgment));return;}
     m=path.match(/^\/api\/runs\/([^/]+)\/assignments$/);if(req.method==='POST'&&m){const b=await body(req);json(res,201,await controller.assign(decodeURIComponent(m[1]!),String(b.roleId??''),String(b.prompt??''),b.config));return;}

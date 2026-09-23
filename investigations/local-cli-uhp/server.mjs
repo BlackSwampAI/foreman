@@ -7,11 +7,12 @@ import { randomUUID } from 'node:crypto';
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile, readdir, lstat, readlink, realpath, rm, access, symlink, chmod, open } from 'node:fs/promises';
 import { accessSync, constants as fsConstants } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { posix } from 'node:path';
 import { TextDecoder } from 'node:util';
 import { createRequire } from 'node:module';
+import { roleSessionBinding, roleStatePath, resolvePreviousRoleSession, withRoleSession } from './role-sessions.mjs';
 
 const VERSION = '2026-09-12';
 const utf8 = new TextDecoder('utf-8', { fatal: true });
@@ -25,13 +26,23 @@ const MAX_PROMPT = 16_000;
 const MAX_OUTPUT = 64_000;
 const MAX_TIMEOUT = 120;
 const MAX_REVIEW_DIFF = 48_000;
+const SSE_KEEPALIVE_MS = (() => { const value = Number(process.env.LOCAL_CLI_UHP_KEEPALIVE_MS); return Number.isFinite(value) && value > 0 ? Math.min(value, 60_000) : 10_000; })();
+const AGY_WORKER_AGENT = 'foreman-worker';
+const AGY_WORKER_TOOLS = Object.freeze(['view_file','replace_file_content','multi_replace_file_content','write_to_file','finish']);
 const HARNESS = {
   claude: { id: 'claude-code', bin: process.env.CLAUDE_BIN ?? 'claude', authDir: process.env.CLAUDE_CONFIG_DIR, model: process.env.CLAUDE_MODEL },
   codex: { id: 'codex-cli', bin: process.env.CODEX_BIN ?? 'codex', authDir: process.env.CODEX_HOME, model: process.env.CODEX_MODEL },
+  agy: { id: 'antigravity-cli', bin: process.env.AGY_BIN ?? 'agy', authDir: process.env.AGY_CONFIG_DIR ?? join(homedir(), '.gemini', 'antigravity-cli'), model: process.env.AGY_MODEL ?? 'gemini-3.8-flash-low' },
 };
 const tasks = new Map();
 const workspaces = new Map();
+let agyModelsCache = { expires: 0, models: [] };
 let state = { keys: {}, responses: {}, workspaces: {} };
+
+function agyDiscoveryEnvironment(source = process.env) {
+  const allowed = new Set(['PATH','HOME','USER','LOGNAME','LANG','LC_ALL','TERM','TMPDIR','TMP','TEMP','XDG_RUNTIME_DIR','DBUS_SESSION_BUS_ADDRESS','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY','SSL_CERT_FILE','SSL_CERT_DIR','NODE_EXTRA_CA_CERTS','AGY_CONFIG_DIR']);
+  return Object.fromEntries(Object.entries(source).filter(([name, value]) => allowed.has(name) && typeof value === 'string'));
+}
 
 async function persist() {
   await mkdir(resolve(STATE, '..'), { recursive: true });
@@ -62,7 +73,8 @@ function executableConfigured(bin) {
   if (bin.includes('/')) { try { accessSync(bin, fsConstants.X_OK); return true; } catch { return false; } }
   return (process.env.PATH ?? '').split(':').some(dir => { try { accessSync(join(dir, bin), fsConstants.X_OK); return true; } catch { return false; } });
 }
-function configured(h) { return !!h?.authDir && typeof h.model === 'string' && h.model.trim() !== '' && h.model.trim().toLowerCase() !== 'undefined' && (!!SOURCE_REPO && executableConfigured(BWRAP)); }
+function configured(h) { return !!h?.authDir && typeof h.model === 'string' && h.model.trim() !== '' && h.model.trim().toLowerCase() !== 'undefined' && (!!SOURCE_REPO && executableConfigured(BWRAP) && (h.id !== 'antigravity-cli' || executableConfigured(h.bin)) && readableDirectory(h.authDir)); }
+function readableDirectory(path) { try { return accessSync(path, fsConstants.R_OK) === undefined; } catch { return false; } }
 function outputText(r) { return typeof r.output_text === 'string' ? r.output_text : ''; }
 function reportedModel(value) { return typeof value === 'string' && value.trim() !== '' && value.trim().toLowerCase() !== 'undefined' ? value.trim() : undefined; }
 
@@ -92,11 +104,69 @@ function parseCodex(text) {
   const mutationAttempted = events.some(e => e.type === 'tool_call' || (e.item?.type && !toolTypes.has(e.item.type)));
   return { text: messages.join('\n'), model: reportedModel(done?.model) ?? reportedModel(thread?.model), session: thread?.thread_id, turnCompleted: !!done, isError: !!events.find(e => e.type === 'turn.failed' || e.type === 'error'), mutationAttempted, malformedOutput, unrecognizedOutput, usage: usage && typeof usage === 'object' ? usage : undefined };
 }
-function cliArgs(kind, model, timeout, maxStep, reviewer = false) {
+function parseAgy(text, stderr = '') {
+  const lines = text.split(/\r?\n/).filter(line => line.trim() !== '');
+  let malformedOutput = false;
+  const events = lines.map(line => { try { return JSON.parse(line); } catch { malformedOutput = true; return null; } }).filter(Boolean);
+  const knownEvents = new Set(['init','step_update','result']);
+  const unrecognizedOutput = events.some(e => typeof e.event !== 'string' || !knownEvents.has(e.event));
+  const result = [...events].reverse().find(e => e.event === 'result')?.result;
+  const init = events.find(e => e.event === 'init');
+  const conversation = result?.conversation_id ?? init?.conversation_id ?? events.map(e => e.step_update?.conversation_id).find(Boolean);
+  const model = reportedModel(result?.model) ?? reportedModel(init?.model) ?? reportedModel(init?.init?.model);
+  const toolUpdates = events.filter(e => e.event === 'step_update' && e.step_update?.step_type === 'tool').map(e => {
+    const step = e.step_update;
+    const name = step.tool_name ?? step.tool_info?.name;
+    const nameSafe = typeof name === 'string' && /^[A-Za-z0-9_.-]{1,80}$/.test(name) ? name : 'unknown_tool';
+    const errorText = `${step.tool_info?.error?.type ?? ''} ${step.tool_info?.error?.message ?? ''}`.toLowerCase();
+    const errorCategory = /permission|approval|denied/.test(errorText) ? 'permission_denied' : /read.only|write|filesystem|file access/.test(errorText) ? 'file_access' : step.tool_info?.error ? 'tool_error' : undefined;
+    return { step_index:Number.isSafeInteger(step.step_index) && step.step_index >= 0 && step.step_index <= 1000000 ? step.step_index : undefined, name:nameSafe, state:typeof step.state === 'string' && /^[A-Z_]{1,24}$/.test(step.state) ? step.state : 'unknown', error_category:errorCategory };
+  });
+  // AGY emits lifecycle updates (for example ACTIVE then DONE) for one tool
+  // step. Keep the latest sanitized observation per step/name so diagnostics
+  // count actions, while a distinct unsafe name at the same index still fails.
+  const latestToolUpdate = new Map();
+  toolUpdates.forEach((update, ordinal) => {
+    const key = update.step_index === undefined ? `unindexed:${ordinal}` : `${update.step_index}:${update.name}`;
+    latestToolUpdate.set(key, update);
+  });
+  const toolEvents = [...latestToolUpdate.values()];
+  const mutationAttempted = toolEvents.length > 0;
+  const initInfo = init?.init ?? {};
+  const chunks = events.filter(e => e.event === 'step_update' && e.step_update?.step_type === 'agent_response').map(e => e.step_update?.text_delta).filter(x => typeof x === 'string');
+  const responseText = typeof result?.response === 'string' ? result.response : chunks.join('');
+  const softDenialObserved = /soft[ -]deni(?:ed|al)|requires? approval|approval (?:is )?(?:required|needed)|(?:requires?|needs?) permission|permission required|permission.{0,80}(?:deni|approval)|(?:deni|approval).{0,80}permission/i.test(String(stderr ?? '')) || toolEvents.some(e => e.error_category === 'permission_denied');
+  const permissionMode = typeof initInfo.permission_mode === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(initInfo.permission_mode) ? initInfo.permission_mode : undefined;
+  const agentValue = init?.agent ?? initInfo.agent;
+  const agent = typeof agentValue === 'string' && /^[A-Za-z0-9_.-]{1,80}$/.test(agentValue) ? agentValue : undefined;
+  const initTools = Array.isArray(initInfo.tools) ? initInfo.tools.filter(t => typeof t === 'string' && /^[A-Za-z0-9_.-]{1,80}$/.test(t)).slice(0, 80) : [];
+  const cwd = typeof initInfo.cwd === 'string' ? (initInfo.cwd === '/workspace' ? 'assigned_workspace' : 'other') : 'unreported';
+  const reportedCliTurns = Number.isSafeInteger(result?.num_turns) && result.num_turns >= 0 && result.num_turns <= 1000000 ? result.num_turns : undefined;
+  return { text: responseText, model, session: conversation, turnCompleted: !!result, isError: result?.status !== 'SUCCESS', mutationAttempted, malformedOutput, unrecognizedOutput, usage: result?.usage && typeof result.usage === 'object' ? result.usage : undefined, diagnostic:{ permission_mode:permissionMode, observed_agent:agent ?? 'unreported', cwd, available_tools:initTools, available_tools_semantics:'headless_init_tools_available_to_cli_not_profile_allowlist', tool_events:toolEvents, reported_cli_turns:reportedCliTurns, soft_denial_observed:softDenialObserved, result_status:typeof result?.status === 'string' && /^(SUCCESS|ERROR|CANCELED|INTERRUPTED|INVALID|WAITING|RUNNING)$/.test(result.status) ? result.status : 'unreported', response_empty:responseText.length === 0, streamed_agent_text_characters:chunks.reduce((n,s)=>n+s.length,0) } };
+}
+function cliArgs(kind, model, timeout, maxStep, reviewer = false, sessionId, persistentContext = false) {
   if (kind === 'claude') return reviewer
     ? ['-p', '--output-format', 'stream-json', '--verbose', '--model', model, '--max-turns', String(Math.min(maxStep, 2)), '--safe-mode', '--restricted', '--strict-mcp-config', '--permission-mode', 'plan', '--tools', '']
-    : ['-p', '--output-format', 'stream-json', '--verbose', '--model', model, '--max-turns', String(Math.min(maxStep, 10)), '--restricted', '--strict-mcp-config', '--permission-mode', 'acceptEdits', '--tools', 'Read,Edit,Write'];
-  return ['--ask-for-approval', 'never', 'exec', '--json', '--ephemeral', '--sandbox', reviewer ? 'read-only' : 'workspace-write', '--ignore-user-config', ...(reviewer ? ['--ignore-rules'] : []), '--skip-git-repo-check', '--model', model, '-'];
+    : ['-p', '--output-format', 'stream-json', '--verbose', '--model', model, '--max-turns', String(Math.min(maxStep, 10)), '--restricted', '--strict-mcp-config', '--permission-mode', persistentContext ? 'plan' : 'acceptEdits', '--tools', persistentContext ? 'Read' : 'Read,Edit,Write', ...(sessionId ? ['--resume', sessionId] : [])];
+  return ['--ask-for-approval', 'never', 'exec', ...(sessionId ? ['resume', sessionId] : []), '--json', ...(!persistentContext ? ['--ephemeral'] : []), '--sandbox', reviewer || persistentContext ? 'read-only' : 'workspace-write', '--ignore-user-config', ...(reviewer ? ['--ignore-rules'] : []), '--skip-git-repo-check', '--model', model, '-'];
+}
+function agyArgs(model, timeout, conversationId, reviewer = false, worker = false) {
+  return ['--output-format', 'stream-json', '--model', model, '--print-timeout', `${timeout}s`, `--mode=${reviewer ? 'plan' : 'accept-edits'}`, ...(worker ? ['--add-dir','/workspace','--agent', AGY_WORKER_AGENT] : []), ...(conversationId ? ['--conversation', conversationId] : [])];
+}
+
+function agyWorkerAgentDocument() {
+  return `---\nname: ${AGY_WORKER_AGENT}\ndescription: Foreman isolated file editing worker\nmainAgent: true\nsubagent: false\nexcludeDefaultComponents: true\ncommandExecutionPolicy: "off"\ntools:\n${AGY_WORKER_TOOLS.map(tool => `  - ${tool}`).join('\n')}\n---\nUse only the listed file tools to make the requested change in the assigned workspace. Use the exact relative file paths named in the task; do not enumerate directories or infer additional paths. If the task names no target path, report that and make no change. Never run terminal commands. Foreman will inspect the complete snapshot and validate the change.\n`;
+}
+
+function agyWorkerToolPolicy(observedAgent, toolEvents) {
+  const observed = Array.isArray(toolEvents) ? toolEvents.map(event => event.name).filter(name => typeof name === 'string') : [];
+  const expected = [...AGY_WORKER_TOOLS].sort();
+  const unsafeToolEvents = [...new Set(observed.filter(name => !AGY_WORKER_TOOLS.includes(name)))];
+  return { expected_profile_tools:expected, selected_agent:typeof observedAgent === 'string' ? observedAgent : 'unreported', selected_agent_matches:observedAgent === AGY_WORKER_AGENT, observed_executed_tool_events:observed, unsafe_tool_events:unsafeToolEvents, executed_tools_within_profile:unsafeToolEvents.length === 0 };
+}
+
+function agyWorkerPrompt(prompt) {
+  return `Perform only the requested file edit within the assigned workspace, using Antigravity's native file reading and editing tools. Use only exact relative file paths named in the task; do not enumerate directories or infer additional paths. If the task does not identify a target path, report the missing path and make no change. Do not run shell or terminal commands, validate the result, or request approval. Foreman will inspect the complete workspace snapshot and run validation after your edit. Return a short summary of the file changed.\n\nWORKER TASK:\n${prompt}`;
 }
 
 function validRelativePath(path) {
@@ -249,6 +319,15 @@ async function runtimeFiles(binary, mountBinary = false) {
 }
 const SANDBOX_CA_FILE = '/etc/ssl/certs/ca-certificates.crt';
 function codexCaMountArgs(caBundle) { return ['--ro-bind', caBundle, SANDBOX_CA_FILE]; }
+function safeProxyEnvironment(source = process.env) {
+  const names = new Set(['HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY','http_proxy','https_proxy','all_proxy','no_proxy']);
+  return Object.fromEntries(Object.entries(source).filter(([name, value]) => names.has(name) && typeof value === 'string'));
+}
+async function claudeRuntime(binary) {
+  const caBundle = await resolveCaBundle();
+  const runtime = (await runtimeFiles(binary)).filter(path => path !== SANDBOX_CA_FILE && path !== caBundle);
+  return { runtime, caBundle };
+}
 async function resolveCaBundle() {
   const candidates = ['/etc/ssl/certs/ca-certificates.crt', '/etc/ssl/ca-bundle.pem', '/var/lib/ca-certificates/ca-bundle.pem', '/etc/pki/tls/certs/ca-bundle.crt', '/etc/ssl/cert.pem'];
   for (const candidate of candidates) {
@@ -270,7 +349,41 @@ function bwrapBaseArgs(ws, runtime = [], readOnlyWorkspace = false, mountAuth = 
   }
   const dirArgs = [...dirs].sort((a, b) => a.split('/').length - b.split('/').length).flatMap(dir => ['--dir', dir]);
   const mounts = runtime.flatMap(file => ['--ro-bind', file, file]);
-  return ['--die-with-parent', '--new-session', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', ...dirArgs, ...mounts, readOnlyWorkspace ? '--ro-bind' : '--bind', ws.dir, '/workspace', '--chdir', '/workspace', ...(mountAuth ? ['--ro-bind', ws.authDir, '/auth'] : [])];
+  const resolverMounts = ['/etc/hosts','/etc/nsswitch.conf','/etc/resolv.conf'].flatMap(path => ['--ro-bind', path, path]);
+  return ['--die-with-parent', '--new-session', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', ...dirArgs, ...mounts, ...resolverMounts, readOnlyWorkspace ? '--ro-bind' : '--bind', ws.dir, '/workspace', '--chdir', '/workspace', ...(mountAuth ? ['--ro-bind', ws.authDir, '/auth'] : [])];
+}
+
+const CLAUDE_ROLE_DIRS = ['projects','session-env','file-history','todos','plans','tasks','sessions','shell-snapshots','jobs','daemon','state'];
+async function claudeAuthMountArgs(ws) {
+  const authDir = ws.authDir ?? await realpath(HARNESS.claude.authDir);
+  const args = ['--tmpfs','/auth'];
+  for (const name of await readdir(authDir)) {
+    if (CLAUDE_ROLE_DIRS.includes(name)) continue;
+    const source = join(authDir, name);
+    const info = await lstat(source).catch(() => null);
+    if (!info) continue;
+    const target = `/auth/${name}`;
+    if (info.isDirectory()) args.push('--dir',target,'--ro-bind',source,target);
+    else args.push('--ro-bind',source,target);
+  }
+  // Claude may create these directories even on its first turn. Keep its role
+  // transcript/state writable while the host sign-in/config view stays RO.
+  if (ws.roleStatePath) {
+    for (const name of CLAUDE_ROLE_DIRS) {
+      const source = join(ws.roleStatePath, `claude-${name}`);
+      await mkdir(source, { recursive:true, mode:0o700 });
+      args.push('--dir',`/auth/${name}`,'--bind',source,`/auth/${name}`);
+    }
+  }
+  // Claude also consults ~/.claude.json for account and installation state.
+  // Bind it directly from the host, read-only, when this is the real host auth
+  // directory. No credential data is copied into the isolated home.
+  const hostConfig = join(homedir(), '.claude.json');
+  if (resolve(authDir) === resolve(join(homedir(), '.claude'))) {
+    const info = await lstat(hostConfig).catch(() => null);
+    if (info?.isFile()) args.push('--ro-bind', hostConfig, '/tmp/cli-home/.claude.json');
+  }
+  return args;
 }
 
 function validateReviewEvidence(metadata) {
@@ -291,12 +404,12 @@ async function runReviewerSandboxed(ws, args, env, prompt) {
   ws.executionStage = 'review_boundary_probe';
   const node = await realpath(process.execPath); const runtime = await runtimeFiles(node, true);
   const script = `const fs=require('node:fs');try{fs.writeFileSync('/workspace/.review-write-probe','x');process.exit(41)}catch{}try{fs.readdirSync('/workspace').includes('.project-tree-sentinel')&&process.exit(42)}catch{process.exit(43)}process.exit(0)`;
-  const probe = await spawnCaptured(BWRAP, [...bwrapBaseArgs(ws, runtime, true), '--', node, '-e', script], { HOME: '/tmp/cli-home', CLAUDE_CONFIG_DIR: '/auth' }, 5_000);
+  const probe = await spawnCaptured(BWRAP, [...bwrapBaseArgs(ws, runtime, true, false), ...await claudeAuthMountArgs(ws), '--', node, '-e', script], { HOME: '/tmp/cli-home', CLAUDE_CONFIG_DIR: '/auth' }, 5_000);
   if (probe.code !== 0) throw Error('review_boundary_probe_failed');
   ws.boundary = { reviewer_read_only: true, project_workspace_mounted: false, workspace_writable: false, claude_tool_allowlist_empty: true, proven: true };
-  const runtimeCli = await runtimeFiles(realBin);
-  const bargs = [...bwrapBaseArgs(ws, runtimeCli, true), '--ro-bind', realBin, '/opt/claude', '--', '/opt/claude', ...args];
-  const safeEnv = Object.fromEntries(Object.entries(env).filter(([name]) => ['LANG','LC_ALL','TERM'].includes(name)));
+  const { runtime: runtimeCli, caBundle } = await claudeRuntime(realBin);
+  const bargs = [...bwrapBaseArgs(ws, runtimeCli, true, false), ...await claudeAuthMountArgs(ws), ...codexCaMountArgs(caBundle), '--ro-bind', realBin, '/opt/claude', '--', '/opt/claude', ...args];
+  const safeEnv = { ...Object.fromEntries(Object.entries(env).filter(([name]) => ['LANG','LC_ALL','TERM'].includes(name))), ...safeProxyEnvironment(env), SSL_CERT_FILE: SANDBOX_CA_FILE };
   ws.executionStage = 'cli_spawn';
   const child = spawn(BWRAP, bargs, { cwd: ROOT, env: { ...safeEnv, PATH: '/usr/bin:/bin', HOME: '/tmp/cli-home', CLAUDE_CONFIG_DIR: '/auth' }, shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   ws.executionStage = 'cli_execution'; child.stdin.end(prompt); return child;
@@ -346,43 +459,50 @@ function spawnCaptured(command, args, extraEnv, timeoutMs) {
     child.once('close', (code, signal) => { clearTimeout(timer); resolvePromise({ code, signal, error: spawnFailure ?? err, stdout: output }); });
   });
 }
-async function runClaudeSandboxed(ws, args, env, prompt) {
+async function runClaudeSandboxed(ws, args, env, prompt, readOnlyWorkspace = false) {
   ws.executionStage = 'resolve_cli';
   const realBin = await resolveBinary(HARNESS.claude.bin);
   ws.executionStage = 'resolve_auth';
   ws.authDir = await realpath(HARNESS.claude.authDir);
   ws.executionStage = 'boundary_probe';
-  const probe = await proveBoundary(ws);
-  ws.boundary = probe;
+  if (readOnlyWorkspace) {
+    ws.boundary = { reviewer_read_only: true, project_workspace_mounted: false, workspace_writable: false, proven: true };
+  } else ws.boundary = await proveBoundary(ws);
   ws.executionStage = 'runtime_mount';
-  const runtime = await runtimeFiles(realBin);
-  const bargs = [...bwrapBaseArgs(ws, runtime), '--ro-bind', realBin, '/opt/claude', '--', '/opt/claude', ...args];
-  const sandboxEnv = Object.fromEntries(Object.entries(env).filter(([name]) => ['LANG','LC_ALL','TERM'].includes(name)));
+  const bargs = await claudeSandboxArgs(ws, realBin, args, readOnlyWorkspace);
+  const sandboxEnv = { ...Object.fromEntries(Object.entries(env).filter(([name]) => ['LANG','LC_ALL','TERM'].includes(name))), ...safeProxyEnvironment(env) };
   ws.executionStage = 'cli_spawn';
-  const child = spawn(BWRAP, bargs, { cwd: ROOT, env: { ...sandboxEnv, PATH: '/usr/bin:/bin', HOME: '/tmp/cli-home', CLAUDE_CONFIG_DIR: '/auth' }, shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  const child = spawn(BWRAP, bargs, { cwd: ROOT, env: { ...sandboxEnv, PATH: '/usr/bin:/bin', HOME: '/tmp/cli-home', CLAUDE_CONFIG_DIR: '/auth', SSL_CERT_FILE: SANDBOX_CA_FILE }, shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   ws.executionStage = 'cli_execution';
   child.stdin.end(prompt); return child;
 }
-async function runCodexWorkspaceSandboxed(ws, args, env, prompt, codex) {
+async function claudeSandboxArgs(ws, realBin, args, readOnlyWorkspace = false) {
+  const { runtime, caBundle } = await claudeRuntime(realBin);
+  return [...bwrapBaseArgs(ws, runtime, readOnlyWorkspace, false), ...await claudeAuthMountArgs(ws), ...codexCaMountArgs(caBundle), '--ro-bind', realBin, '/opt/claude', '--', '/opt/claude', ...args];
+}
+async function runCodexWorkspaceSandboxed(ws, args, env, prompt, codex, readOnlyWorkspace = false) {
   ws.executionStage = 'resolve_cli';
   ws.executionStage = 'resolve_auth';
   ws.authDir = await realpath(HARNESS.codex.authDir);
   const authFile = join(ws.authDir, 'auth.json');
   if (!(await lstat(authFile).catch(() => null))?.isFile()) throw Error('Codex host auth.json is unavailable');
   ws.codexAuthFile = await realpath(authFile);
-  ws.codexHome = join(ROOT, `${ws.id}.codex-home`);
-  await mkdir(ws.codexHome, { recursive: false, mode: 0o700 });
-  await writeFile(join(ws.codexHome, 'auth.json'), '', { mode: 0o600 });
+  ws.codexHome ??= ws.roleStatePath ? join(ws.roleStatePath, 'codex-home') : join(ROOT, `${ws.id}.codex-home`);
+  await mkdir(ws.codexHome, { recursive: true, mode: 0o700 });
+  await writeFile(join(ws.codexHome, 'auth.json'), '', { mode: 0o600, flag: 'a' });
   ws.executionStage = 'boundary_probe';
-  const probe = await proveBoundary(ws);
-  ws.boundary = { ...probe, harness: 'codex-cli', workspace_writable: true, host_auth_mounted_read_only: true, ca_bundle_mounted_read_only: true };
+  if (readOnlyWorkspace) ws.boundary = { harness: 'codex-cli', reviewer_read_only: true, project_workspace_mounted: false, workspace_writable: false, host_auth_mounted_read_only: true, ca_bundle_mounted_read_only: true, codex_sandbox: 'read-only', codex_mutation_tools: 'blocked_by_read_only_sandbox', proven: true };
+  else {
+    const probe = await proveBoundary(ws);
+    ws.boundary = { ...probe, harness: 'codex-cli', workspace_writable: true, host_auth_mounted_read_only: true, ca_bundle_mounted_read_only: true };
+  }
   ws.executionStage = 'runtime_mount';
   const shellBinary = await realpath('/bin/sh');
   const shellDependencies = (await runtimeFiles(shellBinary)).filter(path => path !== shellBinary);
   const caBundle = await resolveCaBundle();
   const runtime = [...new Set([...(await runtimeFiles(codex.binary)), ...shellDependencies])].filter(path => path !== SANDBOX_CA_FILE);
   const nodePath = dirname(await realpath(process.execPath));
-  const bargs = [...bwrapBaseArgs(ws, runtime, false, false), '--dir', '/codex-home', '--bind', ws.codexHome, '/codex-home', '--ro-bind', ws.codexAuthFile, '/codex-home/auth.json', ...codexCaMountArgs(caBundle), '--dir', '/usr', '--ro-bind', '/usr/bin', '/usr/bin', '--symlink', 'usr/bin', '/bin', ...(codex.vendorRoot ? ['--dir', '/opt/codex-vendor', '--ro-bind', codex.vendorRoot, '/opt/codex-vendor'] : ['--ro-bind', codex.binary, '/opt/codex']), '--', codex.sandboxExecutable, ...args];
+  const bargs = [...bwrapBaseArgs(ws, runtime, readOnlyWorkspace, false), '--dir', '/codex-home', '--bind', ws.codexHome, '/codex-home', '--ro-bind', ws.codexAuthFile, '/codex-home/auth.json', ...codexCaMountArgs(caBundle), '--dir', '/usr', '--ro-bind', '/usr/bin', '/usr/bin', '--symlink', 'usr/bin', '/bin', ...(codex.vendorRoot ? ['--dir', '/opt/codex-vendor', '--ro-bind', codex.vendorRoot, '/opt/codex-vendor'] : ['--ro-bind', codex.binary, '/opt/codex']), '--', codex.sandboxExecutable, ...args];
   const sandboxEnv = Object.fromEntries(Object.entries(env).filter(([name]) => ['LANG','LC_ALL','TERM','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY'].includes(name)));
   ws.executionStage = 'cli_spawn';
   const child = spawn(BWRAP, bargs, { cwd: ROOT, env: { ...sandboxEnv, PATH: `/usr/bin:/bin:${nodePath}`, HOME: '/tmp/cli-home', PWD: '/workspace', CODEX_HOME: '/codex-home', SSL_CERT_FILE: SANDBOX_CA_FILE }, shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
@@ -418,6 +538,35 @@ async function preflightClaudeRuntime() {
     if (result.code !== 0 || !proof.proven) throw Error('Claude runtime preflight failed');
     return result.stdout.trim().split(/\r?\n/)[0].slice(0, 200);
   } finally { await rm(dir, { recursive: true, force: true }); }
+}
+async function preflightClaudePlannerAuth() {
+  if (!HARNESS.claude.authDir) throw Error('CLAUDE_CONFIG_DIR is required for the Planner auth preflight');
+  const root = join(ROOT, `planner-auth-preflight-${randomUUID()}`);
+  const dir = join(root, 'context');
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  const ws = { id: `ws_${randomUUID()}`, dir, roleStatePath: root, authDir: await realpath(HARNESS.claude.authDir) };
+  try {
+    const binary = await resolveBinary(HARNESS.claude.bin);
+    const caBundle = await resolveCaBundle();
+    const node = await realpath(process.execPath);
+    const probeScript = `const fs=require('node:fs');const p=process.env.SSL_CERT_FILE;const ca=fs.readFileSync(p,'utf8');const keys=['ANTHROPIC_API_KEY','AWS_ACCESS_KEY_ID','GOOGLE_API_KEY','CLAUDE_CODE_USE_BEDROCK','CLAUDE_CODE_USE_VERTEX','CLAUDE_CODE_USE_FOUNDRY'];const proxy=['HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY','http_proxy','https_proxy','all_proxy','no_proxy'];console.log(JSON.stringify({caReadable:ca.includes('-----BEGIN CERTIFICATE-----'),providerKeysAbsent:keys.every(k=>!process.env[k]),proxyVarsPresent:proxy.filter(k=>process.env[k]).length}));`;
+    const probeRuntime = (await runtimeFiles(node, true)).filter(path => path !== SANDBOX_CA_FILE && path !== caBundle);
+    const probeArgs = [...bwrapBaseArgs(ws, probeRuntime, true, false), ...await claudeAuthMountArgs(ws), ...codexCaMountArgs(caBundle), '--', node, '-e', probeScript];
+    const probeEnv = { ...safeProxyEnvironment(process.env), HOME:'/tmp/cli-home', CLAUDE_CONFIG_DIR:'/auth', SSL_CERT_FILE:SANDBOX_CA_FILE };
+    const probe = await spawnCaptured(BWRAP, probeArgs, probeEnv, 10_000);
+    let networkMount;
+    try { networkMount = JSON.parse(probe.stdout.trim()); } catch { networkMount = undefined; }
+    if (probe.code !== 0 || !networkMount?.caReadable || !networkMount.providerKeysAbsent) throw Error(`Claude isolated Planner network setup failed (${safeClaudeDiagnostic(probe.error)}, exit ${probe.code ?? 'unknown'})`);
+    const args = await claudeSandboxArgs(ws, binary, ['auth','status'], true);
+    const env = { PATH: '/usr/bin:/bin', HOME: '/tmp/cli-home', CLAUDE_CONFIG_DIR: '/auth', SSL_CERT_FILE:SANDBOX_CA_FILE, ...safeProxyEnvironment(process.env) };
+    const result = await spawnCaptured(BWRAP, args, env, 15_000);
+    const category = classifyClaudeFailure(result.error, result);
+    const statusText = `${result.stdout} ${typeof result.error === 'string' ? result.error : ''}`.toLowerCase();
+    if (result.code !== 0 || result.signal) throw Error(`Claude isolated Planner auth status failed (${category}; ${safeClaudeDiagnostic(result.error)}, exit ${result.code ?? 'unknown'})`);
+    if (/not logged in|not authenticated|no login|sign in to continue|loggedin\s*[:=]\s*false/.test(statusText)) throw Error('Claude isolated Planner auth status reports no host login');
+    if (!/logged[\s_-]*in|authenticated|connected|loggedin\s*[:=]\s*true/.test(statusText)) throw Error(`Claude isolated Planner auth status was unrecognized (${category}; ${safeClaudeDiagnostic(result.error)}, exit 0)`);
+    return `Claude isolated Planner auth status confirms host login; host config remains read-only and role transcript mounts are isolated; CA readable=${networkMount.caReadable}; proxy variables present=${networkMount.proxyVarsPresent}`;
+  } finally { await rm(root, { recursive: true, force: true }); }
 }
 async function preflightCodexRuntime() {
   if (!HARNESS.codex.authDir) throw Error('CODEX_HOME is required for the Codex runtime preflight');
@@ -477,40 +626,55 @@ async function resolveBinary(name) {
 }
 
 async function runTask(record, prompt) {
-  const h = cliFor(record.metadata.harness_id), kind = h.id === 'claude-code' ? 'claude' : 'codex-cli';
+  const h = cliFor(record.metadata.harness_id), kind = h.id === 'claude-code' ? 'claude' : h.id === 'codex-cli' ? 'codex-cli' : 'agy';
   const reviewer = record.metadata.foreman_review_mode === 'read_only';
+  const persistentRole = record.metadata.role_session_binding !== undefined;
+  const roleStatePath = persistentRole ? record.metadata.role_session_state_path : undefined;
   const ws = !reviewer && record.metadata.workspace_id ? workspaces.get(record.metadata.workspace_id) : undefined;
-  const work = ws?.dir ?? join(ROOT, reviewer ? `review-${randomUUID()}` : record.id);
-  if (!ws && !reviewer) throw Error('Worker workspace binding is unavailable');
-  if (!ws) await mkdir(work, { recursive: false, mode: 0o700 });
+  const work = ws?.dir ?? (reviewer ? join(ROOT, `review-${randomUUID()}`) : join(roleStatePath, 'context'));
+  if (!ws && !reviewer && !persistentRole) throw Error('Worker workspace binding is unavailable');
+  if (!ws) await mkdir(work, { recursive: persistentRole, mode: 0o700 });
+  const taskWorkspace = ws ?? { id: record.id, dir: work, roleStatePath, executionStage: 'task_setup' };
+  if (persistentRole) {
+    record.metadata.execution_boundary = { reviewer_read_only: true, project_workspace_mounted: false, workspace_writable: false, role_context_isolated: true, proven: true };
+  }
   if (reviewer) { tasks.get(record.id).reviewerWorkDir = work; await chmod(work, 0o500); record.metadata.reviewer_boundary = { project_workspace_mounted: false, workspace_writable: false, claude_tool_allowlist_empty: kind === 'claude', codex_sandbox: kind === 'codex-cli' ? 'read-only' : undefined, codex_mutation_tools: kind === 'codex-cli' ? 'blocked_by_read_only_sandbox' : undefined }; }
-  const inheritedNames = new Set(['PATH','HOME','USER','LOGNAME','LANG','LC_ALL','TERM','TMPDIR','TMP','TEMP','XDG_RUNTIME_DIR','SSL_CERT_FILE','SSL_CERT_DIR','NODE_EXTRA_CA_CERTS','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY']);
+  const inheritedNames = new Set(['PATH','HOME','USER','LOGNAME','LANG','LC_ALL','TERM','TMPDIR','TMP','TEMP','XDG_RUNTIME_DIR','SSL_CERT_FILE','SSL_CERT_DIR','NODE_EXTRA_CA_CERTS','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY','DBUS_SESSION_BUS_ADDRESS']);
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => inheritedNames.has(name)));
-  Object.assign(env, kind === 'claude' ? { CLAUDE_CONFIG_DIR: '/auth' } : { CODEX_HOME: reviewer ? h.authDir : '/auth' });
-  const args = cliArgs(kind, record.requested_model, record.timeout_seconds, record.max_step, reviewer);
-  const input = reviewer ? reviewerPrompt(prompt, record.metadata.review_evidence) : prompt;
+  Object.assign(env, kind === 'claude' ? { CLAUDE_CONFIG_DIR: '/auth' } : kind === 'codex-cli' ? { CODEX_HOME: reviewer ? h.authDir : '/auth' } : {});
+  const nativeSessionId = record.metadata.conversation_id;
+  const agyWorker = kind === 'agy' && !reviewer && !persistentRole;
+  const args = kind === 'agy' ? agyArgs(record.requested_model, record.timeout_seconds, nativeSessionId, reviewer || persistentRole, agyWorker) : cliArgs(kind, record.requested_model, record.timeout_seconds, record.max_step, reviewer, nativeSessionId, persistentRole);
+  if (kind === 'agy') {
+    record.metadata.cli_invocation = { executable: '/opt/agy', host_executable: h.bin, args: ['-p', '<bounded prompt>', ...args] };
+    record.metadata.actual_model_status = 'unavailable';
+  }
+  if (kind === 'claude' && persistentRole) record.metadata.cli_invocation = { executable: '/opt/claude', host_executable: h.bin, args: [...args] };
+  const input = reviewer ? reviewerPrompt(prompt, record.metadata.review_evidence) : kind === 'agy' && !persistentRole ? agyWorkerPrompt(prompt) : prompt;
   const reviewerState = reviewer ? { dir: work, authDir: kind === 'claude' ? await realpath(h.authDir) : undefined } : undefined;
   let codexRuntime;
-  if (kind === 'codex-cli' && !reviewer) {
+  if (kind === 'codex-cli') {
     codexRuntime = await resolveCodexRuntime(h.bin);
+    if (persistentRole) taskWorkspace.codexHome = join(roleStatePath, 'codex-home');
+    else if (reviewer) reviewerState.codexHome = join(ROOT, `${record.id}.review-codex-home`);
     record.metadata.cli_invocation = { executable: codexRuntime.sandboxExecutable, host_executable: codexRuntime.binary, args: [...args] };
     record.metadata.actual_model_status = 'unavailable';
   }
   const child = reviewer
-    ? kind === 'claude' ? await runReviewerSandboxed(reviewerState, args, env, input) : spawn(h.bin, args, { cwd: work, env, shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
-    : kind === 'claude' ? await runClaudeSandboxed(ws, args, env, prompt) : await runCodexWorkspaceSandboxed(ws, args, env, prompt, codexRuntime);
-  if (ws?.boundary) record.metadata.execution_boundary = ws.boundary;
+    ? kind === 'claude' ? await runReviewerSandboxed(reviewerState, args, env, input) : kind === 'agy' ? await runAgySandboxed(reviewerState, true, args, env, input) : await runCodexWorkspaceSandboxed(reviewerState, args, env, input, codexRuntime, true)
+    : kind === 'claude' ? await runClaudeSandboxed(taskWorkspace, args, env, prompt, persistentRole) : kind === 'agy' ? await runAgySandboxed(taskWorkspace, false, args, env, input, false, persistentRole) : await runCodexWorkspaceSandboxed(taskWorkspace, args, env, prompt, codexRuntime, persistentRole);
+  if (taskWorkspace?.boundary && !persistentRole) record.metadata.execution_boundary = taskWorkspace.boundary;
   if (reviewerState?.boundary) record.metadata.reviewer_boundary = reviewerState.boundary;
   const active = tasks.get(record.id); active.child = child;
   let out = '', stdoutBytes = 0, cliOutputOverflow = false;
-  child.stdout.setEncoding('utf8'); child.stdout.on('data', chunk => { stdoutBytes += Buffer.byteLength(chunk); if ((reviewer || kind === 'codex-cli') && stdoutBytes > MAX_OUTPUT * 3 && !cliOutputOverflow) { cliOutputOverflow = true; child.kill('SIGTERM'); } out = (out + chunk).slice(-MAX_OUTPUT * 3); });
+  child.stdout.setEncoding('utf8'); child.stdout.on('data', chunk => { stdoutBytes += Buffer.byteLength(chunk); if ((reviewer || kind !== 'claude') && stdoutBytes > MAX_OUTPUT * 3 && !cliOutputOverflow) { cliOutputOverflow = true; child.kill('SIGTERM'); } out = (out + chunk).slice(-MAX_OUTPUT * 3); });
   let stderrTail = '';
   child.stderr.setEncoding('utf8'); child.stderr.on('data', chunk => { stderrTail = (stderrTail + chunk).slice(-4000); }); // Bounded in-memory diagnostics only; never persist raw stderr.
-  child.stdin.on('error', () => {});
+  child.stdin?.on('error', () => {});
   let spawnError;
   let killTimer;
   const timer = setTimeout(() => { child.kill('SIGTERM'); killTimer = setTimeout(() => child.kill('SIGKILL'), 1_000); }, record.timeout_seconds * 1000);
-  if (kind !== 'claude') child.stdin.end(input);
+  if (kind === 'codex-cli' && child.stdin) child.stdin.end(input);
   const exit = await new Promise(resolveExit => {
     child.once('error', error => { spawnError = error; resolveExit({ code: null, signal: null }); });
     child.once('close', (code, signal) => resolveExit({ code, signal }));
@@ -518,31 +682,77 @@ async function runTask(record, prompt) {
   clearTimeout(timer); if (killTimer) clearTimeout(killTimer);
   if (kind === 'codex-cli' && !reviewer) {
     record.metadata.cli_exit = { exit_code: Number.isInteger(exit.code) ? exit.code : null, signal: exit.signal ?? null };
-    record.metadata.execution_stage = ws.executionStage ?? 'cli_execution';
+    record.metadata.execution_stage = taskWorkspace.executionStage ?? 'cli_execution';
     if (spawnError || exit.code !== 0 || exit.signal) record.metadata.cli_failure_category = classifyCodexFailure(stderrTail, exit, spawnError);
   }
-  let parsed = kind === 'claude' ? parseClaude(out) : parseCodex(out);
+  if (kind === 'claude' && !reviewer) {
+    record.metadata.cli_exit = { exit_code: Number.isInteger(exit.code) ? exit.code : null, signal: exit.signal ?? null };
+    record.metadata.execution_stage = taskWorkspace.executionStage ?? 'cli_execution';
+  }
+  if (kind === 'agy' && !reviewer) {
+    record.metadata.cli_exit = { exit_code: Number.isInteger(exit.code) ? exit.code : null, signal: exit.signal ?? null };
+    record.metadata.execution_stage = taskWorkspace.executionStage ?? 'cli_execution';
+    if (spawnError || exit.code !== 0 || exit.signal) {
+      record.metadata.cli_failure_category = classifyAgyFailure(stderrTail, exit);
+      record.metadata.cli_failure_diagnostic = safeAgyDiagnostic(stderrTail);
+    }
+  }
+  let parsed = kind === 'claude' ? parseClaude(out) : kind === 'agy' ? parseAgy(out, stderrTail) : parseCodex(out);
   if (parsed.text.length > MAX_OUTPUT) parsed.text = parsed.text.slice(0, MAX_OUTPUT);
-  const missingReportedIdentity = !parsed.session || (kind === 'claude' && !parsed.model) || (reviewer && kind === 'codex-cli' && !parsed.model);
+  const missingReportedIdentity = !parsed.session || (kind === 'claude' && !parsed.model);
+  if (kind === 'claude' && !reviewer && (spawnError || exit.code !== 0 || exit.signal || missingReportedIdentity || parsed.isError)) {
+    record.metadata.cli_failure_category = classifyClaudeFailure(stderrTail, exit, spawnError, { missingIdentity: missingReportedIdentity, providerError: parsed.isError });
+    record.metadata.cli_failure_diagnostic = safeClaudeDiagnostic(stderrTail);
+  }
   const reviewerFailed = reviewer && (parsed.mutationAttempted || parsed.malformedOutput || parsed.unrecognizedOutput || cliOutputOverflow || parsed.isError || missingReportedIdentity || exit.code !== 0 || active.cancelRequested);
-  const invalidCodexStream = kind === 'codex-cli' && (parsed.malformedOutput || parsed.unrecognizedOutput || cliOutputOverflow || (!reviewer && !parsed.turnCompleted));
-  record.status = active.cancelRequested ? 'cancelled' : spawnError ? 'failed' : parsed.isError || invalidCodexStream || missingReportedIdentity || reviewerFailed ? 'failed' : exit.code === 0 ? 'completed' : exit.signal === 'SIGTERM' ? 'incomplete' : 'failed';
+  const invalidJsonStream = (kind === 'codex-cli' || kind === 'agy') && (parsed.malformedOutput || parsed.unrecognizedOutput || cliOutputOverflow || (!reviewer && !parsed.turnCompleted));
+  const agyWorkerPolicy = agyWorker ? agyWorkerToolPolicy(parsed.diagnostic.observed_agent, parsed.diagnostic.tool_events) : undefined;
+  const invalidAgyWorkerPolicy = !!agyWorker && (!agyWorkerPolicy?.selected_agent_matches || !agyWorkerPolicy.executed_tools_within_profile);
+  if (agyWorkerPolicy) record.metadata.agy_worker_tool_policy = { ...agyWorkerPolicy, configured_agent: AGY_WORKER_AGENT, command_execution_policy: 'off', available_tools_are_diagnostic_only:true, execution_observations_passed: !invalidAgyWorkerPolicy };
+  record.status = active.cancelRequested ? 'cancelled' : spawnError ? 'failed' : parsed.isError || invalidJsonStream || invalidAgyWorkerPolicy || missingReportedIdentity || reviewerFailed ? 'failed' : exit.code === 0 ? 'completed' : exit.signal === 'SIGTERM' ? 'incomplete' : 'failed';
   record.output_text = parsed.text;
   if (parsed.model) record.model = parsed.model;
-  if (kind === 'codex-cli' && !reviewer) record.metadata.actual_model_status = parsed.model ? 'observed' : 'unavailable';
+  if (kind === 'codex-cli') record.metadata.actual_model_status = parsed.model ? 'observed' : 'unavailable';
   if (parsed.session) { record.session_id = parsed.session; record.metadata.session_id = parsed.session; }
-  if (parsed.usage) record.usage = normalizeCliUsage(kind, parsed.usage);
-  if (kind === 'codex-cli') record.metadata.ignored_fields = ['max_step'];
+  if (parsed.usage) {
+    const normalized = normalizeCliUsage(kind, parsed.usage);
+    if (kind === 'agy' && persistentRole) {
+      record.metadata.agy_usage_cumulative = parsed.usage;
+      const baseline = record.metadata.usage_baseline;
+      if (!record.metadata.role_session_continuation) record.usage = normalized;
+      else if (baseline) {
+        const delta = {};
+        for (const [key, value] of Object.entries(parsed.usage)) if (Number.isFinite(value)) {
+          const priorValue = Number.isFinite(baseline[key]) ? baseline[key] : 0;
+          delta[key] = Math.max(0, value - priorValue);
+        }
+        record.usage = normalizeCliUsage(kind, delta);
+      }
+    } else record.usage = normalized;
+  }
+  if (kind === 'codex-cli' || kind === 'agy') record.metadata.ignored_fields = ['max_step'];
+  if (kind === 'agy') record.metadata.actual_model_status = parsed.model ? 'observed' : 'unavailable';
+  if (kind === 'agy') {
+    record.metadata.agy_diagnostic = { ...parsed.diagnostic, ...(agyWorker ? { requested_agent:AGY_WORKER_AGENT } : {}), requested_execution_mode:reviewer || persistentRole ? 'plan' : 'accept-edits', outcome:parsed.diagnostic.soft_denial_observed ? parsed.diagnostic.response_empty ? 'soft_denied_without_response' : 'soft_denial_with_response' : parsed.diagnostic.response_empty ? 'completed_without_response' : 'response_received' };
+    if (!reviewer && !persistentRole) record.metadata.agy_permission_policy = { read_file_allow:'read_file(/workspace)', write_file_allow:'write_file(/workspace)', directory_listing:'not allowed; task must name exact relative file paths', terminal_sandbox_disabled_for_nested_runtime:true, outer_bubblewrap_isolation:true };
+  }
   if (record.model && record.model !== record.requested_model) {
     record.metadata.requested_model = record.requested_model;
     record.metadata.model_fallback = true;
   }
-  if (reviewer) { record.metadata.foreman_review_mode = 'read_only'; record.metadata.reviewer_mutation_attempted = parsed.mutationAttempted === true; record.metadata.reviewer_output_overflow = cliOutputOverflow; record.metadata.reviewer_validation = record.metadata.review_evidence.controllerValidation; }
-  if (kind === 'codex-cli' && !reviewer) record.metadata.cli_output_overflow = cliOutputOverflow;
-  if (record.status !== 'completed') record.error = { message: spawnError ? 'CLI could not be started' : reviewer && parsed.mutationAttempted ? 'Reviewer attempted to use a tool or mutate state' : cliOutputOverflow ? 'CLI output exceeded the bounded stream limit' : (reviewer || kind === 'codex-cli') && (parsed.malformedOutput || parsed.unrecognizedOutput) ? 'CLI output contained malformed or unrecognized stream records' : kind === 'codex-cli' && !reviewer && !parsed.session ? exit.code !== 0 || exit.signal ? 'Codex CLI exited before reporting a session id' : 'Codex CLI did not report a session id' : kind === 'codex-cli' && !reviewer && !parsed.turnCompleted ? 'Codex CLI exited without completing a turn' : parsed.isError ? kind === 'claude' ? 'Claude Code reported an unsuccessful task' : 'Codex CLI reported an unsuccessful task' : missingReportedIdentity ? 'CLI did not report an actual model and session id' : active.cancelRequested ? 'CLI task was cancelled' : exit.signal ? `CLI terminated by ${exit.signal}` : 'CLI exited unsuccessfully' };
+  if (reviewer) { record.metadata.foreman_review_mode = 'read_only'; record.metadata.reviewer_mutation_attempted = parsed.mutationAttempted === true; record.metadata.reviewer_output_overflow = cliOutputOverflow; record.metadata.reviewer_validation = record.metadata.review_evidence.controllerValidation; if (kind === 'agy') record.metadata.reviewer_boundary = { ...record.metadata.reviewer_boundary, tool_attempts_blocked: parsed.mutationAttempted === true, proven: true }; }
+  if (kind !== 'claude' && !reviewer) record.metadata.cli_output_overflow = cliOutputOverflow;
+  if (record.status !== 'completed') record.error = { message: spawnError ? 'CLI could not be started' : invalidAgyWorkerPolicy ? 'AGY Worker selected the wrong agent or executed an out-of-profile tool' : reviewer && parsed.mutationAttempted ? 'Reviewer attempted to use a tool or mutate state' : cliOutputOverflow ? 'CLI output exceeded the bounded stream limit' : (reviewer || kind !== 'claude') && (parsed.malformedOutput || parsed.unrecognizedOutput) ? 'CLI output contained malformed or unrecognized stream records' : kind === 'codex-cli' && !reviewer && !parsed.session ? exit.code !== 0 || exit.signal ? 'Codex CLI exited before reporting a session id' : 'Codex CLI did not report a session id' : (kind === 'codex-cli' || kind === 'agy') && !reviewer && !parsed.turnCompleted ? `${kind === 'agy' ? 'Antigravity CLI' : 'Codex CLI'} exited without completing a turn` : parsed.isError ? kind === 'claude' ? 'Claude Code reported an unsuccessful task' : kind === 'agy' ? 'Antigravity CLI reported an unsuccessful task' : 'Codex CLI reported an unsuccessful task' : missingReportedIdentity ? 'CLI did not report an actual model and session id' : active.cancelRequested ? 'CLI task was cancelled' : exit.signal ? `CLI terminated by ${exit.signal}` : 'CLI exited unsuccessfully' };
+  if (persistentRole && parsed.session) {
+    record.metadata.role_session = { binding: record.metadata.role_session_binding, cli_session_id: parsed.session, state_path: record.metadata.role_session_state_path };
+  }
   await persist();
   active.resolve?.();
-  if (kind === 'codex-cli' && !reviewer && ws?.codexHome) { await rm(ws.codexHome, { recursive: true, force: true }).catch(() => undefined); ws.codexHome = undefined; }
+  if (kind === 'codex-cli' && !persistentRole) {
+    const codexHome = reviewer ? reviewerState.codexHome : taskWorkspace.codexHome;
+    if (codexHome) await rm(codexHome, { recursive: true, force: true }).catch(() => undefined);
+  }
+  if (kind === 'agy' && taskWorkspace.agyStateDir) { await rm(taskWorkspace.agyStateDir, { recursive: true, force: true }).catch(() => undefined); taskWorkspace.agyStateDir = undefined; }
   if (reviewer) { await rm(work, { recursive: true, force: true }); tasks.get(record.id).reviewerWorkDir = undefined; }
 }
 
@@ -558,23 +768,208 @@ function classifyCodexFailure(stderr, exit, spawnError) {
   if (!text.trim()) return exit?.signal ? 'terminated_without_stderr' : 'no_stderr';
   return 'unclassified_stderr';
 }
+function classifyClaudeFailure(stderr, exit = {}, spawnError, state = {}) {
+  if (spawnError) return 'sandbox_spawn_failed';
+  const text = String(stderr ?? '').toLowerCase();
+  if (/not logged in|not authenticated|authentication required|unauthorized|sign.?in|token expired|credentials? (?:are )?invalid/.test(text)) return 'host_auth_unavailable';
+  if (/model .*not found|unknown model|model unavailable|unsupported model/.test(text)) return 'model_unavailable';
+  if (/permission denied|operation not permitted|read.only file system|failed to create.*directory|eacces|eperm/.test(text)) return 'filesystem_permission';
+  if (/sandbox|bwrap|seccomp|landlock|unshare|namespace/.test(text)) return 'sandbox_setup';
+  if (/unexpected argument|unrecognized option|unknown option|unknown command/.test(text)) return 'cli_arguments';
+  if (/network|connection|dns|timed out|tls|certificate|fetch failed/.test(text)) return 'network';
+  if (state.providerError) return 'provider_error';
+  if (state.missingIdentity && !text.trim()) return exit.signal ? 'terminated_without_stream' : exit.code === 0 ? 'empty_stream' : 'nonzero_exit_without_stream';
+  if (!text.trim()) return exit.signal ? 'terminated_without_stderr' : 'no_stderr';
+  return 'unclassified_stderr';
+}
+function safeClaudeDiagnostic(stderr) {
+  const text = String(stderr ?? '').toLowerCase();
+  const matches = [];
+  for (const [label, pattern] of [
+    ['auth',/auth|credential|logged in|sign.?in|token/],
+    ['permission',/permission|eacces|eperm|read.only/],
+    ['config',/config|settings|directory|file/],
+    ['network',/network|fetch|dns|tls|certificate|proxy|connection/],
+    ['command',/usage:|unknown command|unrecognized option|unexpected argument/],
+    ['runtime',/failed|error|unable|cannot|could not/],
+  ]) if (pattern.test(text)) matches.push(label);
+  return matches.length ? matches.join(',') : 'no_classified_diagnostic';
+}
 
 function normalizeCliUsage(kind, value) {
   const usage = {};
   const input = value.input_tokens ?? value.inputTokens;
   const output = value.output_tokens ?? value.outputTokens;
-  const cached = value.cached_input_tokens ?? value.cachedInputTokens ?? (kind === 'claude' ? value.cache_read_input_tokens : undefined);
+  const cached = value.cached_input_tokens ?? value.cachedInputTokens ?? (kind === 'claude' ? value.cache_read_input_tokens : kind === 'agy' ? value.cache_read_tokens : undefined);
   if (Number.isFinite(input)) usage.input_tokens = input;
   if (Number.isFinite(output)) usage.output_tokens = output;
-  if (Number.isFinite(value.total_tokens)) usage.total_tokens = value.total_tokens;
+  const total = value.total_tokens ?? value.totalTokens;
+  if (Number.isFinite(total)) usage.total_tokens = total;
+  if (Number.isFinite(value.thinking_tokens)) usage.thinking_tokens = value.thinking_tokens;
   if (Number.isFinite(cached)) usage.input_tokens_details = { cached_tokens: cached };
   return usage;
+}
+
+async function discoverAgyModels() {
+  if (agyModelsCache.expires > Date.now()) return agyModelsCache.models;
+  const result = await spawnCaptured(HARNESS.agy.bin, ['models'], agyDiscoveryEnvironment(), 15_000);
+  if (result.code !== 0 || result.signal) { agyModelsCache = { expires: Date.now() + 5_000, models: [] }; return []; }
+  let models = [];
+  try {
+    const value = JSON.parse(result.stdout);
+    const list = Array.isArray(value) ? value : value.models;
+    if (Array.isArray(list)) models = list.flatMap(item => {
+      const id = typeof item === 'string' ? item : item.id ?? item.slug;
+      const name = typeof item === 'string' ? item : item.name ?? item.displayName ?? id;
+      return typeof id === 'string' && id.trim() ? [{ id: id.trim(), available: true, name: String(name ?? id) }] : [];
+    });
+  } catch {
+    models = result.stdout.split(/\r?\n/).flatMap(line => {
+      const match = line.trim().match(/^([a-zA-Z0-9][a-zA-Z0-9._-]*)(?:\t| {2,})(.+)$/);
+      return match ? [{ id: match[1], available: true, name: match[2].trim() }] : [];
+    });
+  }
+  agyModelsCache = { expires: Date.now() + 60_000, models };
+  return models;
+}
+
+async function runAgySandboxed(ws, reviewer, args, env, prompt, preflight = false, persistentContext = false) {
+  ws.executionStage = 'resolve_cli';
+  const realBin = await resolveBinary(HARNESS.agy.bin);
+  ws.executionStage = 'resolve_auth';
+  ws.authDir = await realpath(HARNESS.agy.authDir);
+  ws.executionStage = 'boundary_probe';
+  let probe;
+  if (reviewer) {
+    const node = await realpath(process.execPath); const probeRuntime = await runtimeFiles(node, true);
+    const script = `try{require('node:fs').writeFileSync('/workspace/.agy-review-write-probe','x');process.exit(41)}catch{process.exit(0)}`;
+    const result = await spawnCaptured(BWRAP, [...bwrapBaseArgs(ws, probeRuntime, true, false), '--', node, '-e', script], { HOME: '/tmp/cli-home' }, 5_000);
+    if (result.code !== 0) throw Error('agy_review_boundary_probe_failed');
+    probe = { reviewer_read_only: true, project_workspace_mounted: false, workspace_writable: false, proven: true };
+  } else if (persistentContext) probe = { reviewer_read_only: true, project_workspace_mounted: false, workspace_writable: false, proven: true };
+  else probe = await proveBoundary(ws);
+  ws.boundary = { ...probe, harness: 'antigravity-cli', host_auth_mounted_read_only: true, workspace_writable: !reviewer && !persistentContext, reviewer_read_only: reviewer || persistentContext };
+  ws.executionStage = 'runtime_mount';
+  const runtime = await runtimeFiles(realBin);
+  const caBundle = await resolveCaBundle();
+  const isolatedHome = '/tmp/cli-home';
+  const configPath = `${isolatedHome}/.gemini/antigravity-cli`;
+  const stateDir = ws.roleStatePath ? join(ws.roleStatePath, 'agy-state') : join(ROOT, `${ws.id}.agy-state`);
+  const writableConfigDirs = ['log','crashes','brain','conversations','cache','updater','presence','annotations','implicit','scratch'];
+  await mkdir(stateDir, { recursive: persistentContext, mode: 0o700 });
+  const stateMounts = [];
+  for (const name of writableConfigDirs) {
+    const source = join(stateDir, name); await mkdir(source, { recursive: true, mode: 0o700 });
+    stateMounts.push('--dir', `${configPath}/${name}`, '--bind', source, `${configPath}/${name}`);
+  }
+  let workerSettingsMount = [];
+  let workerConfigMount;
+  const workerAgent = !reviewer && !persistentContext && (preflight === 'worker-agent' || !preflight);
+  let workerAgentMount = [];
+  if (workerAgent) {
+    const agentDir = join(stateDir, 'agents');
+    await mkdir(agentDir, { recursive: true, mode: 0o700 });
+    const agentPath = join(agentDir, `${AGY_WORKER_AGENT}.md`);
+    await writeFile(agentPath, agyWorkerAgentDocument(), { mode: 0o600 });
+    workerAgentMount = ['--dir', `${isolatedHome}/.gemini/config`, '--dir', `${isolatedHome}/.gemini/config/agents`, '--ro-bind', agentPath, `${isolatedHome}/.gemini/config/agents/${AGY_WORKER_AGENT}.md`];
+  }
+  if (!reviewer && !persistentContext) {
+    // Overlay only the non-secret permission settings needed for this bounded
+    // Worker task. Host credentials and host settings remain untouched/RO.
+    // Terminal tools stay Ask/soft-denied; the outer bubblewrap boundary is
+    // still the actual filesystem isolation layer.
+    const settingsPath = join(stateDir, 'foreman-worker-settings.json');
+    await writeFile(settingsPath, JSON.stringify({ agentMode:'accept-edits', enableTerminalSandbox:false, permissions:{ allow:['read_file(/workspace)','write_file(/workspace)'] } }), { mode:0o600 });
+    workerSettingsMount = ['--ro-bind', settingsPath, `${configPath}/settings.json`];
+    workerConfigMount = await agyWorkerConfigViewMounts(ws.authDir, configPath, writableConfigDirs);
+  }
+  const safeEnv = Object.fromEntries(Object.entries(env).filter(([name]) => ['LANG','LC_ALL','TERM','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY','DBUS_SESSION_BUS_ADDRESS'].includes(name)));
+  const dbusAddress = safeEnv.DBUS_SESSION_BUS_ADDRESS;
+  const dbusPath = typeof dbusAddress === 'string' ? dbusAddress.match(/^unix:path=([^,]+)/)?.[1] : undefined;
+  const dbusMount = dbusPath ? ['--dir','/run','--dir','/run/user',`--dir`,dirname(dbusPath),'--ro-bind',dbusPath,dbusPath] : [];
+  if (dbusAddress && !dbusPath && !dbusAddress.startsWith('unix:abstract=')) throw Error('agy_session_bus_unavailable');
+  const invocation = preflight ? args : ['-p', prompt, ...args];
+  const sandboxBinary = preflight === 'socket' ? await realpath(process.execPath) : realBin;
+  const authMounts = workerConfigMount ?? ['--ro-bind',ws.authDir,configPath];
+  const bargs = [...bwrapBaseArgs(ws, runtime, reviewer || persistentContext, false), ...codexCaMountArgs(caBundle),'--dir','/tmp/cli-home/run','--chmod','0700','/tmp/cli-home/run','--dir','/tmp/cli-home/.gemini','--dir',configPath,...authMounts,...stateMounts,...workerSettingsMount,...workerAgentMount,...dbusMount,'--ro-bind',sandboxBinary,'/opt/agy','--', '/opt/agy', ...invocation];
+  const childEnv = { ...safeEnv, PATH: `/usr/bin:/bin:${dirname(await realpath(process.execPath))}`, HOME: isolatedHome, XDG_CONFIG_HOME: `${isolatedHome}/.config`, XDG_RUNTIME_DIR: `${isolatedHome}/run` };
+  if (dbusPath) childEnv.DBUS_SESSION_BUS_ADDRESS = `unix:path=${dbusPath}`;
+  ws.executionStage = 'cli_spawn';
+  if (preflight) {
+    const result = await spawnCaptured(BWRAP, bargs, childEnv, 20_000);
+    if (!persistentContext) await rm(stateDir, { recursive: true, force: true });
+    return result;
+  }
+  const child = spawn(BWRAP, bargs, { cwd: ROOT, env: childEnv, shell: false, stdio: ['ignore','pipe','pipe'], windowsHide: true });
+  ws.executionStage = 'cli_execution';
+  if (!persistentContext) ws.agyStateDir = stateDir;
+  return child;
+}
+
+async function agyWorkerConfigViewMounts(authDir, configPath, writableConfigDirs) {
+  const mounts = ['--tmpfs', configPath];
+  for (const name of await readdir(authDir)) {
+    if (name === 'settings.json' || writableConfigDirs.includes(name)) continue;
+    const source = join(authDir, name);
+    const info = await lstat(source).catch(() => null);
+    if (!info) continue;
+    const target = `${configPath}/${name}`;
+    if (info.isDirectory()) mounts.push('--dir',target,'--ro-bind',source,target);
+    else mounts.push('--ro-bind',source,target);
+  }
+  return mounts;
+}
+
+async function preflightAgyRuntime() {
+  const dir = join(ROOT, `agy-preflight-${randomUUID()}`); await mkdir(dir, { recursive: false, mode: 0o700 });
+  const ws = { id: `ws_${randomUUID()}`, dir };
+  try {
+    const inheritedNames = new Set(['PATH','LANG','LC_ALL','TERM','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY','DBUS_SESSION_BUS_ADDRESS']);
+    const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => inheritedNames.has(name)));
+    const socket = await runAgySandboxed(ws, false, ['-e', `const fs=require('node:fs'),net=require('node:net');fs.writeFileSync(process.env.XDG_RUNTIME_DIR+'/probe','ok');fs.unlinkSync(process.env.XDG_RUNTIME_DIR+'/probe');const s=net.createServer();s.on('error',e=>{console.log(e.code+': '+e.message);process.exit(40)});s.listen(0,'localhost',()=>{console.log('localhost_bind_ok');s.close()})`], env, '', 'socket');
+    if (socket.code !== 0 || socket.signal) throw Error(`AGY isolation TCP preflight failed: ${safeAgyDiagnostic(socket.error || socket.stdout)}`);
+    const result = await runAgySandboxed(ws, false, ['models'], env, '', true);
+    if (result.code !== 0 || result.signal) throw Error(`AGY isolated preflight failed: ${classifyAgyFailure(result.error, result)}; ${safeAgyDiagnostic(result.error)}`);
+    const agentResult = await runAgySandboxed(ws, false, ['agents'], env, '', 'worker-agent');
+    if (agentResult.code !== 0 || agentResult.signal || !agentResult.stdout.includes(AGY_WORKER_AGENT)) throw Error(`AGY isolated Worker agent discovery failed: ${classifyAgyFailure(agentResult.error, agentResult)}; ${safeAgyDiagnostic(agentResult.error)}`);
+    return `${result.stdout.trim().slice(0, 8000)}\nAGY Worker custom agent discovered in isolated HOME with command execution disabled`;
+  } finally { await rm(dir, { recursive: true, force: true }); }
+}
+function classifyAgyFailure(stderr, exit = {}) {
+  const text = String(stderr ?? '').toLowerCase();
+  if (/not logged in|authentication required|unauthorized|token expired/.test(text)) return 'host_auth_unavailable';
+  if (/secret service|keyring|dbus|session bus/.test(text)) return 'host_keyring_unavailable';
+  if (/read.only file system|permission denied|operation not permitted/.test(text)) return 'sandbox_config_or_socket_access';
+  if (/listen tcp|socket:/.test(text)) return 'local_language_server_unavailable';
+  if (/model .*not found|unknown model|invalid model selection/.test(text)) return 'selected_model_unavailable';
+  if (exit.signal) return `terminated_${String(exit.signal).toLowerCase()}`;
+  return Number.isInteger(exit.code) ? `exit_${exit.code}` : 'startup_failed';
+}
+function safeAgyDiagnostic(stderr) {
+  const text = String(stderr ?? '').replace(/\u001b\[[0-9;]*m/g, '');
+  const osCode = text.match(/\b(EACCES|EROFS|EPERM|ENOENT)\b/i)?.[1]?.toUpperCase();
+  const operation = text.match(/(?:Can't|cannot|failed to)\s+(open|read|write|mkdir|mount|bind|make|create|stat|listen|connect)\b/i)?.[1]?.toLowerCase();
+  if (osCode && operation) return `os_error=${osCode} operation=${operation}`;
+  if (osCode) return `os_error=${osCode}`;
+  if (/read.only file system/i.test(text)) return `os_error=EROFS${operation ? ` operation=${operation}` : ''}`;
+  if (/permission denied/i.test(text)) return `os_error=EACCES${operation ? ` operation=${operation}` : ''}`;
+  const listener = text.match(/listen tcp (127\.0\.0\.1:\d+): socket: ([a-z ]+)/i) ?? text.match(/listen tcp (127\.0\.0\.1:\d+):\s*socket: ([a-z ]+)/i);
+  if (listener) return `listener=${listener[1]} error=${listener[2].trim()}`;
+  if (/listen tcp[^\n]*operation not permitted/i.test(text)) return 'listen tcp 127.0.0.1:0: socket operation not permitted (EPERM)';
+  if (/listen tcp/i.test(text) && /operation not permitted/i.test(text)) return 'TCP listen: operation not permitted';
+  if (/listen tcp/i.test(text) && /permission denied/i.test(text)) return 'TCP listen: permission denied';
+  if (/eperm|operation not permitted/i.test(text)) return 'socket operation not permitted';
+  if (/eacces|permission denied/i.test(text)) return 'permission denied';
+  if (/flags provided but not defined/i.test(text)) return 'unsupported_cli_flag';
+  if (/failed to start/i.test(text)) return 'CLI startup failed';
+  if (/mountpoint|read.only file system|permission denied/i.test(text)) return 'filesystem mount or permission failure';
+  return 'no safe diagnostic details';
 }
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   try {
-    if (req.method === 'GET' && url.pathname === '/v1/uhp') return send(res, 200, { protocol: 'uhp', versions: [VERSION], default_version: VERSION, implementation: { name: 'local-cli-uhp', experimental: true }, capabilities: { streaming: true, idempotency: true, sessions: false, cancellation: true, readOnlyReviewer: true, extensions: { foreman_workspace_bridge_v1: { version: 1, seed: !!SOURCE_REPO, complete_snapshot: true, execution_boundary: 'bubblewrap' } } } });
+    if (req.method === 'GET' && url.pathname === '/v1/uhp') return send(res, 200, { protocol: 'uhp', versions: [VERSION], default_version: VERSION, implementation: { name: 'local-cli-uhp', experimental: true }, capabilities: { streaming: true, idempotency: true, sessions: true, cancellation: true, readOnlyReviewer: true, extensions: { foreman_workspace_bridge_v1: { version: 1, seed: !!SOURCE_REPO, complete_snapshot: true, execution_boundary: 'bubblewrap' } } } });
     if (req.method === 'POST' && url.pathname === '/extensions/foreman-workspace/v1/workspaces') {
       const b = await body(req); const ws = await seedWorkspace(b.base_commit);
       return send(res, 201, { workspace_id: ws.id, base_commit: ws.baseCommit });
@@ -592,9 +987,19 @@ const server = createServer(async (req, res) => {
       }
       return send(res, 200, snapshot);
     }
-    if (req.method === 'GET' && url.pathname === '/v1/harnesses') return send(res, 200, { harnesses: Object.values(HARNESS).filter(configured).map(h => ({ id: h.id, name: h.id })) });
+    if (req.method === 'GET' && url.pathname === '/v1/harnesses') {
+      const harnesses = Object.values(HARNESS).filter(h => configured(h) && h.id !== 'antigravity-cli').map(h => ({ id: h.id, name: h.id }));
+      const agyModels = configured(HARNESS.agy) ? await discoverAgyModels() : [];
+      if (agyModels.some(model => model.id === HARNESS.agy.model)) harnesses.push({ id: HARNESS.agy.id, name: HARNESS.agy.id });
+      return send(res, 200, { harnesses });
+    }
     const models = url.pathname.match(/^\/v1\/harnesses\/([^/]+)\/models$/);
-    if (req.method === 'GET' && models) { const h = cliFor(decodeURIComponent(models[1])); return send(res, h && configured(h) ? 200 : 404, h && configured(h) ? { models: [{ id: h.model, available: true, name: h.model }] } : { models: [] }); }
+    if (req.method === 'GET' && models) {
+      const h = cliFor(decodeURIComponent(models[1]));
+      if (!h || !configured(h)) return send(res, 404, { models: [] });
+      if (h.id === 'antigravity-cli') return send(res, 200, { models: await discoverAgyModels() });
+      return send(res, 200, { models: [{ id: h.model, available: true, name: h.model }] });
+    }
     const responsePath = url.pathname.match(/^\/v1\/responses\/([^/]+)$/);
     if (req.method === 'GET' && responsePath) { const r = state.responses[decodeURIComponent(responsePath[1])]; return r ? send(res, 200, r) : send(res, 404, { error: { code: 'not_found' } }); }
     const cancelPath = url.pathname.match(/^\/v1\/responses\/([^/]+)\/cancel$/);
@@ -603,25 +1008,51 @@ const server = createServer(async (req, res) => {
       const key = req.headers['idempotency-key']; if (typeof key !== 'string' || !key) return send(res, 400, { error: { code: 'idempotency_key_required' } });
       const prior = state.keys[key];
       if (prior) { const existing = state.responses[prior]; if (!existing) return send(res, 503, { error: { code: 'intent_unresolved' } }); return streamResponse(res, existing); }
-      const b = await body(req); const harnessId = b.metadata?.harness_id; const h = cliFor(harnessId);
+      const b = await body(req);
+      b.metadata = b.metadata && typeof b.metadata === 'object' && !Array.isArray(b.metadata) ? { ...b.metadata } : {};
+      for (const field of ['role_session_binding','role_session_state_path','role_session_continuation','role_session','conversation_id','usage_baseline','agy_usage_cumulative','session_id','cli_invocation','actual_model_status','ignored_fields']) delete b.metadata[field];
+      const harnessId = b.metadata.harness_id; const h = cliFor(harnessId);
       if (!h || !configured(h)) return send(res, 409, { error: { code: 'provider_connection_unavailable', message: 'Configure the existing host CLI auth directory and select its harness before discovery/submission' } });
       if (typeof b.input !== 'string' || !b.input.trim() || b.input.length > MAX_PROMPT) return send(res, 400, { error: { code: 'prompt_limit', message: `input must be 1-${MAX_PROMPT} characters` } });
-      if (b.model !== h.model) return send(res, 409, { error: { code: 'model_unavailable' } });
+      if (h.id === 'antigravity-cli') {
+        const available = await discoverAgyModels();
+        if (!available.some(model => model.id === b.model)) return send(res, 409, { error: { code: 'model_unavailable' } });
+      } else if (b.model !== h.model) return send(res, 409, { error: { code: 'model_unavailable' } });
       const timeout = Number(b.timeout_seconds ?? 60), steps = Number(b.max_step ?? 1);
-      if (!Number.isInteger(timeout) || timeout < 1 || timeout > MAX_TIMEOUT || !Number.isInteger(steps) || steps < 1 || steps > 10) return send(res, 400, { error: { code: 'bounds_invalid' } });
+      if (!Number.isInteger(timeout) || timeout < 1 || timeout > MAX_TIMEOUT || !Number.isInteger(steps) || steps < 1 || steps > 100) return send(res, 400, { error: { code: 'bounds_invalid' } });
       const workspaceId = b.metadata?.workspace_id;
       const reviewer = b.metadata?.foreman_review_mode === 'read_only';
+      const roleId = b.metadata?.foreman_role_id ?? b.metadata?.role_id;
+      const persistentRole = roleId === 'planner' || roleId === 'orchestrator';
+      let roleSession;
+      if (b.previous_response_id !== undefined && !persistentRole) return send(res, 400, { error: { code: 'session_role_unsupported' } });
+      if (persistentRole) {
+        if (workspaceId || reviewer) return send(res, 400, { error: { code: 'role_workspace_forbidden' } });
+        try {
+          const binding = roleSessionBinding({ run_id: b.metadata?.foreman_run_id, role_id: roleId, harness_id: h.id, model: b.model, project_id: b.metadata?.foreman_project_id });
+          roleSession = resolvePreviousRoleSession({ previousResponseId: b.previous_response_id, responses: state.responses, expectedBinding: binding, rootDir: ROOT });
+          await mkdir(roleSession.state_path, { recursive: true, mode: 0o700 });
+          b.metadata.role_session_binding = binding;
+          b.metadata.role_session_state_path = roleSession.state_path;
+          if (roleSession.continuation) {
+            b.metadata.conversation_id = roleSession.session_id;
+            b.metadata.role_session_continuation = true;
+            const previous = state.responses[roleSession.previous_response_id];
+            if (h.id === 'antigravity-cli' && previous.metadata?.agy_usage_cumulative) b.metadata.usage_baseline = previous.metadata.agy_usage_cumulative;
+          }
+        } catch (error) { return send(res, 409, { error: { code: 'previous_response_invalid', message: error.message } }); }
+      }
       if (reviewer) {
         try { validateReviewEvidence(b.metadata); }
         catch { return send(res, 400, { error: { code: 'review_evidence_invalid' } }); }
         if (workspaceId) return send(res, 400, { error: { code: 'review_workspace_forbidden' } });
       }
-      if (!reviewer && (!workspaceId || !workspaces.has(workspaceId))) return send(res, 409, { error: { code: 'workspace_required', message: 'Create a pinned bridge workspace and submit its workspace_id in metadata' } });
-      if (reviewer && !['claude-code','codex-cli'].includes(h.id)) return send(res, 400, { error: { code: 'review_harness_unsupported' } });
+      if (!reviewer && !persistentRole && (!workspaceId || !workspaces.has(workspaceId))) return send(res, 409, { error: { code: 'workspace_required', message: 'Create a pinned bridge workspace and submit its workspace_id in metadata' } });
+      if (reviewer && !['claude-code','codex-cli','antigravity-cli'].includes(h.id)) return send(res, 400, { error: { code: 'review_harness_unsupported' } });
       const ws = reviewer ? undefined : workspaceId ? workspaces.get(workspaceId) : undefined;
       if (ws?.responseId) return send(res, 409, { error: { code: 'workspace_already_used' } });
       const id = `resp_${randomUUID()}`;
-      const record = { id, object: 'response', status: 'in_progress', requested_model: h.model, metadata: { ...b.metadata, harness_id: h.id, ...(workspaceId ? { workspace_id: workspaceId } : {}) }, timeout_seconds: timeout, max_step: steps };
+      const record = { id, object: 'response', status: 'in_progress', requested_model: b.model, metadata: { ...b.metadata, harness_id: h.id, ...(workspaceId ? { workspace_id: workspaceId } : {}) }, timeout_seconds: timeout, max_step: steps };
       if (ws) { ws.responseId = id; state.workspaces[ws.id].responseId = id; }
       state.keys[key] = id; state.responses[id] = record; const task = { response: record, resolve: null }; tasks.set(id, task);
       await persist(); // durable idempotency intent before spawning any CLI process
@@ -632,22 +1063,42 @@ const server = createServer(async (req, res) => {
   } catch (e) { if (!res.headersSent) send(res, 500, { error: { code: 'internal_error', message: String(e.message).slice(0, 500) } }); else res.end(); }
 });
 function streamResponse(res, record, task = tasks.get(record.id)) {
+  let closed = false;
+  let finished = false;
+  let heartbeat;
+  const stopHeartbeat = () => { if (heartbeat) { clearInterval(heartbeat); heartbeat = undefined; } };
+  res.on('close', () => { closed = true; stopHeartbeat(); });
   res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', 'UHP-Version': VERSION });
   event(res, 'response.created', 0, { id: record.id, object: 'response', status: 'in_progress', metadata: record.metadata });
   const finish = () => {
+    if (finished) return;
+    finished = true;
+    stopHeartbeat();
+    if (closed || res.destroyed) return;
     const r = record; const type = `response.${r.status}`;
     event(res, type, 1, r); res.end();
   };
   if (record.status !== 'in_progress') finish();
-  else { task.resolve = finish; reqClose(res, () => { /* disconnect never cancels durable task */ }); }
+  else {
+    heartbeat = setInterval(() => {
+      if (closed || res.destroyed || record.status !== 'in_progress') { stopHeartbeat(); return; }
+      res.write(': keep-alive\n\n');
+    }, SSE_KEEPALIVE_MS);
+    heartbeat.unref?.();
+    if (task) task.resolve = finish;
+    else finish();
+  }
 }
-function reqClose(res, fn) { res.on('close', fn); }
 
 await mkdir(ROOT, { recursive: true, mode: 0o700 });
 if (process.argv[2] === '--preflight-claude-runtime') {
   console.log(await preflightClaudeRuntime());
+} else if (process.argv[2] === '--preflight-claude-planner-auth') {
+  console.log(await preflightClaudePlannerAuth());
 } else if (process.argv[2] === '--preflight-codex-runtime') {
   console.log(await preflightCodexRuntime());
+} else if (process.argv[2] === '--preflight-agy-runtime') {
+  console.log(await preflightAgyRuntime());
 } else {
   await load();
   server.listen(PORT, '127.0.0.1', () => console.log(`experimental local CLI UHP listening on 127.0.0.1:${PORT}`));
