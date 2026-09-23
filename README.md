@@ -40,12 +40,15 @@ Use Node 24 and pnpm 11.
 
 ```sh
 pnpm install
-cp .env.example .env
 pnpm build
 pnpm start
 ```
 
-Open `http://127.0.0.1:4399`. The service serves the built React UI, local REST API, and SSE event stream. `pnpm dev` starts the API in watch mode and `pnpm dev:ui` starts Vite for UI development. State is stored under `.foreman-data/` by default and survives service restarts. The UI begins empty; create a project, task, and run to see real persisted records.
+Open `http://127.0.0.1:4399` and choose **Open repository**. Browse folders on the computer running Foreman, pick a local Git repository, review the allowed files and validation commands, then open it. Foreman starts a local UHP bridge for that project using existing CLI logins and keeps Worker changes in an isolated workspace. Add a task describing the change you want in that repository, start a run, and tell the Planner what to do. No `.env` file or separate bridge command is needed for this local flow. The selected repository must have a committed HEAD; uncommitted source changes are shown but runs start from the commit. Foreman stores project state in `.foreman-data/` and restores selected repositories on restart.
+
+The folder browser reads the server computer's filesystem. If Foreman runs on another machine, the browser shows folders on that machine. Validation commands run in Foreman's disposable copy after Worker output is verified, so review the suggested commands before opening the repository. Host CLI logins must already be configured for the harnesses you select; unavailable harnesses are not selectable. With all three CLIs available, new projects default to Codex for Planner, Orchestrator, and Reviewer and AGY Flash Low for Worker; each role can be changed in the UI.
+
+`pnpm dev` starts the API in watch mode and `pnpm dev:ui` starts Vite for UI development. The settings below remain available for custom or legacy setups; the normal local repository flow does not require them.
 
 | Setting | Purpose |
 | --- | --- |
@@ -60,7 +63,7 @@ Open `http://127.0.0.1:4399`. The service serves the built React UI, local REST 
 | `FOREMAN_VALIDATION_COMMANDS` | Non-empty JSON array of `{ "name", "command", "args", "cwd?" }` entries run by Foreman in the disposable validation workspace. |
 | `FOREMAN_VALIDATION_TIMEOUT_MS`, `FOREMAN_VALIDATION_MAX_OUTPUT_BYTES` | Per-command time limit and output capture bound. Defaults are 120,000 ms and 1 MiB. |
 
-The supported configuration shape is recorded in `config.schema.json`. Keep credentials in `.env`, which Git ignores. The API is bound to loopback by default; it is not a hosted account service.
+The optional configuration shape is recorded in `config.schema.json`. The local project flow uses existing host CLI logins; no provider key is needed in Foreman. The API is bound to loopback by default.
 
 ## Foundation scope
 
