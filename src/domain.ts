@@ -5,33 +5,35 @@ export type RoleKind = 'planner' | 'orchestrator' | 'worker' | 'reviewer';
 export type AssignmentStatus = 'queued' | 'submitting' | 'submitted' | 'running' | 'cancel_requested' | 'cancelled' | 'succeeded' | 'failed' | 'needs_revision';
 export type GuidanceStatus = 'queued' | 'delivered' | 'applied' | 'replan' | 'waiting' | 'cancelled';
 
-export interface RoleConfig { provider: string; model: string; options?: Record<string, unknown> }
-export interface Role { id: string; name: string; kind: RoleKind; enabled: boolean; config: RoleConfig; configSchema: Record<string, unknown>; availableConfigs: RoleConfig[] }
-export interface Project { id: string; name: string; status: ProjectStatus; defaultRoleConfigs: Record<string, RoleConfig>; createdAt: string; tasks: Task[] }
+export interface RoleConfig { harnessId: string; model: string; options?: Record<string, unknown> }
+export interface Usage { inputTokens?:number; outputTokens?:number; totalTokens?:number; cachedInputTokens?:number; runtimeMs?:number; requestCount?:number; measured?:true }
+export interface Role { id: string; name: string; kind: RoleKind; enabled: boolean; config: RoleConfig; configSchema: Record<string, unknown>; availableConfigs: RoleConfig[]; usage?:Usage; usageByHarnessModel?:Record<string,Usage> }
+export interface Project { id: string; name: string; status: ProjectStatus; defaultRoleConfigs: Record<string, RoleConfig>; createdAt: string; tasks: Task[]; usage?:Usage; usageByHarnessModel?:Record<string,Usage> }
 export interface Task { id: string; title: string; status: TaskStatus; createdAt: string; runs: Run[] }
-export interface Run { id: string; status: RunStatus; createdAt: string; plannerSessionId: string; orchestratorSessionId: string; roleConfigs: Record<string, RoleConfig>; guidance: Guidance[]; assignments: Assignment[] }
-export interface Guidance { id: string; sequence: number; text: string; status: GuidanceStatus; createdAt: string; acknowledgment?: 'applied'|'replan'|'waiting'; acknowledgedAt?: string }
-export interface Assignment { id: string; roleId: string; status: AssignmentStatus; requestedConfig: RoleConfig; actualConfig?: RoleConfig; prompt: string; submissionId: string; idempotencyKey: string; externalId?: string; sessionId?: string; responseId?: string; result?: unknown; error?: string; createdAt: string; cancelIdempotencyKey?: string }
+export interface RoleSession { localId: string; roleId: 'planner'|'orchestrator'; generation: number; status: 'new'|'active'|'rotated'; config: RoleConfig; uhpSessionId?: string; responseId?: string; startedAt: string; rotatedAt?: string }
+export interface ReviewRecord { id: string; status:'proposed'|'verified'; reviewerAssignmentId: string; implementationAssignmentIds: string[]; verdict: 'clear'|'changes_requested'|'rejected'; scope: string[]; summary: string; createdAt: string }
+export interface GitEvidence { status: 'unverified'|'verified'; commit?: string; tree?: string; changedPaths?: string[]; submittedAt: string }
+export interface ValidationRecord { id: string; status:'unverified'|'passed'|'failed'; passed: boolean; reportedPassed:boolean; checks: Array<{name:string;passed:boolean;details?:string}>; gitEvidence?: GitEvidence; createdAt: string }
+export interface ApprovalRecord { id: string; approved: boolean; evidenceCommit?: string; createdAt: string }
+export interface Run { id: string; status: RunStatus; createdAt: string; plannerSessionId?: string; orchestratorSessionId?: string; sessions: {planner:RoleSession;orchestrator:RoleSession}; sessionHistory:RoleSession[]; roleConfigs: Record<string, RoleConfig>; guidance: Guidance[]; assignments: Assignment[]; reviews:ReviewRecord[]; validation?:ValidationRecord; approval?:ApprovalRecord; usage?:Usage; usageByRole?:Record<string,Usage>; usageByHarnessModel?:Record<string,Usage> }
+export interface Guidance { id: string; sequence: number; text: string; status: GuidanceStatus; createdAt: string; plannerAssignmentId?:string; plannerReply?:string; checkpointHandoffAssignmentId?:string; acknowledgment?: 'applied'|'replan'|'waiting'; acknowledgedAt?: string }
+export interface Assignment { id: string; roleId: string; status: AssignmentStatus; requestedConfig: RoleConfig; actualConfig?: RoleConfig; configOutcome?:'confirmed'|'substituted'|'unavailable'; configNotes?:{boundsApplied?:boolean;ignoredFields?:string[]}; usage?:Usage; prompt: string; submissionId: string; idempotencyKey: string; externalId?: string; sessionId?: string; responseId?: string; result?: unknown; error?: string; createdAt: string; cancelIdempotencyKey?: string }
 export interface Event { id: string; type: string; entityType: string; entityId: string; at: string; data: Record<string, unknown> }
 export interface State { version: 1; projects: Project[]; roles: Role[]; events: Event[] }
 export const now = (): string => new Date().toISOString();
 export const id = (prefix: string): string => `${prefix}_${crypto.randomUUID()}`;
 
 export function initialState(): State {
-  const defaults: RoleConfig[] = [
-    { provider: 'openai', model: 'codex' },
-    { provider: 'anthropic', model: 'claude' },
-  ];
   return { version: 1, projects: [], events: [], roles: [
-    { id: 'planner', name: 'Planner', kind: 'planner', enabled: true, config: defaults[0]!, availableConfigs: defaults, configSchema: { type: 'object', required: ['provider','model'] } },
-    { id: 'orchestrator', name: 'Orchestrator', kind: 'orchestrator', enabled: true, config: defaults[0]!, availableConfigs: defaults, configSchema: { type: 'object', required: ['provider','model'] } },
-    { id: 'worker', name: 'Worker', kind: 'worker', enabled: true, config: defaults[0]!, availableConfigs: defaults, configSchema: { type: 'object', required: ['provider','model'] } },
-    { id: 'reviewer', name: 'Reviewer', kind: 'reviewer', enabled: true, config: defaults[0]!, availableConfigs: defaults, configSchema: { type: 'object', required: ['provider','model'] } },
+    { id: 'planner', name: 'Planner', kind: 'planner', enabled: false, config: { harnessId:'', model:'' }, availableConfigs: [], configSchema: { type: 'object', required: ['harnessId','model'] } },
+    { id: 'orchestrator', name: 'Orchestrator', kind: 'orchestrator', enabled: false, config: { harnessId:'', model:'' }, availableConfigs: [], configSchema: { type: 'object', required: ['harnessId','model'] } },
+    { id: 'worker', name: 'Worker', kind: 'worker', enabled: false, config: { harnessId:'', model:'' }, availableConfigs: [], configSchema: { type: 'object', required: ['harnessId','model'] } },
+    { id: 'reviewer', name: 'Reviewer', kind: 'reviewer', enabled: false, config: { harnessId:'', model:'' }, availableConfigs: [], configSchema: { type: 'object', required: ['harnessId','model'] } },
   ] };
 }
 
 export function validateRoleConfig(role: Role, config: RoleConfig): void {
   if (!role.enabled) throw new Error(`Role ${role.id} is disabled`);
-  if (!config || typeof config.provider !== 'string' || typeof config.model !== 'string') throw new Error('Role config requires provider and model');
-  if (!role.availableConfigs.some(c => c.provider === config.provider && c.model === config.model)) throw new Error(`Unsupported ${role.id} config: ${config.provider}/${config.model}`);
+  if (!config || typeof config.harnessId !== 'string' || typeof config.model !== 'string') throw new Error('Role config requires harnessId and model');
+  if (!role.availableConfigs.some(c => c.harnessId === config.harnessId && c.model === config.model)) throw new Error(`Unsupported ${role.id} config: ${config.harnessId}/${config.model}`);
 }
