@@ -1,0 +1,72 @@
+{
+  "evidenceVersion": 1,
+  "provenance": "single_live_codex_worker_call",
+  "status": "failed",
+  "uhpSubmissionAttempts": 1,
+  "liveCliInvocations": 1,
+  "completedModelTurns": 0,
+  "providerRequestCount": "unavailable",
+  "executionStage": null,
+  "executionBoundary": {
+    "proven": true,
+    "evidence": "outside sentinel unreadable and unmodifiable; assigned workspace writable",
+    "harness": "codex-cli",
+    "workspace_writable": true,
+    "host_auth_mounted_read_only": true
+  },
+  "runId": "run_d87e9db0-8b54-40c0-8123-a948be31819e",
+  "pinnedBaseCommit": "b321b35f5d69e098828ac8e28a272e620cf7390a",
+  "requestedModel": "gpt-6-sol",
+  "actualModelStatus": "unavailable",
+  "actualModel": null,
+  "persistedForemanActualModelStatus": "absent_at_failure_time",
+  "cliInvocation": {
+    "executable": "/opt/codex-vendor/x86_64-unknown-linux-musl/bin/codex",
+    "hostExecutable": "/home/chris/.local/share/fnm/node-versions/v24.18.0/installation/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex",
+    "args": [
+      "--ask-for-approval",
+      "never",
+      "exec",
+      "--json",
+      "--ephemeral",
+      "--sandbox",
+      "workspace-write",
+      "--ignore-user-config",
+      "--skip-git-repo-check",
+      "--model",
+      "gpt-6-sol",
+      "-"
+    ]
+  },
+  "responseId": "resp_94f2495f-43f6-4d22-b401-463266d9e5db",
+  "sessionId": null,
+  "measuredUsage": null,
+  "terminalStatus": "failed",
+  "terminalError": "CLI did not report an actual model and session id",
+  "cliOutputText": "",
+  "snapshot": {
+    "complete": false,
+    "entryCount": 1,
+    "errors": [
+      {
+        "path": ".",
+        "error": "task_status_failed"
+      }
+    ],
+    "observedReadme": {
+      "size": 87,
+      "identicalToPinnedBase": true
+    }
+  },
+  "scopeVerified": false,
+  "scopeVerificationStatus": "not_run_due_to_incomplete_snapshot",
+  "controllerValidation": {
+    "status": "not_run",
+    "reason": "Worker response failed before a complete snapshot was available"
+  },
+  "failure": "CLI did not report an actual model and session id",
+  "failureInterpretation": "Actual-model omission alone is permitted. The bridge treated the invocation as failed because it produced no session id or usable response JSON and reported a failed CLI task status.",
+  "retry": "forbidden_by_durable_call_lock",
+  "capturedAt": "2026-09-23T04:36:23.470Z",
+  "actualModelDisplay": "actual model unavailable"
+}

@@ -9,6 +9,24 @@ async function fixture(options: Parameters<typeof startUhpFixture>[0] = {}): Pro
 afterEach(async () => { await Promise.all(fixtures.splice(0).map((server) => server.close())); });
 
 describe("UHP adapter", () => {
+  it("keeps requested Codex model separate when CLI supplies no authoritative actual model", async () => {
+    const server = await fixture({ codexCli: true, missingActualModel: true });
+    const client = new UhpClient({ baseUrl: server.baseUrl, harnessId: "codex-cli", model: "codex-available" });
+    const result = await client.submit({ submissionId: "codex-sub", assignmentId: "codex-as", runId: "codex-run", roleId: "worker", taskId: "task", projectId: "project", prompt: "Make one small change", config: {}, idempotencyKey: "codex-key" });
+    expect(result).toMatchObject({ status: "completed", requestedModel: "codex-available", actualModelStatus: "unavailable", selectedHarnessId: "codex-cli", sessionId: "hsess_fixture", cliInvocation: { executable: "/opt/codex", hostExecutable: "/usr/bin/codex", args: ["exec", "--model", "codex-available"] }, usage: { inputTokens: 7, outputTokens: 3 } });
+    expect(result.actualModel).toBeUndefined();
+    expect(result.modelFallback).toBe(false);
+  });
+
+  it("records terminal Codex CLI failure without inventing model or session evidence", async () => {
+    const server = await fixture({ codexCli: true, codexFailure: true });
+    const client = new UhpClient({ baseUrl: server.baseUrl, harnessId: "codex-cli", model: "codex-available" });
+    const result = await client.submit({ submissionId: "codex-failed-sub", assignmentId: "codex-failed-as", runId: "codex-run", roleId: "worker", taskId: "task", projectId: "project", prompt: "Make one small change", config: {}, idempotencyKey: "codex-failed-key" });
+    expect(result).toMatchObject({ status: "failed", requestedModel: "codex-available", actualModelStatus: "unavailable", selectedHarnessId: "codex-cli", responseId: "resp_fixture" });
+    expect(result.actualModel).toBeUndefined();
+    expect(result.sessionId).toBeUndefined();
+  });
+
   it("discovers configured harness/model, submits idempotently, streams terminal response and exposes session ID", async () => {
     const server = await fixture();
     const client = new UhpClient({ baseUrl: server.baseUrl, token: "test-token", harnessId: "chrn_fixture", model: "model-fixture" });

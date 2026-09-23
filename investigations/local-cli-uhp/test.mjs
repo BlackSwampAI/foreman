@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url';
 
 await import('tsx/esm/api').then(({ register }) => register());
 const { UhpClient } = await import('../../src/uhp.ts');
+const { Controller } = await import('../../src/controller.ts');
+const { JsonStore } = await import('../../src/store.ts');
 const { snapshotGitCommit } = await import('../../src/git-workspace.ts');
 const { verifyBridgeWorkspace, validateBridgeSnapshot } = await import('./workspace-verifier.mjs');
 const { createWorkspaceFixture, applyAllFileCaseChanges } = await import('./workspace-fixture.mjs');
@@ -37,7 +39,7 @@ async function setup(t, options = {}) {
 async function submit(base, harness, model, key, baseCommit, workspaceId) {
   const seeded=workspaceId ? {workspace_id:workspaceId} : await (await fetch(`${base}/extensions/foreman-workspace/v1/workspaces`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({base_commit:baseCommit})})).json();
   const r = await fetch(`${base}/v1/responses`, { method: 'POST', headers: { 'Content-Type':'application/json', Accept:'text/event-stream', 'UHP-Version':'2026-09-12', 'Idempotency-Key':key }, body: JSON.stringify({ input:'Say bounded answer', model, metadata:{harness_id:harness,workspace_id:seeded.workspace_id}, stream:true, timeout_seconds:5, max_step:1 }) });
-  assert.equal(r.status,200); return (await r.text()).split('\n').filter(x=>x.startsWith('data: ')).map(x=>JSON.parse(x.slice(6)));
+  const text=await r.text(); assert.equal(r.status,200,text); return text.split('\n').filter(x=>x.startsWith('data: ')).map(x=>JSON.parse(x.slice(6)));
 }
 function reviewEvidence(overrides = {}) { return { validation:'verified_by_foreman_git_comparison', scopeVerified:true, baseCommit:'a'.repeat(40), workerResponseId:'resp_worker_fixture', allowedScope:['src/example.ts'], reviewDiff:'### modify: src/example.ts\n- before\n+ after\n', controllerValidation:{passed:true,policy:{requireAllChecksPass:true,configuredCheckCount:1},observations:[{name:'typecheck',command:'node',args:['--check','src/example.ts'],exitCode:0,signal:null,timedOut:false,output:'passed',outputTruncated:false,passed:true,startedAt:'2026-09-22T00:00:00Z',finishedAt:'2026-09-22T00:00:01Z'}]}, ...overrides }; }
 async function submitReview(base, harness, key, metadata = {}, input = 'Review this change for correctness and return a recommendation.') {
@@ -70,9 +72,59 @@ test('Foreman UhpClient discovers, submits, validates fallback/session/usage, an
 test('Codex parser returns reported output and leaves unavailable model/usage absent', async t => {
   const {base,baseCommit,countFor}=await setup(t);
   const events=await submit(base,'codex-cli','codex-requested','codex-key',baseCommit); const r=events[1].response;
-  assert.equal(events[1].type,'response.failed',JSON.stringify(events)); assert.equal(r.output_text,'codex bounded answer'); assert.equal(r.model,undefined); assert.match(r.error.message,/did not report an actual model/);
+  assert.equal(events[1].type,'response.completed',JSON.stringify(events)); assert.equal(r.output_text,'codex bounded answer'); assert.equal(r.model,undefined);
+  assert.equal(r.requested_model,'codex-requested'); assert.equal(r.metadata.actual_model_status,'unavailable');
+  assert.equal(r.metadata.cli_invocation.executable,'/opt/codex');
+  assert.equal(r.metadata.cli_invocation.host_executable.endsWith('/fake-codex'),true);
+  assert.ok(r.metadata.cli_invocation.args.includes('workspace-write'));
+  assert.deepEqual(r.metadata.cli_invocation.args.slice(-3),['--model','codex-requested','-']);
   assert.equal(r.session_id,'codex-thread'); assert.deepEqual(r.usage,{input_tokens:4,output_tokens:2});
-  assert.equal((await readFile(countFor(r.id),'utf8')).trim(),'x:provider-env-absent:model=codex-requested:ignore-user-config=true:skip-git-repo-check=true');
+  assert.equal(r.metadata.execution_boundary.proven,true);
+  assert.equal((await readFile(countFor(r.metadata.workspace_id),'utf8')).trim(),'x:provider-env-absent:model=codex-requested:ignore-user-config=true:skip-git-repo-check=true');
+});
+
+test('Codex Worker edits only its seeded workspace and cannot read or write an outside sentinel', async t => {
+  const fixture=await createWorkspaceFixture(); t.after(fixture.cleanup);
+  const outside=await mkdtemp(join(tmpdir(),'foreman-codex-outside-')); t.after(()=>rm(outside,{recursive:true,force:true}));
+  const sentinel=join(outside,'outside-sentinel'); await writeFile(sentinel,'outside-value');
+  const body=`import {readFileSync,writeFileSync} from 'node:fs'; import {spawnSync} from 'node:child_process'; const p=${JSON.stringify(sentinel)}; let outsideRead='allowed',outsideWrite='allowed',authWrite='allowed'; try{readFileSync(p,'utf8')}catch{outsideRead='denied'} try{writeFileSync(p,'changed')}catch{outsideWrite='denied'} try{writeFileSync(process.env.CODEX_HOME+'/host-login.fixture','changed')}catch{authWrite='denied'} const login=readFileSync(process.env.CODEX_HOME+'/host-login.fixture','utf8'); const shellCommand='if test -r '+JSON.stringify(p)+'; then exit 41; fi; if printf changed >> '+JSON.stringify(p)+' 2>/dev/null; then exit 42; fi; printf %s Codex_worker_changed_this_assigned_file. > README.md'; const shell=spawnSync('/bin/sh',['-c',shellCommand]); writeFileSync('codex-boundary.json',JSON.stringify({outsideRead,outsideWrite,authWrite,login,codexHome:process.env.CODEX_HOME,shellExit:shell.status})); process.stdin.resume();process.stdin.on('end',()=>{console.log(JSON.stringify({type:'thread.started',thread_id:'codex-boundary-thread'}));console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'updated README.md'}}));console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:3,output_tokens:4}}));});`;
+  const {base,baseCommit,env}=await setup(t,{sourceRepo:fixture.repo,baseCommit:fixture.baseCommit,codexBody:body});
+  await writeFile(join(env.CODEX_HOME,'host-login.fixture'),'host-login-visible-read-only');
+  const workspace=await (await fetch(`${base}/extensions/foreman-workspace/v1/workspaces`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({base_commit:baseCommit})})).json();
+  const events=await submit(base,'codex-cli','codex-requested','codex-boundary-key',baseCommit,workspace.workspace_id); const response=events.at(-1).response;
+  assert.equal(events.at(-1).type,'response.completed',JSON.stringify(events));
+  assert.equal(response.metadata.actual_model_status,'unavailable');
+  assert.equal(response.metadata.execution_boundary.proven,true);
+  const work=join(env.LOCAL_CLI_UHP_WORK,response.metadata.workspace_id);
+  const boundary=JSON.parse(await readFile(join(work,'codex-boundary.json'),'utf8')); assert.deepEqual({outsideRead:boundary.outsideRead,outsideWrite:boundary.outsideWrite,authWrite:boundary.authWrite,login:boundary.login,codexHome:boundary.codexHome},{outsideRead:'denied',outsideWrite:'denied',authWrite:'denied',login:'host-login-visible-read-only',codexHome:'/auth'}); assert.equal(boundary.shellExit,0,JSON.stringify(boundary));
+  assert.equal(await readFile(join(work,'README.md'),'utf8'),'Codex_worker_changed_this_assigned_file.');
+  assert.equal(await readFile(sentinel,'utf8'),'outside-value');
+  assert.equal(await readFile(join(env.CODEX_HOME,'host-login.fixture'),'utf8'),'host-login-visible-read-only');
+  const snapshot=await (await fetch(`${base}/extensions/foreman-workspace/v1/workspaces/${response.metadata.workspace_id}/snapshot`)).json();
+  const evidence=await verifyBridgeWorkspace({repoPath:fixture.repo,baseCommit:fixture.baseCommit,snapshot,allowedScope:['README.md','codex-boundary.json']});
+  assert.equal(evidence.validation,'verified_by_foreman_git_comparison'); assert.equal(evidence.scopeVerified,true);
+});
+test('Codex Worker startup failure records exit status and stage without blaming actual-model reporting', async t => {
+  const {base,baseCommit}=await setup(t,{codexBody:'process.exit(17);'});
+  const events=await submit(base,'codex-cli','codex-requested','codex-empty-failure-key',baseCommit); const response=events.at(-1).response;
+  assert.equal(events.at(-1).type,'response.failed',JSON.stringify(events));
+  assert.equal(response.model,undefined); assert.equal(response.session_id,undefined); assert.equal(response.usage,undefined);
+  assert.equal(response.metadata.actual_model_status,'unavailable');
+  assert.deepEqual(response.metadata.cli_exit,{exit_code:17,signal:null});
+  assert.equal(response.metadata.execution_stage,'cli_execution');
+  assert.equal(response.error.message,'Codex CLI exited before reporting a session id');
+  assert.doesNotMatch(response.error.message,/actual model/i);
+});
+test('Codex Worker requires turn.completed even when CLI exits zero with a thread and message', async t => {
+  const body=`process.stdin.resume();process.stdin.on('end',()=>{console.log(JSON.stringify({type:'thread.started',thread_id:'codex-incomplete-thread'}));console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'partial answer'}}));});`;
+  const {base,baseCommit}=await setup(t,{codexBody:body});
+  const events=await submit(base,'codex-cli','codex-requested','codex-incomplete-turn-key',baseCommit); const response=events.at(-1).response;
+  assert.equal(events.at(-1).type,'response.failed',JSON.stringify(events));
+  assert.equal(response.output_text,'partial answer'); assert.equal(response.session_id,'codex-incomplete-thread');
+  assert.equal(response.model,undefined); assert.equal(response.metadata.actual_model_status,'unavailable');
+  assert.deepEqual(response.metadata.cli_exit,{exit_code:0,signal:null});
+  assert.equal(response.error.message,'Codex CLI exited without completing a turn');
+  assert.doesNotMatch(response.error.message,/actual model/i);
 });
 test('invalid model and prompt bounds are rejected before CLI spawn', async t => {
   const {base,env}=await setup(t);
@@ -224,6 +276,56 @@ test('tool-enabled child cannot read or write outside its seeded workspace', asy
   const snapshot=await (await fetch(`${base}/extensions/foreman-workspace/v1/workspaces/${seed.workspace_id}/snapshot`)).json();
   const evidence=await verifyBridgeWorkspace({repoPath:fixture.repo,baseCommit:fixture.baseCommit,snapshot,allowedScope:['inside-edit.txt','worker-edit.txt']});
   assert.equal(evidence.validation,'verified_by_foreman_git_comparison');
+});
+
+test('Codex Worker edits only its seeded workspace; Foreman verifies the complete snapshot and validates it', async t => {
+  const fixture = await createWorkspaceFixture(); t.after(fixture.cleanup);
+  const parent = await mkdtemp(join(tmpdir(),'foreman-codex-boundary-')); t.after(()=>rm(parent,{recursive:true,force:true}));
+  const sentinel=join(parent,'outside-sentinel'); await writeFile(sentinel,'FOREMAN-CODEX-OUTSIDE-SENTINEL');
+  const codexBody = `import {readFileSync,writeFileSync} from 'node:fs'; const path=${JSON.stringify(sentinel)}; let read='allowed',write='allowed'; try{readFileSync(path,'utf8')}catch{read='denied'} try{writeFileSync(path,'CHANGED')}catch{write='denied'} writeFileSync('README.md',${JSON.stringify('# Fixture\n\nCodex changed the assigned README.\n')}); writeFileSync('.boundary-result.json',JSON.stringify({read,write})); console.log(JSON.stringify({type:'thread.started',thread_id:'codex-worker-thread'})); console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'Updated README.md in the assigned workspace.'}})); console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:11,output_tokens:7}}));`;
+  const {base,env}=await setup(t,{sourceRepo:fixture.repo,baseCommit:fixture.baseCommit,codexBody});
+  const uhp = new UhpClient({baseUrl:base,timeoutMs:20_000});
+  const controller = new Controller(new JsonStore(join(parent,'foreman-state.json')),uhp,false,true);
+  controller.configureVerifiedWorkspace({repoPath:fixture.repo,allowedScope:['README.md','.boundary-result.json'],commands:[{name:'assert verified README content',command:process.execPath,args:['-e',`const fs=require('node:fs');if(fs.readFileSync('README.md','utf8')!=='# Fixture\\n\\nCodex changed the assigned README.\\n')process.exit(1)`]}],bridgeBaseUrl:base,timeoutMs:10_000,maxOutputBytes:2_000});
+  await controller.refreshDiscovery();
+  const project=await controller.createProject('Codex disposable workspace fixture');
+  const task=await controller.createTask(project.id,'Edit the assigned README');
+  const run=await controller.createRun(task.id);
+  await controller.selectRoleConfig('worker',{harnessId:'codex-cli',model:'codex-requested'},undefined,run.id);
+  await controller.prepareWorkerWorkspace(run.id,fixture.baseCommit);
+  const assignment=await controller.assign(run.id,'worker','Change README.md with one short sentence.',{harnessId:'codex-cli',model:'codex-requested',options:{maxStep:1,timeoutSeconds:5}});
+  assert.equal(assignment.status,'succeeded',JSON.stringify(assignment));
+  assert.equal(assignment.actualModelStatus,'unavailable');
+  assert.deepEqual(assignment.cliInvocation?.args.slice(-3),['--model','codex-requested','-']);
+  assert.equal(assignment.sessionId,'codex-worker-thread');
+  assert.match(JSON.stringify(assignment.usage),/\"measured\":true/);
+  assert.equal(assignment.usage.inputTokens,11);
+  assert.equal(assignment.usage.outputTokens,7);
+  const response=await uhp.retrieve(assignment.responseId);
+  assert.equal(response.model,undefined);
+  assert.equal(response.requested_model,'codex-requested');
+  assert.equal(response.metadata?.actual_model_status,'unavailable');
+  assert.equal(response.metadata?.execution_boundary?.proven,true);
+  assert.equal(response.metadata?.execution_boundary?.workspace_writable,true);
+  assert.deepEqual(response.metadata?.cli_invocation?.args.slice(-3),['--model','codex-requested','-']);
+  const verified=await controller.verifyWorkerOutput(run.id,assignment.id);
+  assert.equal(verified.workerEvidence.provenance,'bridge_snapshot');
+  assert.equal(verified.workerEvidence.pinnedBaseCommit,fixture.baseCommit);
+  assert.equal(verified.workerEvidence.completeSnapshot.reportedComplete,true);
+  assert.equal(verified.workerEvidence.completeSnapshot.reportedErrors,0);
+  assert.equal(verified.workerEvidence.scopeVerified,true);
+  assert.deepEqual(verified.workerEvidence.changes.map(change=>change.path).sort(),['.boundary-result.json','README.md']);
+  assert.equal(verified.validation.status,'passed');
+  assert.equal(verified.validation.observations[0].exitCode,0);
+  const state=await controller.state();
+  const stored=state.projects[0].tasks[0].runs[0];
+  assert.equal(stored.assignments.find(item=>item.id===assignment.id).cliInvocation.args.includes('codex-requested'),true);
+  assert.equal(stored.workerEvidence.actualModel,undefined);
+  assert.equal(stored.workerEvidence.requestedModel,'codex-requested');
+  assert.equal(stored.workerEvidence.actualModelStatus,'unavailable');
+  assert.equal(await readFile(sentinel,'utf8'),'FOREMAN-CODEX-OUTSIDE-SENTINEL');
+  const boundary=JSON.parse(await readFile(join(env.LOCAL_CLI_UHP_WORK,stored.workspaceId,'.boundary-result.json'),'utf8'));
+  assert.deepEqual(boundary,{read:'denied',write:'denied'});
 });
 
 test('failed boundary probe blocks the tool-enabled CLI before spawn', async t => {

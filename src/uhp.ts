@@ -32,6 +32,8 @@ export interface UhpSubmitResult {
   outputText?: string;
   actualModel?: string;
   requestedModel?: string;
+  actualModelStatus?: "observed" | "unavailable";
+  cliInvocation?: { executable: string; hostExecutable?: string; args: string[] };
   modelFallback?: boolean;
   selectedHarnessId?: string;
   reportedHarnessId?: string;
@@ -215,6 +217,15 @@ export class UhpClient implements UhpAdapter {
       const responseObject = status === "completed" ? final : await this.retrieve(final.id);
       const actualModel = typeof responseObject.model === "string" ? responseObject.model : undefined;
       const responseMetadata = responseObject.metadata && typeof responseObject.metadata === "object" ? responseObject.metadata as Record<string, unknown> : {};
+      const reportedRequestedModel = typeof responseObject.requested_model === "string" ? responseObject.requested_model : typeof responseMetadata.requested_model === "string" ? responseMetadata.requested_model : undefined;
+      if (reportedRequestedModel !== undefined && reportedRequestedModel !== model.id) throw new UhpError(`UHP reported requested model '${reportedRequestedModel}' although '${model.id}' was selected`);
+      const actualModelStatus = actualModel ? "observed" : responseMetadata.actual_model_status === "unavailable" ? "unavailable" : undefined;
+      const rawInvocation = responseMetadata.cli_invocation;
+      const invocationRecord = rawInvocation && typeof rawInvocation === "object" ? rawInvocation as Record<string, unknown> : undefined;
+      const invocationArgs = invocationRecord?.args;
+      const cliInvocation = invocationRecord && typeof invocationRecord.executable === "string" && Array.isArray(invocationArgs) && invocationArgs.every((arg: unknown) => typeof arg === "string")
+        ? { executable: invocationRecord.executable, ...(typeof invocationRecord.host_executable === "string" ? { hostExecutable: invocationRecord.host_executable } : {}), args: [...invocationArgs] as string[] }
+        : undefined;
       const sessionId = getSessionId(final) ?? getSessionId(responseObject);
       const reviewerExecution = input.roleId === "reviewer" ? {
         mode: typeof responseMetadata.foreman_review_mode === "string" ? responseMetadata.foreman_review_mode : undefined,
@@ -228,10 +239,19 @@ export class UhpClient implements UhpAdapter {
         result: responseObject.error ?? responseObject,
         reviewerExecution,
       };
-      const modelFallback = responseMetadata.model_fallback === true || (typeof responseMetadata.requested_model === "string" && actualModel !== responseMetadata.requested_model);
-      if (!actualModel && input.roleId !== "reviewer") throw new UhpError("UHP response did not report the actual model");
+      if (input.roleId === "worker" && harness.id === "codex-cli" && status !== "completed") return {
+        externalId: final.id, responseId: final.id, ...(sessionId ? { sessionId } : {}), status,
+        requestedModel: model.id, selectedHarnessId: harness.id,
+        ...(actualModel ? { actualModel, actualModelStatus: "observed" as const } : actualModelStatus ? { actualModelStatus } : {}),
+        ...(cliInvocation ? { cliInvocation } : {}),
+        outputText: extractOutputText(responseObject), result: responseObject.error ?? responseObject,
+        ...(Object.hasOwn(responseObject, "usage") ? { usage: normalizeUsage(responseObject.usage) } : {}),
+      };
+      const modelFallback = responseMetadata.model_fallback === true || (!!actualModel && reportedRequestedModel !== undefined && actualModel !== reportedRequestedModel);
+      const codexModelGap = input.roleId === "worker" && harness.id === "codex-cli" && !actualModel && actualModelStatus === "unavailable" && !!cliInvocation && reportedRequestedModel === model.id;
+      if (!actualModel && input.roleId !== "reviewer" && !codexModelGap) throw new UhpError("UHP response did not report the actual model");
       if (actualModel && actualModel !== model.id && !modelFallback && input.roleId !== "reviewer") throw new UhpError(`UHP ran model '${actualModel}' although '${model.id}' was requested`);
-      if (modelFallback && responseMetadata.requested_model !== model.id && input.roleId !== "reviewer") throw new UhpError(`UHP reported a model substitution inconsistent with request '${model.id}'`);
+      if (modelFallback && reportedRequestedModel !== model.id && input.roleId !== "reviewer") throw new UhpError(`UHP reported a model substitution inconsistent with request '${model.id}'`);
       if (modelFallback && actualModel === model.id && input.roleId !== "reviewer") throw new UhpError("UHP marked the requested model as substituted but returned that same model");
       const reportedHarnessId = responseMetadata.harness_id;
       if (reportedHarnessId !== undefined && typeof reportedHarnessId !== "string") throw new UhpError("UHP response reported an invalid selected harness");
@@ -245,6 +265,7 @@ export class UhpClient implements UhpAdapter {
         status,
         outputText: extractOutputText(responseObject),
         ...(actualModel ? { actualModel } : {}), requestedModel: model.id, modelFallback,
+        ...(actualModelStatus ? { actualModelStatus } : {}), ...(cliInvocation ? { cliInvocation } : {}),
         // This is the validated explicit request choice. UHP does not require a response harness
         // field when the request names one; preserve any server-reported value separately.
         selectedHarnessId: harness.id,

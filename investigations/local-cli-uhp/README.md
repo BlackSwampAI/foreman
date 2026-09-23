@@ -10,12 +10,13 @@ set `CLAUDE_CONFIG_DIR` to an already authenticated Claude Code config
 directory and/or `CODEX_HOME` to an already authenticated Codex home. The
 server passes that existing directory to the CLI as-is. It never reads or
 copies credentials. Harness discovery advertises only configured directories.
-Claude is advertised only when its auth directory, explicit model, pinned
+Each harness is advertised only when its auth directory, explicit model, pinned
 source repository, and bubblewrap executable are configured. Claude tasks
 must use the bridge-specific pinned-workspace flow below; the older generic
 no-tools smoke describes historical protocol evidence and is no longer a
-supported Claude task path. Codex continues to use its read-only sandbox and
-ephemeral mode. A UHP request cannot supply an arbitrary host cwd.
+supported Claude task path. Codex Workers use `workspace-write` and ephemeral
+mode inside the pinned, isolated workspace; Codex Reviewers use read-only mode
+in a fresh context. A UHP request cannot supply an arbitrary host cwd.
 
 HarnessRouter's per-session `CLAUDE_CONFIG_DIR` and `CODEX_HOME` are credential
 stores; creating fresh empty per-session directories there would discard the
@@ -41,13 +42,15 @@ CLAUDE_CONFIG_DIR="$HOME/.claude" CLAUDE_MODEL="<supported Claude model>" LOCAL_
 ```
 
 Set `CODEX_HOME` and `CODEX_MODEL` similarly to expose Codex. The bridge passes
-the explicit configured model using the CLI's `--model` argument. A successful
-response requires the CLI output to report a concrete actual model and session
-ID; literal `undefined` does not qualify. If the CLI reports a different model,
+the explicit configured model using the CLI's `--model` argument. A completed
+Codex Worker response requires a reported session ID, but may leave actual
+model unavailable when its standard JSON events omit that field. The exact
+CLI invocation and requested model remain distinct from any observed model.
+Reviewers require an authoritative actual model and session ID. If the CLI reports a different model,
 the response marks `metadata.model_fallback` and records the requested model.
 Codex runs with `--ignore-user-config` to retain its existing authentication
 while ignoring `config.toml` provider overrides, and `--skip-git-repo-check`
-because each run starts in a fresh temporary directory.
+because the seeded workspace is a Git snapshot without `.git` metadata.
 Usage is omitted unless the CLI reports it; Claude cached input counts include
 cache reads and exclude cache creation. The child gets only a small runtime
 environment allowlist, including `PATH` and `HOME`; provider API keys and
@@ -164,6 +167,17 @@ for review, not an automatic acceptance. Sanitized machine evidence and a
 readable diff are in `evidence/actual-workspace-smoke.json` and
 `evidence/actual-workspace-smoke.md`. The failed first attempt is recorded
 in `evidence/initial-boundary-failure.json`.
+
+The later [Codex Worker proof](../../docs/codex-worker-smoke.md) has 23 passing
+deterministic bridge fixtures. They verify assigned-workspace edits, an outside
+sentinel that neither Node nor the shell can read or change, a read-only host
+login mount, and Foreman's snapshot/scope/validation path. Its one live UHP
+submission invoked Codex once and failed before any session or JSON events;
+response `resp_94f2495f-43f6-4d22-b401-463266d9e5db` has no measured usage.
+The resulting snapshot is incomplete and the README is unchanged. Foreman did
+not run scope verification or validation. The [captured evidence](evidence/actual-codex-worker-smoke.json)
+keeps the requested `gpt-6-sol` separate from the unavailable actual model and
+records the durable no-retry lock.
 
 Claude session continuation remains unimplemented. Codex has no verified
 actual-model signal. The pinned HarnessRouter runtime still has no verified

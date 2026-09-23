@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { posix } from 'node:path';
 import { TextDecoder } from 'node:util';
+import { createRequire } from 'node:module';
 
 const VERSION = '2026-09-12';
 const utf8 = new TextDecoder('utf-8', { fatal: true });
@@ -61,7 +62,7 @@ function executableConfigured(bin) {
   if (bin.includes('/')) { try { accessSync(bin, fsConstants.X_OK); return true; } catch { return false; } }
   return (process.env.PATH ?? '').split(':').some(dir => { try { accessSync(join(dir, bin), fsConstants.X_OK); return true; } catch { return false; } });
 }
-function configured(h) { return !!h?.authDir && typeof h.model === 'string' && h.model.trim() !== '' && h.model.trim().toLowerCase() !== 'undefined' && (h.id !== 'claude-code' || (!!SOURCE_REPO && executableConfigured(BWRAP))); }
+function configured(h) { return !!h?.authDir && typeof h.model === 'string' && h.model.trim() !== '' && h.model.trim().toLowerCase() !== 'undefined' && (!!SOURCE_REPO && executableConfigured(BWRAP)); }
 function outputText(r) { return typeof r.output_text === 'string' ? r.output_text : ''; }
 function reportedModel(value) { return typeof value === 'string' && value.trim() !== '' && value.trim().toLowerCase() !== 'undefined' ? value.trim() : undefined; }
 
@@ -89,13 +90,13 @@ function parseCodex(text) {
   const usage = done?.usage;
   const toolTypes = new Set(['agent_message','reasoning','user_message']);
   const mutationAttempted = events.some(e => e.type === 'tool_call' || (e.item?.type && !toolTypes.has(e.item.type)));
-  return { text: messages.join('\n'), model: reportedModel(done?.model) ?? reportedModel(thread?.model), session: thread?.thread_id, isError: !!events.find(e => e.type === 'turn.failed' || e.type === 'error'), mutationAttempted, malformedOutput, unrecognizedOutput, usage: usage && typeof usage === 'object' ? usage : undefined };
+  return { text: messages.join('\n'), model: reportedModel(done?.model) ?? reportedModel(thread?.model), session: thread?.thread_id, turnCompleted: !!done, isError: !!events.find(e => e.type === 'turn.failed' || e.type === 'error'), mutationAttempted, malformedOutput, unrecognizedOutput, usage: usage && typeof usage === 'object' ? usage : undefined };
 }
 function cliArgs(kind, model, timeout, maxStep, reviewer = false) {
   if (kind === 'claude') return reviewer
     ? ['-p', '--output-format', 'stream-json', '--verbose', '--model', model, '--max-turns', String(Math.min(maxStep, 2)), '--safe-mode', '--restricted', '--strict-mcp-config', '--permission-mode', 'plan', '--tools', '']
     : ['-p', '--output-format', 'stream-json', '--verbose', '--model', model, '--max-turns', String(Math.min(maxStep, 10)), '--restricted', '--strict-mcp-config', '--permission-mode', 'acceptEdits', '--tools', 'Read,Edit,Write'];
-  return ['exec', '--json', '--ephemeral', '--sandbox', 'read-only', '--ignore-user-config', ...(reviewer ? ['--ignore-rules'] : []), '--skip-git-repo-check', '--model', model, '-'];
+  return ['--ask-for-approval', 'never', 'exec', '--json', '--ephemeral', '--sandbox', reviewer ? 'read-only' : 'workspace-write', '--ignore-user-config', ...(reviewer ? ['--ignore-rules'] : []), '--skip-git-repo-check', '--model', model, '-'];
 }
 
 function validRelativePath(path) {
@@ -347,6 +348,40 @@ async function runClaudeSandboxed(ws, args, env, prompt) {
   ws.executionStage = 'cli_execution';
   child.stdin.end(prompt); return child;
 }
+async function runCodexWorkspaceSandboxed(ws, args, env, prompt, codex) {
+  ws.executionStage = 'resolve_cli';
+  ws.executionStage = 'resolve_auth';
+  ws.authDir = await realpath(HARNESS.codex.authDir);
+  ws.executionStage = 'boundary_probe';
+  const probe = await proveBoundary(ws);
+  ws.boundary = { ...probe, harness: 'codex-cli', workspace_writable: true, host_auth_mounted_read_only: true };
+  ws.executionStage = 'runtime_mount';
+  const shellBinary = await realpath('/bin/sh');
+  const shellDependencies = (await runtimeFiles(shellBinary)).filter(path => path !== shellBinary);
+  const runtime = [...new Set([...(await runtimeFiles(codex.binary)), ...shellDependencies])];
+  const nodePath = dirname(await realpath(process.execPath));
+  const bargs = [...bwrapBaseArgs(ws, runtime), '--dir', '/usr', '--ro-bind', '/usr/bin', '/usr/bin', '--symlink', 'usr/bin', '/bin', ...(codex.vendorRoot ? ['--dir', '/opt/codex-vendor', '--ro-bind', codex.vendorRoot, '/opt/codex-vendor'] : ['--ro-bind', codex.binary, '/opt/codex']), '--', codex.sandboxExecutable, ...args];
+  const sandboxEnv = Object.fromEntries(Object.entries(env).filter(([name]) => ['LANG','LC_ALL','TERM','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY'].includes(name)));
+  ws.executionStage = 'cli_spawn';
+  const child = spawn(BWRAP, bargs, { cwd: ROOT, env: { ...sandboxEnv, PATH: `/usr/bin:/bin:${nodePath}`, HOME: '/tmp/cli-home', CODEX_HOME: '/auth' }, shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  ws.executionStage = 'cli_execution';
+  child.stdin.end(prompt); return child;
+}
+async function resolveCodexRuntime(name) {
+  const launcher = await resolveBinary(name);
+  if (launcher.endsWith('/codex.js')) {
+    const require = createRequire(launcher);
+    const linuxPackage = process.arch === 'arm64' ? '@openai/codex-linux-arm64' : process.arch === 'x64' ? '@openai/codex-linux-x64' : undefined;
+    const triple = process.arch === 'arm64' ? 'aarch64-unknown-linux-musl' : process.arch === 'x64' ? 'x86_64-unknown-linux-musl' : undefined;
+    if (!linuxPackage || process.platform !== 'linux') throw Error('Codex CLI platform package is unsupported by the workspace sandbox');
+    const packageJson = require.resolve(`${linuxPackage}/package.json`);
+    const vendorRoot = resolve(dirname(packageJson), 'vendor');
+    const binary = join(vendorRoot, triple, 'bin', 'codex');
+    await access(binary, fsConstants.X_OK);
+    return { binary: await realpath(binary), vendorRoot: await realpath(vendorRoot), sandboxExecutable: `/opt/codex-vendor/${triple}/bin/codex` };
+  }
+  return { binary: launcher, sandboxExecutable: '/opt/codex' };
+}
 async function preflightClaudeRuntime() {
   if (!HARNESS.claude.authDir) throw Error('CLAUDE_CONFIG_DIR is required for the runtime preflight');
   const dir = join(ROOT, `preflight-${randomUUID()}`); await mkdir(dir, { recursive: false, mode: 0o700 });
@@ -362,6 +397,31 @@ async function preflightClaudeRuntime() {
     return result.stdout.trim().split(/\r?\n/)[0].slice(0, 200);
   } finally { await rm(dir, { recursive: true, force: true }); }
 }
+async function preflightCodexRuntime() {
+  if (!HARNESS.codex.authDir) throw Error('CODEX_HOME is required for the Codex runtime preflight');
+  const dir = join(ROOT, `codex-preflight-${randomUUID()}`); await mkdir(dir, { recursive: false, mode: 0o700 });
+  const ws = { id: `ws_${randomUUID()}`, dir, authDir: await realpath(HARNESS.codex.authDir) };
+  try {
+    const codex = await resolveCodexRuntime(HARNESS.codex.bin);
+    const shellBinary = await realpath('/bin/sh');
+    const shellDependencies = (await runtimeFiles(shellBinary)).filter(path => path !== shellBinary);
+    const runtime = [...new Set([...(await runtimeFiles(codex.binary)), ...shellDependencies])];
+    const args = [...bwrapBaseArgs(ws, runtime), '--dir', '/usr', '--ro-bind', '/usr/bin', '/usr/bin', '--symlink', 'usr/bin', '/bin', ...(codex.vendorRoot ? ['--dir', '/opt/codex-vendor', '--ro-bind', codex.vendorRoot, '/opt/codex-vendor'] : ['--ro-bind', codex.binary, '/opt/codex']), '--', codex.sandboxExecutable, '--version'];
+    const env = { PATH: `/usr/bin:/bin:${dirname(await realpath(process.execPath))}`, HOME: '/tmp/cli-home', CODEX_HOME: '/auth' };
+    const result = await spawnCaptured(BWRAP, args, env, 10_000);
+    if (result.code !== 0) throw Error('Codex isolated runtime preflight failed');
+    const loginArgs = [...args.slice(0, -3), '--', codex.sandboxExecutable, 'login', 'status'];
+    const login = await spawnCaptured(BWRAP, loginArgs, env, 10_000);
+    const loginStatus = `${login.stdout} ${typeof login.error === 'string' ? login.error : ''}`.toLowerCase();
+    if (login.code !== 0) throw Error(`Codex isolated login status exited with code ${login.code ?? 'unknown'}`);
+    if (/not logged in|not authenticated|no login/.test(loginStatus)) throw Error('Codex isolated login status reports no authenticated host login');
+    if (!/logged in|authenticated/.test(loginStatus)) throw Error('Codex isolated login status output was not recognized');
+    const workerHelpArgs = [...args.slice(0, -3), '--', codex.sandboxExecutable, '--ask-for-approval', 'never', 'exec', '--json', '--ephemeral', '--sandbox', 'workspace-write', '--ignore-user-config', '--skip-git-repo-check', '--model', HARNESS.codex.model, '--help'];
+    const workerHelp = await spawnCaptured(BWRAP, workerHelpArgs, env, 10_000);
+    if (workerHelp.code !== 0) throw Error('Codex Worker invocation flags are rejected by the isolated CLI');
+    return `Codex isolated runtime ${result.stdout.trim().split(/\r?\n/)[0].slice(0, 120)}; host login readable; Worker flags accepted`;
+  } finally { await rm(dir, { recursive: true, force: true }); }
+}
 async function resolveBinary(name) {
   if (name.includes('/')) return realpath(name);
   for (const dir of (process.env.PATH ?? '').split(':')) {
@@ -374,25 +434,31 @@ async function resolveBinary(name) {
 async function runTask(record, prompt) {
   const h = cliFor(record.metadata.harness_id), kind = h.id === 'claude-code' ? 'claude' : 'codex-cli';
   const reviewer = record.metadata.foreman_review_mode === 'read_only';
-  const ws = !reviewer && kind === 'claude' ? workspaces.get(record.metadata.workspace_id) : undefined;
+  const ws = !reviewer && record.metadata.workspace_id ? workspaces.get(record.metadata.workspace_id) : undefined;
   const work = ws?.dir ?? join(ROOT, reviewer ? `review-${randomUUID()}` : record.id);
-  if (!ws && kind === 'claude' && !reviewer) throw Error('Claude workspace binding is unavailable');
+  if (!ws && !reviewer) throw Error('Worker workspace binding is unavailable');
   if (!ws) await mkdir(work, { recursive: false, mode: 0o700 });
   if (reviewer) { tasks.get(record.id).reviewerWorkDir = work; await chmod(work, 0o500); record.metadata.reviewer_boundary = { project_workspace_mounted: false, workspace_writable: false, claude_tool_allowlist_empty: kind === 'claude', codex_sandbox: kind === 'codex-cli' ? 'read-only' : undefined, codex_mutation_tools: kind === 'codex-cli' ? 'blocked_by_read_only_sandbox' : undefined }; }
   const inheritedNames = new Set(['PATH','HOME','USER','LOGNAME','LANG','LC_ALL','TERM','TMPDIR','TMP','TEMP','XDG_RUNTIME_DIR','SSL_CERT_FILE','SSL_CERT_DIR','NODE_EXTRA_CA_CERTS','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY']);
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => inheritedNames.has(name)));
-  Object.assign(env, kind === 'claude' ? { CLAUDE_CONFIG_DIR: '/auth' } : { CODEX_HOME: h.authDir });
+  Object.assign(env, kind === 'claude' ? { CLAUDE_CONFIG_DIR: '/auth' } : { CODEX_HOME: reviewer ? h.authDir : '/auth' });
   const args = cliArgs(kind, record.requested_model, record.timeout_seconds, record.max_step, reviewer);
   const input = reviewer ? reviewerPrompt(prompt, record.metadata.review_evidence) : prompt;
   const reviewerState = reviewer ? { dir: work, authDir: kind === 'claude' ? await realpath(h.authDir) : undefined } : undefined;
+  let codexRuntime;
+  if (kind === 'codex-cli' && !reviewer) {
+    codexRuntime = await resolveCodexRuntime(h.bin);
+    record.metadata.cli_invocation = { executable: codexRuntime.sandboxExecutable, host_executable: codexRuntime.binary, args: [...args] };
+    record.metadata.actual_model_status = 'unavailable';
+  }
   const child = reviewer
     ? kind === 'claude' ? await runReviewerSandboxed(reviewerState, args, env, input) : spawn(h.bin, args, { cwd: work, env, shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
-    : kind === 'claude' ? await runClaudeSandboxed(ws, args, env, prompt) : spawn(h.bin, args, { cwd: work, env, shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    : kind === 'claude' ? await runClaudeSandboxed(ws, args, env, prompt) : await runCodexWorkspaceSandboxed(ws, args, env, prompt, codexRuntime);
   if (ws?.boundary) record.metadata.execution_boundary = ws.boundary;
   if (reviewerState?.boundary) record.metadata.reviewer_boundary = reviewerState.boundary;
   const active = tasks.get(record.id); active.child = child;
-  let out = '', stdoutBytes = 0, reviewerOutputOverflow = false;
-  child.stdout.setEncoding('utf8'); child.stdout.on('data', chunk => { stdoutBytes += Buffer.byteLength(chunk); if (reviewer && stdoutBytes > MAX_OUTPUT * 3 && !reviewerOutputOverflow) { reviewerOutputOverflow = true; child.kill('SIGTERM'); } out = (out + chunk).slice(-MAX_OUTPUT * 3); });
+  let out = '', stdoutBytes = 0, cliOutputOverflow = false;
+  child.stdout.setEncoding('utf8'); child.stdout.on('data', chunk => { stdoutBytes += Buffer.byteLength(chunk); if ((reviewer || kind === 'codex-cli') && stdoutBytes > MAX_OUTPUT * 3 && !cliOutputOverflow) { cliOutputOverflow = true; child.kill('SIGTERM'); } out = (out + chunk).slice(-MAX_OUTPUT * 3); });
   child.stderr.on('data', () => {}); // Drain without retaining or exposing stderr, which may contain credentials.
   child.stdin.on('error', () => {});
   let spawnError;
@@ -404,13 +470,19 @@ async function runTask(record, prompt) {
     child.once('close', (code, signal) => resolveExit({ code, signal }));
   });
   clearTimeout(timer); if (killTimer) clearTimeout(killTimer);
+  if (kind === 'codex-cli' && !reviewer) {
+    record.metadata.cli_exit = { exit_code: Number.isInteger(exit.code) ? exit.code : null, signal: exit.signal ?? null };
+    record.metadata.execution_stage = ws.executionStage ?? 'cli_execution';
+  }
   let parsed = kind === 'claude' ? parseClaude(out) : parseCodex(out);
   if (parsed.text.length > MAX_OUTPUT) parsed.text = parsed.text.slice(0, MAX_OUTPUT);
-  const missingReportedIdentity = !parsed.model || !parsed.session;
-  const reviewerFailed = reviewer && (parsed.mutationAttempted || parsed.malformedOutput || parsed.unrecognizedOutput || reviewerOutputOverflow || parsed.isError || missingReportedIdentity || exit.code !== 0 || active.cancelRequested);
-  record.status = active.cancelRequested ? 'cancelled' : spawnError ? 'failed' : parsed.isError || missingReportedIdentity || reviewerFailed ? 'failed' : exit.code === 0 ? 'completed' : exit.signal === 'SIGTERM' ? 'incomplete' : 'failed';
+  const missingReportedIdentity = !parsed.session || (kind === 'claude' && !parsed.model) || (reviewer && kind === 'codex-cli' && !parsed.model);
+  const reviewerFailed = reviewer && (parsed.mutationAttempted || parsed.malformedOutput || parsed.unrecognizedOutput || cliOutputOverflow || parsed.isError || missingReportedIdentity || exit.code !== 0 || active.cancelRequested);
+  const invalidCodexStream = kind === 'codex-cli' && (parsed.malformedOutput || parsed.unrecognizedOutput || cliOutputOverflow || (!reviewer && !parsed.turnCompleted));
+  record.status = active.cancelRequested ? 'cancelled' : spawnError ? 'failed' : parsed.isError || invalidCodexStream || missingReportedIdentity || reviewerFailed ? 'failed' : exit.code === 0 ? 'completed' : exit.signal === 'SIGTERM' ? 'incomplete' : 'failed';
   record.output_text = parsed.text;
   if (parsed.model) record.model = parsed.model;
+  if (kind === 'codex-cli' && !reviewer) record.metadata.actual_model_status = parsed.model ? 'observed' : 'unavailable';
   if (parsed.session) { record.session_id = parsed.session; record.metadata.session_id = parsed.session; }
   if (parsed.usage) record.usage = normalizeCliUsage(kind, parsed.usage);
   if (kind === 'codex-cli') record.metadata.ignored_fields = ['max_step'];
@@ -418,8 +490,9 @@ async function runTask(record, prompt) {
     record.metadata.requested_model = record.requested_model;
     record.metadata.model_fallback = true;
   }
-  if (reviewer) { record.metadata.foreman_review_mode = 'read_only'; record.metadata.reviewer_mutation_attempted = parsed.mutationAttempted === true; record.metadata.reviewer_output_overflow = reviewerOutputOverflow; record.metadata.reviewer_validation = record.metadata.review_evidence.controllerValidation; }
-  if (record.status !== 'completed') record.error = { message: spawnError ? 'CLI could not be started' : reviewer && parsed.mutationAttempted ? 'Reviewer attempted to use a tool or mutate state' : reviewerOutputOverflow ? 'Reviewer output exceeded the bounded stream limit' : reviewer && (parsed.malformedOutput || parsed.unrecognizedOutput) ? 'Reviewer output contained malformed or unrecognized stream records' : parsed.isError ? kind === 'claude' ? 'Claude Code reported an unsuccessful task' : 'Codex CLI reported an unsuccessful task' : missingReportedIdentity ? 'CLI did not report an actual model and session id' : active.cancelRequested ? 'CLI task was cancelled' : exit.signal ? `CLI terminated by ${exit.signal}` : 'CLI exited unsuccessfully' };
+  if (reviewer) { record.metadata.foreman_review_mode = 'read_only'; record.metadata.reviewer_mutation_attempted = parsed.mutationAttempted === true; record.metadata.reviewer_output_overflow = cliOutputOverflow; record.metadata.reviewer_validation = record.metadata.review_evidence.controllerValidation; }
+  if (kind === 'codex-cli' && !reviewer) record.metadata.cli_output_overflow = cliOutputOverflow;
+  if (record.status !== 'completed') record.error = { message: spawnError ? 'CLI could not be started' : reviewer && parsed.mutationAttempted ? 'Reviewer attempted to use a tool or mutate state' : cliOutputOverflow ? 'CLI output exceeded the bounded stream limit' : (reviewer || kind === 'codex-cli') && (parsed.malformedOutput || parsed.unrecognizedOutput) ? 'CLI output contained malformed or unrecognized stream records' : kind === 'codex-cli' && !reviewer && !parsed.session ? exit.code !== 0 || exit.signal ? 'Codex CLI exited before reporting a session id' : 'Codex CLI did not report a session id' : kind === 'codex-cli' && !reviewer && !parsed.turnCompleted ? 'Codex CLI exited without completing a turn' : parsed.isError ? kind === 'claude' ? 'Claude Code reported an unsuccessful task' : 'Codex CLI reported an unsuccessful task' : missingReportedIdentity ? 'CLI did not report an actual model and session id' : active.cancelRequested ? 'CLI task was cancelled' : exit.signal ? `CLI terminated by ${exit.signal}` : 'CLI exited unsuccessfully' };
   await persist();
   active.resolve?.();
   if (reviewer) { await rm(work, { recursive: true, force: true }); tasks.get(record.id).reviewerWorkDir = undefined; }
@@ -482,7 +555,7 @@ const server = createServer(async (req, res) => {
         catch { return send(res, 400, { error: { code: 'review_evidence_invalid' } }); }
         if (workspaceId) return send(res, 400, { error: { code: 'review_workspace_forbidden' } });
       }
-      if (!reviewer && h.id === 'claude-code' && (!workspaceId || !workspaces.has(workspaceId))) return send(res, 409, { error: { code: 'workspace_required', message: 'Create a pinned bridge workspace and submit its workspace_id in metadata' } });
+      if (!reviewer && (!workspaceId || !workspaces.has(workspaceId))) return send(res, 409, { error: { code: 'workspace_required', message: 'Create a pinned bridge workspace and submit its workspace_id in metadata' } });
       if (reviewer && !['claude-code','codex-cli'].includes(h.id)) return send(res, 400, { error: { code: 'review_harness_unsupported' } });
       const ws = reviewer ? undefined : workspaceId ? workspaces.get(workspaceId) : undefined;
       if (ws?.responseId) return send(res, 409, { error: { code: 'workspace_already_used' } });
@@ -512,6 +585,8 @@ function reqClose(res, fn) { res.on('close', fn); }
 await mkdir(ROOT, { recursive: true, mode: 0o700 });
 if (process.argv[2] === '--preflight-claude-runtime') {
   console.log(await preflightClaudeRuntime());
+} else if (process.argv[2] === '--preflight-codex-runtime') {
+  console.log(await preflightCodexRuntime());
 } else {
   await load();
   server.listen(PORT, '127.0.0.1', () => console.log(`experimental local CLI UHP listening on 127.0.0.1:${PORT}`));
