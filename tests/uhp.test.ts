@@ -41,6 +41,20 @@ describe("UHP adapter", () => {
     expect(server.requests.some((request) => request.path === "/v1/responses/resp_fixture" && request.method === "GET")).toBe(true);
   });
 
+  it("requires the read-only Reviewer capability and persists the bounded evidence mode", async () => {
+    const unsupported = await fixture();
+    const unsupportedClient = new UhpClient({ baseUrl: unsupported.baseUrl, harnessId: "chrn_fixture", model: "model-fixture" });
+    await expect(unsupportedClient.submit({ submissionId: "s", assignmentId: "a", runId: "r", roleId: "reviewer", taskId: "t", projectId: "p", prompt: "Review", config: { reviewMode: "read_only", reviewEvidence: { reviewDiff: "diff" } }, idempotencyKey: "key" })).rejects.toThrow("read-only Reviewer capability");
+    expect(unsupported.executionCount).toBe(0);
+
+    const evidence = { validation: "verified_by_foreman_git_comparison", scopeVerified: true, baseCommit: "a".repeat(40), allowedScope: ["README.md"], workerResponseId: "resp_worker", reviewDiff: "bounded diff", controllerValidation: { passed: true, observations: [{ name: "check", passed: true }] } };
+    const server = await fixture({ capabilities: { readOnlyReviewer: true } });
+    const client = new UhpClient({ baseUrl: server.baseUrl, harnessId: "chrn_fixture", model: "model-fixture" });
+    const result = await client.submit({ submissionId: "s", assignmentId: "a", runId: "r", roleId: "reviewer", taskId: "t", projectId: "p", prompt: "Read-only review", config: { reviewMode: "read_only", reviewEvidence: evidence }, idempotencyKey: "key" });
+    expect(result).toMatchObject({ status: "completed", actualModel: "model-fixture", responseId: "resp_fixture", sessionId: "hsess_fixture", reviewerExecution: { mode: "read_only", mutationAttempted: false, validation: evidence.controllerValidation } });
+    expect(JSON.parse(server.requests.find((request) => request.path === "/v1/responses")?.body ?? "{}")).toMatchObject({ input: "Read-only review", metadata: { foreman_role_id: "reviewer", foreman_review_mode: "read_only", review_evidence: evidence } });
+  });
+
   it("replays a duplicate idempotency key without executing the task again", async () => {
     const server = await fixture({ uniqueResponseIds: true });
     const client = new UhpClient({ baseUrl: server.baseUrl, harnessId: "chrn_fixture", model: "model-fixture" });

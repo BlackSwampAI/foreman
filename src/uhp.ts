@@ -40,6 +40,7 @@ export interface UhpSubmitResult {
   usage?: UhpUsage | null;
   runtimeMs?: number;
   response?: UhpResponse;
+  reviewerExecution?: { mode?: string; mutationAttempted?: boolean; validation?: unknown };
 }
 
 export interface UhpUsage { inputTokens?: number; outputTokens?: number; totalTokens?: number; cachedInputTokens?: number; requestCount?: number }
@@ -161,6 +162,7 @@ export class UhpClient implements UhpAdapter {
     const discovery = await this.discover();
     if (discovery.capabilities.idempotency !== true) throw new UhpError("UHP server does not advertise idempotency; refusing a non-idempotent task submission");
     if (discovery.capabilities.streaming !== true) throw new UhpError("UHP server does not advertise streaming; refusing a task submission that requires progress and live cancellation");
+    if (input.roleId === "reviewer" && discovery.capabilities.readOnlyReviewer !== true) throw new UhpError("UHP server does not advertise the read-only Reviewer capability");
     if (!input.idempotencyKey.trim()) throw new Error("idempotencyKey is required");
     const configHarness = input.config.harnessId ?? this.options.harnessId;
     const configModel = input.config.model ?? this.options.model;
@@ -171,7 +173,7 @@ export class UhpClient implements UhpAdapter {
     const model = modelId ? discovery.harnessModels[harness.id]?.find((candidate) => candidate.id === modelId && candidate.available !== false) : undefined;
     if (!model) throw new UhpError(modelId ? `Configured UHP model '${modelId}' is unavailable for harness '${harness.id}'` : "UHP model must be explicitly configured for this submission");
 
-    const timeoutSeconds = boundedInteger(configNumber(input.config.timeoutSeconds, harness.timeoutSeconds, 300), 1, 600, "UHP timeoutSeconds");
+      const timeoutSeconds = boundedInteger(configNumber(input.config.timeoutSeconds, harness.timeoutSeconds, 300), 1, 600, "UHP timeoutSeconds");
     const timeoutMs = boundedInteger(this.options.timeoutMs ?? 10_000, 1_000, 120_000, "UHP request timeoutMs");
     const maxStep = optionalBounded(input.config.maxStep, harness.maxStep, 1000, "maxStep") ?? 100;
     const controller = new AbortController();
@@ -179,6 +181,8 @@ export class UhpClient implements UhpAdapter {
     const timer = setTimeout(() => controller.abort(new Error("UHP request inactivity timeout")), timeoutMs);
     try {
       const previousResponseId = input.config.previousResponseId;
+      const reviewEvidence = input.config.reviewEvidence;
+      if (input.roleId === "reviewer" && (input.config.workspaceId !== undefined || input.config.previousResponseId !== undefined || input.config.reviewMode !== "read_only" || !reviewEvidence || typeof reviewEvidence !== "object")) throw new UhpError("Reviewer requires a fresh read-only request with controller evidence and no workspace");
       if (previousResponseId !== undefined && (typeof previousResponseId !== "string" || !previousResponseId.trim())) throw new Error("config.previousResponseId must be a non-empty response id when provided");
       if (typeof previousResponseId === "string" && discovery.capabilities.sessions !== true) throw new UhpError("UHP server does not advertise sessions; refusing response continuation");
       const response = await this.fetchImpl(this.url("v1/responses"), {
@@ -187,7 +191,7 @@ export class UhpClient implements UhpAdapter {
         body: JSON.stringify({
           input: input.prompt,
           model: model.id,
-          metadata: { harness_id: harness.id, foreman_submission_id: input.submissionId, foreman_assignment_id: input.assignmentId, foreman_run_id: input.runId, foreman_role_id: input.roleId, foreman_task_id: input.taskId, foreman_project_id: input.projectId, ...(input.roleId==='worker'&&typeof input.config.workspaceId==='string'?{workspace_id:input.config.workspaceId}:{}) },
+          metadata: { harness_id: harness.id, foreman_submission_id: input.submissionId, foreman_assignment_id: input.assignmentId, foreman_run_id: input.runId, foreman_role_id: input.roleId, foreman_task_id: input.taskId, foreman_project_id: input.projectId, ...(input.roleId==='worker'&&typeof input.config.workspaceId==='string'?{workspace_id:input.config.workspaceId}:{}), ...(input.roleId==='reviewer'?{foreman_review_mode:'read_only',review_evidence:reviewEvidence}:{}) },
           stream: true,
           store: true,
           timeout_seconds: timeoutSeconds,
@@ -211,21 +215,33 @@ export class UhpClient implements UhpAdapter {
       const responseObject = status === "completed" ? final : await this.retrieve(final.id);
       const actualModel = typeof responseObject.model === "string" ? responseObject.model : undefined;
       const responseMetadata = responseObject.metadata && typeof responseObject.metadata === "object" ? responseObject.metadata as Record<string, unknown> : {};
+      const sessionId = getSessionId(final) ?? getSessionId(responseObject);
+      const reviewerExecution = input.roleId === "reviewer" ? {
+        mode: typeof responseMetadata.foreman_review_mode === "string" ? responseMetadata.foreman_review_mode : undefined,
+        mutationAttempted: typeof responseMetadata.reviewer_mutation_attempted === "boolean" ? responseMetadata.reviewer_mutation_attempted : undefined,
+        validation: responseMetadata.reviewer_validation,
+      } : undefined;
+      if (input.roleId === "reviewer" && status !== "completed") return {
+        externalId: final.id, responseId: final.id, ...(sessionId ? { sessionId } : {}), status,
+        ...(actualModel ? { actualModel } : {}), requestedModel: model.id,
+        selectedHarnessId: harness.id, outputText: extractOutputText(responseObject),
+        result: responseObject.error ?? responseObject,
+        reviewerExecution,
+      };
       const modelFallback = responseMetadata.model_fallback === true || (typeof responseMetadata.requested_model === "string" && actualModel !== responseMetadata.requested_model);
-      if (!actualModel) throw new UhpError("UHP response did not report the actual model");
-      if (actualModel && actualModel !== model.id && !modelFallback) throw new UhpError(`UHP ran model '${actualModel}' although '${model.id}' was requested`);
-      if (modelFallback && responseMetadata.requested_model !== model.id) throw new UhpError(`UHP reported a model substitution inconsistent with request '${model.id}'`);
-      if (modelFallback && actualModel === model.id) throw new UhpError("UHP marked the requested model as substituted but returned that same model");
+      if (!actualModel && input.roleId !== "reviewer") throw new UhpError("UHP response did not report the actual model");
+      if (actualModel && actualModel !== model.id && !modelFallback && input.roleId !== "reviewer") throw new UhpError(`UHP ran model '${actualModel}' although '${model.id}' was requested`);
+      if (modelFallback && responseMetadata.requested_model !== model.id && input.roleId !== "reviewer") throw new UhpError(`UHP reported a model substitution inconsistent with request '${model.id}'`);
+      if (modelFallback && actualModel === model.id && input.roleId !== "reviewer") throw new UhpError("UHP marked the requested model as substituted but returned that same model");
       const reportedHarnessId = responseMetadata.harness_id;
       if (reportedHarnessId !== undefined && typeof reportedHarnessId !== "string") throw new UhpError("UHP response reported an invalid selected harness");
-      if (typeof reportedHarnessId === "string" && reportedHarnessId !== harness.id) throw new UhpError(`UHP ran harness '${reportedHarnessId}' although '${harness.id}' was requested`);
-      const sessionId = getSessionId(final) ?? getSessionId(responseObject);
-      if (!sessionId) throw new UhpError("UHP response did not report its session id");
+      if (typeof reportedHarnessId === "string" && reportedHarnessId !== harness.id && input.roleId !== "reviewer") throw new UhpError(`UHP ran harness '${reportedHarnessId}' although '${harness.id}' was requested`);
+      if (!sessionId && input.roleId !== "reviewer") throw new UhpError("UHP response did not report its session id");
       const ignoredFields = Array.isArray(responseMetadata.ignored_fields) ? responseMetadata.ignored_fields.filter((field): field is string => typeof field === "string") : [];
       return {
         externalId: final.id,
         responseId: final.id,
-        sessionId,
+        ...(sessionId ? { sessionId } : {}),
         status,
         outputText: extractOutputText(responseObject),
         ...(actualModel ? { actualModel } : {}), requestedModel: model.id, modelFallback,
@@ -239,6 +255,7 @@ export class UhpClient implements UhpAdapter {
         runtimeMs: Date.now() - startedAt,
         result: status === "completed" ? responseObject : responseObject.error ?? responseObject,
         response: responseObject,
+        ...(reviewerExecution ? { reviewerExecution } : {}),
       };
     } catch (error) {
       if (controller.signal.aborted) throw new UhpError("UHP request exceeded its inactivity timeout");

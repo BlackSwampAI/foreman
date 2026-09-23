@@ -68,3 +68,18 @@ evidence and the readable diff are in
 Session continuation remains unavailable, Codex still has no verified
 actual-model signal, and the pinned HarnessRouter runtime has no verified
 subscription-auth or full-workspace-snapshot proof.
+
+## Read-only Reviewer mode
+
+The external bridge now accepts an explicitly marked `role_id=reviewer`
+response only when Foreman supplies `metadata.foreman_review_mode="read_only"`
+and bounded `metadata.review_evidence` containing its verified base/scope,
+exact diff, and controller-observed validation. Reviewer tasks do not carry the
+Worker `workspace_id`; the bridge creates a fresh transient context with no
+checkout. Claude runs with an empty tool allowlist. Codex uses
+`--sandbox read-only`, which may permit read-only shell tools. It fails closed if the task fails, if the
+CLI omits its actual model or session identity, or if its output reports a tool
+or mutation attempt. This preserves the host subscription login boundary and
+does not add subscription credentials or a CLI backend to Foreman core.
+
+The one live Reviewer response is recorded in [actual-reviewer-smoke.json](../investigations/local-cli-uhp/evidence/actual-reviewer-smoke.json): requested `opus`, actual `claude-opus-5-5`, response `resp_2d3c9439-28df-460b-8537-7993f2b06540`, session `6cea9d31-a35f-480f-b50f-95cd4d94e665`, measured usage 2 input, 552 output, and 531 cached input tokens. It recommended the README-only change after observing that the diff stayed in scope and the sole configured SHA-256 validation passed; the rationale notes that the hash check verifies recorded bytes rather than content, so the diff was also inspected. The bridge proved the Claude boundary: no project workspace, empty tool allowlist, non-writable review workspace, and no mutation attempt. Exactly one bridge response was recorded. Acceptance remains `not_decided`; the run is `awaiting_approval` and human approval is null. The deterministic controller fixture remains a separate simulated Reviewer test. The live policy used one README SHA-256 command, which verifies recorded bytes rather than providing broader project-test coverage. Codex read-only mode was fixture-tested only; verified Codex actual-model reporting, Claude session continuation, and equivalent HarnessRouter behavior are not claimed.

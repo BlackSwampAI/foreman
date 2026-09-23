@@ -82,14 +82,14 @@ export async function startUhpFixture(options: UhpFixtureOptions = {}): Promise<
         }
         executionCount++;
         res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "UHP-Version": requestVersion });
-        const request = JSON.parse(body || "{}") as { metadata?: Record<string, string> };
+        const request = JSON.parse(body || "{}") as { metadata?: Record<string, any> };
         const suffix = options.uniqueResponseIds ? String(request.metadata?.foreman_assignment_id ?? request.metadata?.foreman_role_id ?? "fixture").replace(/[^a-zA-Z0-9_-]/g, "_") : "fixture";
         const responseId = `resp_${suffix}`;
         const sessionId = `hsess_${suffix}`;
         const metadata = request.metadata ?? {};
         const shouldHold = options.holdUntilCancel === true && (!options.holdRole || metadata.foreman_role_id === options.holdRole);
         const status = shouldHold ? "in_progress" : options.terminalStatus ?? "completed";
-        const responseMetadata = { session_id: sessionId, ...(options.omitResponseHarnessId ? {} : { harness_id: "chrn_fixture" }) };
+        const responseMetadata = { session_id: sessionId, ...(options.omitResponseHarnessId ? {} : { harness_id: "chrn_fixture" }), ...(metadata.foreman_review_mode === 'read_only' ? { foreman_review_mode: 'read_only', reviewer_mutation_attempted: false, reviewer_validation: metadata.review_evidence?.controllerValidation } : {}) };
         const response = { id: responseId, object: "response", status, model: "model-fixture", metadata: responseMetadata, usage: { input_tokens: 7, output_tokens: 3, total_tokens: 10, input_tokens_details: { cached_tokens: 2 } }, output_text: "fixture result", output: [{ type: "message", content: [{ type: "output_text", text: "fixture result" }] }] };
         const created = { type: "response.created", sequence_number: 0, response: { id: responseId, status: "in_progress", metadata: { session_id: sessionId } } };
         const terminalType = status === "cancelled" ? "response.failed" : `response.${status}`;

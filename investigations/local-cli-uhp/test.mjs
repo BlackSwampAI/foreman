@@ -11,6 +11,7 @@ const { UhpClient } = await import('../../src/uhp.ts');
 const { snapshotGitCommit } = await import('../../src/git-workspace.ts');
 const { verifyBridgeWorkspace, validateBridgeSnapshot } = await import('./workspace-verifier.mjs');
 const { createWorkspaceFixture, applyAllFileCaseChanges } = await import('./workspace-fixture.mjs');
+const { assertReviewerBounds, isPrepareOnly, REVIEWER_TASK_BOUNDS, REVIEWER_STREAM_INACTIVITY_TIMEOUT_MS, REVIEWER_BRIDGE_MAX_STEP } = await import('./reviewer-smoke-bounds.mjs');
 
 const here = dirname(fileURLToPath(import.meta.url));
 const dirs = [];
@@ -23,7 +24,7 @@ async function setup(t, options = {}) {
   const fixture = options.sourceRepo ? undefined : await createWorkspaceFixture();
   if (fixture) t.after(fixture.cleanup);
   const claude = await fixtureCli(dir, 'fake-claude', options.claudeBody ?? `import { appendFileSync } from 'node:fs'; const names=['ANTHROPIC_API_KEY','OPENAI_API_KEY','AWS_ACCESS_KEY_ID','GOOGLE_API_KEY','CLAUDE_CODE_USE_BEDROCK','CLAUDE_CODE_USE_VERTEX','CLAUDE_CODE_USE_FOUNDRY','CODEX_API_KEY']; const model=${JSON.stringify(options.claudeUndefined ? 'undefined' : 'claude-actual')}; const ix=process.argv.indexOf('--model'); appendFileSync('.fixture-cli-count', (names.some(name=>process.env[name]) ? 'c:provider-env-present' : 'c:provider-env-absent')+':model='+(ix<0?'missing':process.argv[ix+1])+'\\n'); process.stdin.resume(); process.stdin.on('end',()=>{ console.log(JSON.stringify({type:'system',subtype:'init',model,session_id:'claude-session'})); console.log(JSON.stringify({type:'result',subtype:${JSON.stringify(options.claudeIsError ? 'error_api_error' : 'success')},is_error:${options.claudeIsError === true},result:'bounded answer',model,session_id:'claude-session',usage:{input_tokens:7,output_tokens:3,cache_read_input_tokens:2,cache_creation_input_tokens:99}})); });`);
-  const codex = await fixtureCli(dir, 'fake-codex', `import { appendFileSync } from 'node:fs'; const ix=process.argv.indexOf('--model'); appendFileSync('.fixture-cli-count', (process.env.OPENAI_API_KEY ? 'x:provider-env-present' : 'x:provider-env-absent')+':model='+(ix<0?'missing':process.argv[ix+1])+':ignore-user-config='+process.argv.includes('--ignore-user-config')+':skip-git-repo-check='+process.argv.includes('--skip-git-repo-check')+'\\n'); process.stdin.resume(); process.stdin.on('end',()=>{ console.log(JSON.stringify({type:'thread.started',thread_id:'codex-thread'})); console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'codex bounded answer'}})); console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:4,output_tokens:2}})); });`);
+  const codex = await fixtureCli(dir, 'fake-codex', options.codexBody ?? `import { appendFileSync } from 'node:fs'; const ix=process.argv.indexOf('--model'); appendFileSync('.fixture-cli-count', (process.env.OPENAI_API_KEY ? 'x:provider-env-present' : 'x:provider-env-absent')+':model='+(ix<0?'missing':process.argv[ix+1])+':ignore-user-config='+process.argv.includes('--ignore-user-config')+':skip-git-repo-check='+process.argv.includes('--skip-git-repo-check')+'\\n'); process.stdin.resume(); process.stdin.on('end',()=>{ console.log(JSON.stringify({type:'thread.started',thread_id:'codex-thread'})); console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'codex bounded answer'}})); console.log(JSON.stringify({type:'turn.completed',${options.codexReportedModel ? `model:${JSON.stringify(options.codexReportedModel)},` : ''}usage:{input_tokens:4,output_tokens:2}})); ${options.codexExit ? 'process.exit(7);' : ''} });`);
   const port = 22000 + Math.floor(Math.random() * 20000);
   await mkdir(join(dir,'claude-auth')); await mkdir(join(dir,'codex-auth'));
   const env = { ...process.env, ANTHROPIC_API_KEY:'fixture-only-do-not-forward', OPENAI_API_KEY:'fixture-only-do-not-forward', AWS_ACCESS_KEY_ID:'fixture-only-do-not-forward', GOOGLE_API_KEY:'fixture-only-do-not-forward', CLAUDE_CODE_USE_BEDROCK:'1', CLAUDE_CODE_USE_VERTEX:'1', CLAUDE_CODE_USE_FOUNDRY:'1', CODEX_API_KEY:'fixture-only-do-not-forward', LOCAL_CLI_UHP_PORT: String(port), LOCAL_CLI_UHP_STATE: join(dir, 'state.json'), LOCAL_CLI_UHP_WORK: join(dir, 'work'), CLAUDE_CONFIG_DIR: join(dir, 'claude-auth'), CODEX_HOME: join(dir, 'codex-auth'), CLAUDE_MODEL: options.noClaudeModel ? '' : 'claude-requested', CODEX_MODEL: 'codex-requested', CLAUDE_BIN: options.claudeBin ?? (options.spawnError ? join(dir,'missing-cli') : claude), CODEX_BIN: codex, LOCAL_CLI_UHP_SOURCE_REPO: options.sourceRepo ?? fixture.repo, LOCAL_CLI_UHP_BWRAP: options.bwrapBin ?? 'bwrap' };
@@ -37,6 +38,11 @@ async function submit(base, harness, model, key, baseCommit, workspaceId) {
   const seeded=workspaceId ? {workspace_id:workspaceId} : await (await fetch(`${base}/extensions/foreman-workspace/v1/workspaces`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({base_commit:baseCommit})})).json();
   const r = await fetch(`${base}/v1/responses`, { method: 'POST', headers: { 'Content-Type':'application/json', Accept:'text/event-stream', 'UHP-Version':'2026-09-12', 'Idempotency-Key':key }, body: JSON.stringify({ input:'Say bounded answer', model, metadata:{harness_id:harness,workspace_id:seeded.workspace_id}, stream:true, timeout_seconds:5, max_step:1 }) });
   assert.equal(r.status,200); return (await r.text()).split('\n').filter(x=>x.startsWith('data: ')).map(x=>JSON.parse(x.slice(6)));
+}
+function reviewEvidence(overrides = {}) { return { validation:'verified_by_foreman_git_comparison', scopeVerified:true, baseCommit:'a'.repeat(40), workerResponseId:'resp_worker_fixture', allowedScope:['src/example.ts'], reviewDiff:'### modify: src/example.ts\n- before\n+ after\n', controllerValidation:{passed:true,policy:{requireAllChecksPass:true,configuredCheckCount:1},observations:[{name:'typecheck',command:'node',args:['--check','src/example.ts'],exitCode:0,signal:null,timedOut:false,output:'passed',outputTruncated:false,passed:true,startedAt:'2026-09-22T00:00:00Z',finishedAt:'2026-09-22T00:00:01Z'}]}, ...overrides }; }
+async function submitReview(base, harness, key, metadata = {}, input = 'Review this change for correctness and return a recommendation.') {
+  const r = await fetch(`${base}/v1/responses`, {method:'POST',headers:{'Content-Type':'application/json',Accept:'text/event-stream','UHP-Version':'2026-09-12','Idempotency-Key':key},body:JSON.stringify({input,model:harness==='claude-code'?'claude-requested':'codex-requested',metadata:{harness_id:harness,role_id:'reviewer',foreman_review_mode:'read_only',review_evidence:reviewEvidence(),...metadata},stream:true,timeout_seconds:5,max_step:1})});
+  const text=await r.text(); return {status:r.status, body:r.headers.get('content-type')?.includes('json')?JSON.parse(text):undefined, events:text.split('\n').filter(x=>x.startsWith('data: ')).map(x=>JSON.parse(x.slice(6)))};
 }
 test('discovery advertises configured CLIs and Claude submit/replay retains idempotent response across restart', async t => {
   const {base,baseCommit,countFor,restart}=await setup(t);
@@ -91,6 +97,74 @@ test('literal undefined from Claude is not accepted as an actual model', async t
   const {base,baseCommit}=await setup(t,{claudeUndefined:true}); const events=await submit(base,'claude-code','claude-requested','undefined-model-key',baseCommit);
   assert.equal(events[1].type,'response.failed'); assert.equal(events[1].response.model,undefined);
   assert.match(events[1].response.error.message,/did not report an actual model/);
+});
+
+test('read-only Reviewer accepts only bounded verified evidence and returns boundary observations', async t => {
+  const {base}=await setup(t,{claudeBody:`process.stdin.resume();process.stdin.on('end',()=>{console.log(JSON.stringify({type:'system',subtype:'init',model:'claude-actual',session_id:'claude-session'}));console.log(JSON.stringify({type:'result',subtype:'success',result:'recommendation: clear',model:'claude-actual',session_id:'claude-session',usage:{input_tokens:4,output_tokens:5}}));});`});
+  const discovery=await (await fetch(`${base}/v1/uhp`)).json(); assert.equal(discovery.capabilities.readOnlyReviewer,true);
+  const result=await submitReview(base,'claude-code','review-success'); assert.equal(result.status,200);
+  const response=result.events.at(-1).response; assert.equal(result.events.at(-1).type,'response.completed',JSON.stringify(result.events));
+  assert.equal(response.model,'claude-actual'); assert.equal(response.session_id,'claude-session');
+  assert.equal(response.metadata.foreman_review_mode,'read_only'); assert.equal(response.metadata.reviewer_mutation_attempted,false);
+  assert.deepEqual(response.metadata.reviewer_validation,reviewEvidence().controllerValidation);
+  assert.equal(response.metadata.reviewer_boundary.project_workspace_mounted,false);
+  assert.equal(response.metadata.reviewer_boundary.workspace_writable,false);
+  assert.equal(response.metadata.reviewer_boundary.claude_tool_allowlist_empty,true);
+});
+
+test('read-only Reviewer rejects missing model, unsuccessful CLI, mutation tool use, and Codex tool execution', async t => {
+  const missing=await setup(t,{claudeUndefined:true}); const noModel=await submitReview(missing.base,'claude-code','review-no-model');
+  assert.equal(noModel.events.at(-1).type,'response.failed'); assert.match(noModel.events.at(-1).response.error.message,/actual model/);
+  const unsuccessful=await setup(t,{claudeIsError:true}); const failed=await submitReview(unsuccessful.base,'claude-code','review-error'); assert.equal(failed.events.at(-1).type,'response.failed');
+  const attempted=await setup(t,{claudeBody:`process.stdin.resume();process.stdin.on('end',()=>{console.log(JSON.stringify({type:'system',subtype:'init',model:'claude-actual',session_id:'s'}));console.log(JSON.stringify({type:'assistant',message:{content:[{type:'tool_use',name:'Write',input:{}}]}}));console.log(JSON.stringify({type:'result',subtype:'success',result:'done',model:'claude-actual',session_id:'s'}));});`});
+  const mutation=await submitReview(attempted.base,'claude-code','review-mutation'); assert.equal(mutation.events.at(-1).type,'response.failed'); assert.equal(mutation.events.at(-1).response.metadata.reviewer_mutation_attempted,true);
+  const codex=await setup(t,{codexBody:`process.stdin.resume();process.stdin.on('end',()=>{console.log(JSON.stringify({type:'thread.started',thread_id:'review-thread'}));console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'recommendation'}}));console.log(JSON.stringify({type:'turn.completed',model:'codex-actual'}));console.log(JSON.stringify({type:'item.completed',item:{type:'command_execution',command:'touch x'}}));});`});
+  const codexMutation=await submitReview(codex.base,'codex-cli','review-codex-mutation'); assert.equal(codexMutation.events.at(-1).type,'response.failed'); assert.equal(codexMutation.events.at(-1).response.metadata.reviewer_mutation_attempted,true);
+});
+
+test('read-only Reviewer fails closed when overflow evicts an early tool event or JSONL is malformed', async t => {
+  const overflowing=await setup(t,{claudeBody:`process.stdin.resume();process.stdin.on('end',()=>{const emit=x=>process.stdout.write(JSON.stringify(x)+'\\n');emit({type:'system',subtype:'init',model:'claude-actual',session_id:'overflow-session'});emit({type:'assistant',message:{content:[{type:'tool_use',name:'Write',input:{}}]}});process.stdout.write('x'.repeat(600000)+'\\n');emit({type:'result',subtype:'success',result:'recommendation',model:'claude-actual',session_id:'overflow-session'});});`});
+  const overflow=await submitReview(overflowing.base,'claude-code','review-overflow');
+  assert.notEqual(overflow.events.at(-1).type,'response.completed',JSON.stringify(overflow.events));
+  assert.equal(overflow.events.at(-1).response.metadata.reviewer_output_overflow,true);
+  const malformed=await setup(t,{claudeBody:`process.stdin.resume();process.stdin.on('end',()=>{console.log(JSON.stringify({type:'system',subtype:'init',model:'claude-actual',session_id:'malformed-session'}));console.log('{"type":"assistant",broken');console.log(JSON.stringify({type:'result',subtype:'success',result:'recommendation',model:'claude-actual',session_id:'malformed-session'}));});`});
+  const invalid=await submitReview(malformed.base,'claude-code','review-malformed-jsonl');
+  assert.equal(invalid.events.at(-1).type,'response.failed',JSON.stringify(invalid.events));
+  assert.match(invalid.events.at(-1).response.error.message,/malformed or unrecognized/);
+});
+
+test('read-only Reviewer fails closed for invalid scope, oversized diff, and any workspace binding', async t => {
+  const {base}=await setup(t);
+  const invalid=await submitReview(base,'claude-code','review-invalid-scope',{review_evidence:reviewEvidence({scopeVerified:false})}); assert.equal(invalid.status,400);
+  const oversized=await submitReview(base,'claude-code','review-too-large',{review_evidence:reviewEvidence({reviewDiff:'x'.repeat(48_001)})}); assert.equal(oversized.status,400);
+  const bound=await submitReview(base,'claude-code','review-workspace',{workspace_id:'ws_00000000-0000-0000-0000-000000000000'}); assert.equal(bound.status,400); assert.equal(bound.body.error.code,'review_workspace_forbidden');
+});
+
+test('Codex Reviewer requires a model reported by its own JSON events', async t => {
+  const {base}=await setup(t,{codexUndefined:true}); const result=await submitReview(base,'codex-cli','codex-review-missing-model');
+  assert.equal(result.events.at(-1).type,'response.failed'); assert.equal(result.events.at(-1).response.model,undefined);
+  assert.match(result.events.at(-1).response.error.message,/actual model/);
+});
+
+test('Codex Reviewer runs from an empty transient cwd with read-only ephemeral flags and reported model', async t => {
+  const {base}=await setup(t,{codexBody:`import {readdirSync} from 'node:fs';const ix=process.argv.indexOf('--model');const facts={emptyCwd:readdirSync('.').length===0,sandbox:process.argv[process.argv.indexOf('--sandbox')+1],ephemeral:process.argv.includes('--ephemeral'),ignoreUserConfig:process.argv.includes('--ignore-user-config'),ignoreRules:process.argv.includes('--ignore-rules'),requestedModel:process.argv[ix+1]};process.stdin.resume();process.stdin.on('end',()=>{console.log(JSON.stringify({type:'thread.started',thread_id:'codex-review-thread'}));console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:JSON.stringify(facts)}}));console.log(JSON.stringify({type:'turn.completed',model:'codex-actual',usage:{input_tokens:2,output_tokens:3}}));});`});
+  const result=await submitReview(base,'codex-cli','codex-review-success'); const response=result.events.at(-1).response;
+  assert.equal(result.events.at(-1).type,'response.completed',JSON.stringify(result.events)); assert.equal(response.model,'codex-actual');
+  assert.deepEqual(JSON.parse(response.output_text),{emptyCwd:true,sandbox:'read-only',ephemeral:true,ignoreUserConfig:true,ignoreRules:true,requestedModel:'codex-requested'});
+  assert.equal(response.metadata.reviewer_boundary.project_workspace_mounted,false); assert.equal(response.metadata.reviewer_boundary.codex_sandbox,'read-only');
+});
+
+test('live smoke Reviewer bounds fit the bridge and leave stream inactivity headroom', () => {
+  assert.equal(assertReviewerBounds(REVIEWER_TASK_BOUNDS, REVIEWER_STREAM_INACTIVITY_TIMEOUT_MS),true);
+  assert.ok(REVIEWER_TASK_BOUNDS.maxStep <= REVIEWER_BRIDGE_MAX_STEP);
+  assert.throws(()=>assertReviewerBounds({...REVIEWER_TASK_BOUNDS,maxStep:11}),/maxStep/);
+  assert.throws(()=>assertReviewerBounds(REVIEWER_TASK_BOUNDS,90_000),/inactivity timeout/);
+});
+
+test('smoke prepare-only switch is an exact opt-in and never authorizes Reviewer submission', () => {
+  assert.equal(isPrepareOnly('1'),true);
+  assert.equal(isPrepareOnly('0'),false);
+  assert.equal(isPrepareOnly(undefined),false);
 });
 
 test('bridge-specific seed and full snapshot preserve every Git file case for Foreman verification', async t => {

@@ -93,6 +93,17 @@ operation over a full commit SHA; requests do not accept a host path:
   files are included. Any unreadable, special, or oversized entry makes
   `complete` false.
 
+The Reviewer path does not reuse the Worker workspace: it submits a separate
+`role_id=reviewer` response with `metadata.foreman_review_mode="read_only"`,
+no `workspace_id`, and bounded `metadata.review_evidence` containing the
+controller-verified base, allowed scope, diff, and observed validation checks.
+The bridge launches a fresh transient context without a checkout. Claude runs
+with an empty tool allowlist; Codex uses `--sandbox read-only`, which may still
+expose read-only shell tools. Codex actual-model reporting remains unverified. Missing model/session reporting or a mutation attempt fails the review.
+This is an experimental bridge extension, not a portable UHP feature.
+
+One live Reviewer response was captured separately from the Worker run and is recorded in [`evidence/actual-reviewer-smoke.json`](evidence/actual-reviewer-smoke.json). It requested `opus`, reported actual model `claude-opus-5-5`, response ID `resp_2d3c9439-28df-460b-8537-7993f2b06540`, session ID `6cea9d31-a35f-480f-b50f-95cd4d94e665`, and measured usage of 2 input, 552 output, and 531 cached input tokens. It recommended the README-only in-scope diff: mode remained `100644`, the appended deterministic-testing note was short, and no risky content or scope violation was found. The configured SHA-256 check passed; the Reviewer caveated that this check confirms the recorded bytes, not their content, and relied on direct diff inspection too. The bridge recorded exactly one response and proved the boundary: no project workspace mounted, review workspace not writable, Claude tool allowlist empty, and no mutation attempt. The run remains `awaiting_approval`, human approval is null, and `acceptance` is `not_decided`. The integration fixture's Reviewer remains clearly labeled simulated and is not this live run. Live validation used one README SHA-256 command: it verifies the recorded snapshot bytes, not broader project behavior. Codex read-only behavior has fixture coverage only, and Codex actual-model reporting remains unverified; no HarnessRouter equivalence or Claude session continuation is claimed.
+
 Discovery advertises this as
 `capabilities.extensions.foreman_workspace_bridge_v1`, with version, seeding,
 complete-snapshot, and `bubblewrap` boundary fields. Before Claude tools run,
