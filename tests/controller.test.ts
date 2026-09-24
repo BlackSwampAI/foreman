@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Controller, type UhpAdapter } from '../src/controller.js';
 import type { Assignment } from '../src/domain.js';
 import { JsonStore } from '../src/store.js';
+import { deleteWorkspaceSetup, findSavedProjectForRepository } from '../src/workspace-setup.js';
 import { UhpClient } from '../src/uhp.js';
 import { startUhpFixture, type UhpFixture } from './fixtures/uhp-server.js';
 
@@ -41,6 +42,28 @@ describe('controller persistence and state transitions',()=>{
     await expect(scoped.createRun(secondTask.id)).rejects.toThrow('Task not found');
     await expect(scoped.selectRoleConfig('worker',{harnessId:'fixture',model:'model-fixture'},second.id)).rejects.toThrow('Project not found');
     expect((await scoped.createTask(first.id,'First task') as {id:string}).id).toMatch(/^tsk_/);
+  });
+  it('deletes a project with an unapproved result for a fresh run while preserving delete audit and never dispatching work',async()=>{
+    const {controller,store,calls}=await setup();const project:any=await controller.createProject('Fresh start'),task:any=await controller.createTask(project.id,'Old task'),run:any=await controller.createRun(task.id);
+    await store.mutate(s=>{const current=s.projects[0]!.tasks[0]!.runs[0]!;current.status='awaiting_approval';current.workerEvidence={acceptance:'not_decided'} as any;current.reviewerRecommendation={verdict:'recommend'} as any;});
+    const result=await controller.deleteProject(project.id);expect(result).toMatchObject({deleted:true,projectId:project.id,taskCount:1,runCount:1});
+    const state=await store.load();expect(state.projects).toHaveLength(0);expect(state.events.some(e=>e.type==='project.deleted'&&e.entityId===project.id)).toBe(true);expect(calls).toHaveLength(0);
+    const fresh=await controller.createProject('Fresh start');expect(fresh).toMatchObject({name:'Fresh start',tasks:[]});expect((await store.load()).projects).toHaveLength(1);
+  });
+  it('removes saved repository ownership so the same checkout can be reopened',async()=>{
+    const {controller,dir,store}=await setup();const project:any=await controller.createProject('Repository project'),dataDir=join(dir,'repository-data'),setupDir=join(dataDir,'workspaces'),setupPath=join(setupDir,`${project.id}.json`);await mkdir(setupDir,{recursive:true});await writeFile(setupPath,'{}');await controller.deleteProject(project.id);await deleteWorkspaceSetup(dataDir,project.id);await expect(readFile(setupPath,'utf8')).rejects.toMatchObject({code:'ENOENT'});expect(await findSavedProjectForRepository(dataDir,(await store.load()).projects,'/tmp/repository')).toBeUndefined();
+  });
+  it('blocks deleting active work and tasks still referenced by another task',async()=>{
+    const {controller,store}=await setup();const project:any=await controller.createProject('Delete guards'),base:any=await controller.createTask(project.id,'Base task'),dependent:any=await controller.createTask(project.id,{title:'Dependent',goal:'Work',suggestedAllowedPaths:[],validationCriteria:[],dependsOn:[base.id]});
+    await expect(controller.deleteTask(base.id)).rejects.toMatchObject({statusCode:409});
+    const run:any=await controller.createRun(dependent.id);await store.mutate(s=>{s.projects[0]!.tasks.find(t=>t.id===dependent.id)!.runs[0]!.controller={active:true,phase:'orchestrating'} as any;});
+    await expect(controller.deleteProject(project.id)).rejects.toMatchObject({statusCode:409});
+    await expect(controller.deleteTask(dependent.id)).rejects.toMatchObject({statusCode:409});expect(run.id).toMatch(/^run_/);
+  });
+  it('resets project Planner history and task plan while retaining tasks and runs',async()=>{
+    const {controller,store}=await setup();const project:any=await controller.createProject('Plan reset'),task:any=await controller.createTask(project.id,'Keep task'),run:any=await controller.createRun(task.id);
+    await store.mutate(s=>{const p=s.projects[0]!;p.plannerMessages=[{id:'pmsg_fixture',role:'user',text:'old plan',createdAt:new Date().toISOString(),createdTaskIds:[task.id]}];p.plannerAssignments=[];p.plannerSessionHistory=[];p.tasks[0]!.planApproval={status:'approved'} as any;});
+    await controller.resetProjectPlanner(project.id);await controller.resetTaskPlan(task.id);const state=await store.load();expect(state.projects[0]!.plannerMessages).toBeUndefined();expect(state.projects[0]!.tasks[0]!.planApproval).toBeUndefined();expect(state.projects[0]!.tasks[0]!.runs.map(r=>r.id)).toEqual([run.id]);expect(state.events.some(e=>e.type==='project.planner_reset')).toBe(true);expect(state.events.some(e=>e.type==='task.plan_reset')).toBe(true);
   });
   it('defaults automatic runs to one Worker turn and one Worker attempt',async()=>{
     const {controller,store}=await setup({submit:async()=>({externalId:'held',status:'completed',outputText:'held'})});controller.configureVerifiedWorkspace({repoPath:'/fixture/repo',bridgeBaseUrl:'http://127.0.0.1:1',allowedScope:['README.md'],commands:[{name:'fixture check',command:'true',args:[]}]});const project:any=await controller.createProject('Budget defaults'),task:any=await controller.createTask(project.id,'Inspect the default budget'),run:any=await controller.createRun(task.id);

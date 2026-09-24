@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { isAbsolute, resolve, sep } from 'node:path';
 
 export interface WorkspaceValidationCommand {
@@ -69,6 +69,13 @@ export async function saveWorkspaceSetup(dataDir: string, projectId: string, inp
     throw error;
   }
   return config;
+}
+
+/** Remove repository ownership when its Foreman project is deleted. */
+export async function deleteWorkspaceSetup(dataDir:string,projectId:string):Promise<void>{
+  if(!isAbsolute(dataDir))throw new Error('Workspace data directory must be absolute');
+  validateProjectId(projectId);
+  await rm(resolve(dataDir,'workspaces',`${projectId}.json`),{force:true});
 }
 
 /** Load persisted settings and revalidate the repository before exposing them. */

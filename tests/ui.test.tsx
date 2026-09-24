@@ -8,7 +8,7 @@ describe('project Planner UI',()=>{
     const state:State={projects:[{id:'prj_fixture',name:'Opened repository',plannerSession:{localId:'planner-session-fixture',roleId:'planner',generation:1,status:'active',config:{harnessId:'fixture',model:'simulated'},startedAt:'2026-01-01T00:00:00.000Z'},plannerMessages:[{id:'pmsg_user',role:'user',text:'Update the node README and add a REST endpoint.',createdAt:'2026-01-01T00:00:00.000Z'},{id:'pmsg_planner',role:'planner',text:'I split this into two tasks.',createdAt:'2026-01-01T00:01:00.000Z'}],tasks:[{id:'tsk_readme_fixture',title:'Update README',goal:'Document the node behavior.',suggestedAllowedPaths:['README.md'],validationCriteria:['README check passes'],status:'ready',runs:[]},{id:'tsk_endpoint_fixture',title:'Add REST endpoint',goal:'Implement the requested API endpoint.',suggestedAllowedPaths:['src/http/'],validationCriteria:['Endpoint tests pass'],status:'ready',runs:[]}]}],roles:[...['planner','orchestrator','worker','reviewer'].map(id=>({id,name:id,enabled:true,config:{harnessId:'fixture',model:'simulated'},availableConfigs:[{harnessId:'fixture',model:'simulated'}]}))]};
     const html=renderToStaticMarkup(createElement(App,{initialState:state}));
     expect(html).toContain('Talk to the Planner');expect(html).toContain('One continuing conversation for this repository');expect(html).toContain('Update the node README and add a REST endpoint.');expect(html).toContain('Update README');expect(html).toContain('Add REST endpoint');expect(html).toContain('Start work');expect(html).toContain('Message project Planner');
-    expect(html).toContain('aria-label="Main navigation"');for(const label of ['Projects','Runs','Roles','Events','Usage'])expect(html).toContain(`>${label}</button>`);
+    expect(html).not.toContain('aria-label="Main navigation"');expect(html).toContain('Project tree');expect(html).toContain('class="node task selected"');
     expect(html).toContain('aria-label="Refresh state"');expect(html).toContain('<svg aria-hidden="true" focusable="false"');expect(html).not.toContain('objtext');
   });
   it('hides a legacy structured proposal payload and keeps the readable Planner reply',()=>{
@@ -82,10 +82,27 @@ describe('project Planner UI',()=>{
     expect(html).toContain('<details class="evidence-block diff-block">');expect(html).not.toContain('<details class="evidence-block diff-block" open');expect(html).not.toContain('<details class="workflow-more" open');
     expect(html).toContain('Approve task &amp; start work');expect(html).toContain('Reviewer phase, Blocked. Select for activity and evidence');expect(html).toContain(longDiff);
   });
-  it('keeps the active repository summary compact and makes its allowed path list optional',()=>{
-    const state:State={projects:[{id:'prj_scope',name:'Scope project',tasks:[]}],roles:[]};
+  it('keeps project identity and repository switching in the compact header without a duplicate workspace card',()=>{
+    const state:State={projects:[{id:'prj_scope',name:'Scope project',repoPath:'/repo/scope-project',tasks:[{id:'tsk_scope',title:'Add endpoint',goal:'Add the requested endpoint.',status:'ready'}]}],roles:[]};
     const workspace={repoPath:'/repo/scope-project',head:'a'.repeat(40),dirty:false,allowedScope:['nodes/','README.md'],validationCommands:[]};
     const html=renderToStaticMarkup(createElement(App,{initialState:state,initialWorkspaceSetup:workspace}));
-    expect(html).toContain('ALLOWED FILES');expect(html).toContain('<b>2 allowed paths</b>');expect(html).toContain('<details class="repo-scope-list" aria-label="Allowed repository paths">');expect(html).toContain('Show all 2 paths');expect(html).toContain('nodes/, README.md');expect(html).not.toContain('<details class="repo-scope-list" aria-label="Allowed repository paths" open');
+    expect(html).toContain('class="project-context" aria-label="Current project"');expect(html).toContain('class="project-name" title="Scope project">Scope project</span>');expect(html).toContain('/repo/scope-project');expect(html).toContain('Switch repo');
+    expect(html).toContain('<summary>Repository details</summary>');expect(html).not.toContain('ACTIVE REPOSITORY');expect(html).not.toContain('class="repo-summary"');
+    expect(html).not.toContain('class="rail"');expect(html).toContain('Project tree');expect(html).toContain('Add endpoint');expect(html).toContain('Add task');expect(html).toContain('Talk to the Planner');
+  });
+  it('keeps project deletion and Planner reset behind project settings and a confirmation dialog',()=>{
+    const state:State={projects:[{id:'prj_admin',name:'Admin project',plannerMessages:[{id:'pmsg_admin',role:'user',text:'Keep the Planner history.',createdAt:'2026-09-24T12:00:00.000Z'}],tasks:[{id:'tsk_admin',title:'Admin task',goal:'Inspect task actions.',status:'ready'}]}],roles:[]};
+    const html=renderToStaticMarkup(createElement(App,{initialState:state}));
+    expect(html).not.toContain('class="rail"');expect(html).toContain('Project tree');expect(html).toContain('class="node project selected"');expect(html).toContain('class="node task selected"');
+    expect(html).toContain('<details class="project-settings"><summary>Project settings</summary>');expect(html).not.toContain('<details class="project-settings" open');
+    expect(html).toContain('class="outline small" type="button"');expect(html).toContain('Reset Planner conversation');expect(html).toContain('Delete project');
+    expect(html).not.toContain('class="admin-confirm"');expect(html).not.toContain('aria-labelledby="admin-action-title"');
+  });
+  it('shows reset approved plan and delete task affordances without sending a request before confirmation',()=>{
+    const state:State={projects:[{id:'prj_task_actions',name:'Task actions project',tasks:[{id:'tsk_approved_actions',title:'Approved task',goal:'Reset or delete this task.',status:'ready',planApproval:{status:'approved',approvedAt:'2026-09-24T12:00:00.000Z',specDigest:'fixture-digest'}}]}],roles:[]};
+    const html=renderToStaticMarkup(createElement(App,{initialState:state}));
+    expect(html).toContain('class="task-actions"><summary>Task actions</summary>');expect(html).not.toContain('<details class="task-actions" open');
+    expect(html).toContain('Reset approved plan');expect(html).toContain('Delete task');expect(html).toContain('danger-action');
+    expect(html).not.toContain('class="admin-confirm"');expect(html).not.toContain('aria-labelledby="admin-action-title"');expect(html).not.toContain('/api/tasks/tsk_approved_actions/plan');expect(html).not.toContain('/api/tasks/tsk_approved_actions"');
   });
 });
