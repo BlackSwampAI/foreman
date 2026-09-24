@@ -53,6 +53,7 @@ async function submit(base, harness, model, key, baseCommit, workspaceId, input 
   const r = await fetch(`${base}/v1/responses`, { method: 'POST', headers: { 'Content-Type':'application/json', Accept:'text/event-stream', 'UHP-Version':'2026-09-12', 'Idempotency-Key':key }, body: JSON.stringify({ input, model, metadata:{harness_id:harness,workspace_id:seeded.workspace_id}, stream:true, timeout_seconds:5, max_step:1 }) });
   const text=await r.text(); assert.equal(r.status,200,text); return text.split('\n').filter(x=>x.startsWith('data: ')).map(x=>JSON.parse(x.slice(6)));
 }
+function terminalEvent(events) { return events.find(item=>['response.completed','response.failed','response.cancelled'].includes(item.type)); }
 function reviewEvidence(overrides = {}) { return { validation:'verified_by_foreman_git_comparison', scopeVerified:true, baseCommit:'a'.repeat(40), workerResponseId:'resp_worker_fixture', allowedScope:['src/example.ts'], reviewDiff:'### modify: src/example.ts\n- before\n+ after\n', controllerValidation:{passed:true,policy:{requireAllChecksPass:true,configuredCheckCount:1},observations:[{name:'typecheck',command:'node',args:['--check','src/example.ts'],exitCode:0,signal:null,timedOut:false,output:'passed',outputTruncated:false,passed:true,startedAt:'2026-09-22T00:00:00Z',finishedAt:'2026-09-22T00:00:01Z'}]}, ...overrides }; }
 async function submitReview(base, harness, key, metadata = {}, input = 'Review this change for correctness and return a recommendation.') {
   const r = await fetch(`${base}/v1/responses`, {method:'POST',headers:{'Content-Type':'application/json',Accept:'text/event-stream','UHP-Version':'2026-09-12','Idempotency-Key':key},body:JSON.stringify({input,model:harness==='claude-code'?'claude-requested':'codex-requested',metadata:{harness_id:harness,role_id:'reviewer',foreman_review_mode:'read_only',review_evidence:reviewEvidence(),...metadata},stream:true,timeout_seconds:5,max_step:1})});
@@ -62,23 +63,30 @@ test('discovery advertises configured CLIs and Claude submit/replay retains idem
   const {base,baseCommit,countFor,restart}=await setup(t);
   const d=await (await fetch(`${base}/v1/uhp`)).json(); assert.equal(d.default_version,'2026-09-12'); assert.equal(d.capabilities.sessions,true);
   const hs=await (await fetch(`${base}/v1/harnesses`)).json(); assert.deepEqual(hs.harnesses.map(x=>x.id),['claude-code','codex-cli']);
-  const first=await submit(base,'claude-code','claude-requested','same-key',baseCommit); assert.equal(first[0].type,'response.created'); assert.equal(first[1].type,'response.completed',JSON.stringify(first));
-  const r=first[1].response; assert.equal(r.output_text,'bounded answer'); assert.equal(r.model,'claude-actual'); assert.equal(r.session_id,'claude-session'); assert.equal(r.metadata.session_id,'claude-session'); assert.deepEqual(r.usage,{input_tokens:7,output_tokens:3,input_tokens_details:{cached_tokens:2}});
+  const first=await submit(base,'claude-code','claude-requested','same-key',baseCommit); assert.equal(first[0].type,'response.created'); assert.equal(terminalEvent(first)?.type,'response.completed',JSON.stringify(first));
+  const r=terminalEvent(first).response; assert.equal(r.output_text,'bounded answer'); assert.equal(r.model,'claude-actual'); assert.equal(r.session_id,'claude-session'); assert.equal(r.metadata.session_id,'claude-session'); assert.deepEqual(r.usage,{input_tokens:7,output_tokens:3,input_tokens_details:{cached_tokens:2}});
   assert.equal(r.metadata.execution_boundary?.proven,true);
   assert.equal(r.metadata.requested_model,'claude-requested'); assert.equal(r.metadata.model_fallback,true);
-  const workspaceId=r.metadata.workspace_id; const second=await submit(base,'claude-code','claude-requested','same-key',baseCommit,workspaceId); assert.equal(second[1].response.id,r.id);
+  const workspaceId=r.metadata.workspace_id; const second=await submit(base,'claude-code','claude-requested','same-key',baseCommit,workspaceId); assert.equal(terminalEvent(second).response.id,r.id);
   await restart();
-  const afterRestart=await submit(base,'claude-code','claude-requested','same-key',baseCommit,workspaceId); assert.equal(afterRestart[1].response.id,r.id);
+  const afterRestart=await submit(base,'claude-code','claude-requested','same-key',baseCommit,workspaceId); assert.equal(terminalEvent(afterRestart).response.id,r.id);
   assert.equal((await readFile(countFor(workspaceId),'utf8')).trim(),'c:provider-env-absent:model=claude-requested');
   const retrieved=await (await fetch(`${base}/v1/responses/${r.id}`,{headers:{'UHP-Version':'2026-09-12'}})).json(); assert.equal(retrieved.id,r.id);
 });
+test('discovery omits configured provider auth when its CLI executable is missing', async t => {
+  const dir=await mkdtemp(join(tmpdir(),'local-cli-missing-binary-')); dirs.push(dir);
+  const {base}=await setup(t,{claudeBin:join(dir,'missing-claude')});
+  const harnesses=await (await fetch(`${base}/v1/harnesses`)).json();
+  assert.deepEqual(harnesses.harnesses.map(item=>item.id),['codex-cli']);
+});
+
 test('Foreman UhpClient discovers, submits, validates fallback/session/usage, and replays idempotently', async t => {
   const claudeBody=`process.stdin.resume();process.stdin.on('end',()=>{const model='claude-actual';console.log(JSON.stringify({type:'system',subtype:'init',model,session_id:'claude-session'}));console.log(JSON.stringify({type:'result',subtype:'success',result:'bounded answer',model,session_id:'claude-session',usage:{input_tokens:7,output_tokens:3,cache_read_input_tokens:2}}));});`;
   const {base}=await setup(t,{claudeBody});
   const client=new UhpClient({baseUrl:base,harnessId:'claude-code',model:'claude-requested'});
   const discovery=await client.discover(); assert.equal(discovery.version,'2026-09-12'); assert.equal(discovery.capabilities.sessions,true);
   const seen=[]; const input={submissionId:'sub-smoke-fixture',assignmentId:'assignment-fixture',runId:'run-fixture',roleId:'planner',taskId:'task-fixture',projectId:'project-fixture',prompt:'Reply with one bounded sentence.',config:{harnessId:'claude-code',model:'claude-requested',timeoutSeconds:5},idempotencyKey:'uhpclient-fixed-fixture-key',onEvent:e=>seen.push(e.type)};
-  const first=await client.submit(input); assert.equal(first.status,'completed'); assert.equal(first.actualModel,'claude-actual'); assert.equal(first.requestedModel,'claude-requested'); assert.equal(first.modelFallback,true); assert.equal(first.selectedHarnessId,'claude-code'); assert.equal(first.sessionId,'claude-session'); assert.equal(first.responseId,first.externalId); assert.deepEqual(first.usage,{inputTokens:7,outputTokens:3,cachedInputTokens:2}); assert.deepEqual(seen,['response.created','response.completed']);
+  const first=await client.submit(input); assert.equal(first.status,'completed'); assert.equal(first.actualModel,'claude-actual'); assert.equal(first.requestedModel,'claude-requested'); assert.equal(first.modelFallback,true); assert.equal(first.selectedHarnessId,'claude-code'); assert.equal(first.sessionId,'claude-session'); assert.equal(first.responseId,first.externalId); assert.deepEqual(first.usage,{inputTokens:7,outputTokens:3,cachedInputTokens:2}); assert.equal(seen[0],'response.created'); assert.equal(seen.at(-1),'response.completed');
   const replay=await client.submit(input); assert.equal(replay.responseId,first.responseId);
   const stored=await (await fetch(`${base}/v1/responses/${first.responseId}`)).json(); assert.equal(stored.metadata.workspace_id,undefined); assert.equal(stored.metadata.execution_boundary.role_context_isolated,true);
   assert.equal(stored.metadata.cli_invocation.args[stored.metadata.cli_invocation.args.indexOf('--max-turns')+1],'10');
@@ -92,7 +100,7 @@ test('UHP SSE keepalives reset the client inactivity timer during a quiet CLI tu
   const result=await client.submit({submissionId:'slow-submission',assignmentId:'slow-assignment',runId:'slow-run',roleId:'planner',taskId:'slow-task',projectId:'slow-project',prompt:'Reply once after the quiet interval.',config:{harnessId:'claude-code',model:'claude-requested',timeoutSeconds:5,maxStep:1},idempotencyKey:'slow-sse-keepalive-key',onEvent:event=>seen.push(event.type)});
   assert.ok(Date.now()-started>=1_000);
   assert.equal(result.status,'completed'); assert.equal(result.outputText,'slow bounded answer');
-  assert.deepEqual(seen,['response.created','response.completed']);
+  assert.equal(seen[0],'response.created'); assert.equal(seen.at(-1),'response.completed');
 });
 
 test('Planner continuation binds the same native session and keeps a workspace-free role context', async t => {
@@ -125,8 +133,8 @@ test('Claude role mounts create missing transcript directories outside the host 
 });
 test('Codex parser returns reported output and leaves unavailable model/usage absent', async t => {
   const {base,baseCommit,countFor}=await setup(t);
-  const events=await submit(base,'codex-cli','codex-requested','codex-key',baseCommit); const r=events[1].response;
-  assert.equal(events[1].type,'response.completed',JSON.stringify(events)); assert.equal(r.output_text,'codex bounded answer'); assert.equal(r.model,undefined);
+  const events=await submit(base,'codex-cli','codex-requested','codex-key',baseCommit); const r=terminalEvent(events).response;
+  assert.equal(terminalEvent(events).type,'response.completed',JSON.stringify(events)); assert.equal(r.output_text,'codex bounded answer'); assert.equal(r.model,undefined);
   assert.equal(r.requested_model,'codex-requested'); assert.equal(r.metadata.actual_model_status,'unavailable');
   assert.equal(r.metadata.cli_invocation.executable,'/opt/codex');
   assert.equal(r.metadata.cli_invocation.host_executable.endsWith('/fake-codex'),true);
@@ -404,14 +412,15 @@ test('invalid model and prompt bounds are rejected before CLI spawn', async t =>
   const r=await fetch(`${base}/v1/responses`,{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':'bad'},body:JSON.stringify({input:'x'.repeat(16001),model:'claude-requested',metadata:{harness_id:'claude-code'}})});
   assert.equal(r.status,400); assert.deepEqual(await readdir(env.LOCAL_CLI_UHP_WORK),[]);
 });
-test('spawn errors produce a sanitized terminal response without stderr details', async t => {
-  const {base,baseCommit}=await setup(t,{spawnError:true}); const events=await submit(base,'claude-code','claude-requested','spawn-error-key',baseCommit);
-  assert.equal(events[1].type,'response.failed'); assert.match(events[1].response.error.message,/CLI could not be started|CLI task failed internally/);
-  assert.equal(JSON.stringify(events).includes('missing-cli'),false);
+test('CLI stderr is omitted from the terminal response', async t => {
+  const {base,baseCommit}=await setup(t,{claudeBody:`console.error('private fixture diagnostic');process.exit(3);`}); const events=await submit(base,'claude-code','claude-requested','stderr-redaction-key',baseCommit);
+  assert.equal(terminalEvent(events).type,'response.failed');
+  assert.match(terminalEvent(events).response.error.message,/actual model and session id/);
+  assert.equal(JSON.stringify(events).includes('private fixture diagnostic'),false);
 });
 test('Claude is_error and error subtype do not produce a successful UHP response', async t => {
   const {base,baseCommit}=await setup(t,{claudeIsError:true}); const events=await submit(base,'claude-code','claude-requested','claude-error-key',baseCommit);
-  assert.equal(events[1].type,'response.failed'); assert.equal(events[1].response.error.message,'Claude Code reported an unsuccessful task');
+  assert.equal(terminalEvent(events).type,'response.failed'); assert.equal(terminalEvent(events).response.error.message,'Claude Code reported an unsuccessful task');
 });
 test('a harness without an explicit model is omitted from discovery', async t => {
   const {base}=await setup(t,{noClaudeModel:true}); const body=await (await fetch(`${base}/v1/harnesses`)).json();
@@ -420,8 +429,8 @@ test('a harness without an explicit model is omitted from discovery', async t =>
 });
 test('literal undefined from Claude is not accepted as an actual model', async t => {
   const {base,baseCommit}=await setup(t,{claudeUndefined:true}); const events=await submit(base,'claude-code','claude-requested','undefined-model-key',baseCommit);
-  assert.equal(events[1].type,'response.failed'); assert.equal(events[1].response.model,undefined);
-  assert.match(events[1].response.error.message,/did not report an actual model/);
+  assert.equal(terminalEvent(events).type,'response.failed'); assert.equal(terminalEvent(events).response.model,undefined);
+  assert.match(terminalEvent(events).response.error.message,/did not report an actual model/);
 });
 
 test('read-only Reviewer accepts only bounded verified evidence and returns boundary observations', async t => {
@@ -461,8 +470,39 @@ test('read-only Reviewer fails closed when overflow evicts an early tool event o
 test('read-only Reviewer fails closed for invalid scope, oversized diff, and any workspace binding', async t => {
   const {base}=await setup(t);
   const invalid=await submitReview(base,'claude-code','review-invalid-scope',{review_evidence:reviewEvidence({scopeVerified:false})}); assert.equal(invalid.status,400);
+  const malformedScope=await submitReview(base,'claude-code','review-malformed-scope',{review_evidence:reviewEvidence({allowedScope:['docs/../nodes/']})}); assert.equal(malformedScope.status,400); assert.equal(malformedScope.body.error.code,'review_evidence_invalid');
   const oversized=await submitReview(base,'claude-code','review-too-large',{review_evidence:reviewEvidence({reviewDiff:'x'.repeat(48_001)})}); assert.equal(oversized.status,400);
   const bound=await submitReview(base,'claude-code','review-workspace',{workspace_id:'ws_00000000-0000-0000-0000-000000000000'}); assert.equal(bound.status,400); assert.equal(bound.body.error.code,'review_workspace_forbidden');
+});
+
+test('read-only Reviewer accepts Foreman directory scopes with trailing slashes and rejects incomplete validation evidence', async t => {
+  const {base}=await setup(t);
+  const valid=reviewEvidence({
+    allowedScope:['docs/','nodes/'],
+    reviewDiff:'### add: docs/nba-coverage.md\n+ mode 100644, 16017 bytes\n\n```diff\n--- /dev/null\n+++ b/docs/nba-coverage.md\n+## Sleeper API Coverage\n```',
+    controllerValidation:{
+      passed:true,
+      policy:{requireAllChecksPass:true,configuredCheckCount:2},
+      observations:[
+        {name:'Install dependencies',command:'pnpm',args:['install','--frozen-lockfile'],exitCode:0,signal:null,timedOut:false,output:'Lockfile is up to date',outputTruncated:false,passed:true},
+        {name:'Tests',command:'pnpm',args:['test'],exitCode:0,signal:null,timedOut:false,output:'114 tests passed',outputTruncated:false,passed:true},
+      ],
+    },
+  });
+  const accepted=await submitReview(base,'claude-code','review-foreman-directory-scope',{review_evidence:valid});
+  assert.equal(accepted.status,200,JSON.stringify(accepted.body));
+  assert.equal(accepted.events[0]?.type,'response.created',JSON.stringify(accepted.events));
+  assert.notEqual(accepted.events.at(-1)?.response?.error?.message,'review_evidence_invalid',JSON.stringify(accepted.events));
+
+  const incomplete=reviewEvidence({
+    allowedScope:['docs/','nodes/'],
+    controllerValidation:{passed:true,policy:{requireAllChecksPass:true,configuredCheckCount:2},observations:[
+      {name:'Install dependencies',command:'pnpm',args:['install','--frozen-lockfile'],exitCode:0,timedOut:false,output:'passed',outputTruncated:false,passed:true},
+    ]},
+  });
+  const rejected=await submitReview(base,'claude-code','review-incomplete-validation',{review_evidence:incomplete});
+  assert.equal(rejected.status,400);
+  assert.equal(rejected.body.error.code,'review_evidence_invalid');
 });
 
 test('Codex Reviewer can report an unavailable model only with bound invocation and read-only evidence', async t => {
@@ -631,4 +671,222 @@ test('failed boundary probe blocks the tool-enabled CLI before spawn', async t =
   assert.equal(events.at(-1).response.metadata.execution_stage,'boundary_probe');
   assert.equal(events.at(-1).response.metadata.execution_boundary.proven,false);
   await assert.rejects(readFile(started));
+});
+
+test('usage reports Codex five-hour and weekly windows independently and fails closed for unmeasured providers', async t => {
+  const codexBody=`if(process.argv[2]==='app-server'){process.stdin.setEncoding('utf8');let input='';process.stdin.on('data',chunk=>{input+=chunk;const lines=input.split('\\n');input=lines.pop()||'';for(const line of lines){let request;try{request=JSON.parse(line)}catch{continue}if(request.id===1)process.stdout.write(JSON.stringify({id:1,result:{}})+'\\n');if(request.id===2)process.stdout.write(JSON.stringify({id:2,result:{rateLimitsByLimitId:{fixture:{primary:{windowDurationMins:300,usedPercent:37,resetsAt:1900000000},secondary:{windowDurationMins:10080,usedPercent:82,resetsAt:1900600000}}}}})+'\\n')}});}`;
+  const {base}=await setup(t,{codexBody});
+  const response=await fetch(`${base}/v1/usage`);
+  assert.equal(response.status,200);
+  const usage=await response.json();
+  assert.deepEqual(usage.harnesses.find(item=>item.harnessId==='codex-cli'),{
+    harnessId:'codex-cli',status:'ready',windows:{
+      fiveHour:{status:'available',usedPercent:37,remainingPercent:63,resetsAt:new Date(1900000000*1000).toISOString()},
+      weekly:{status:'available',usedPercent:82,remainingPercent:18,resetsAt:new Date(1900600000*1000).toISOString()},
+    },
+  });
+  for (const harnessId of ['claude-code','antigravity-cli']) {
+    const harness=usage.harnesses.find(item=>item.harnessId===harnessId);
+    assert.equal(harness.windows.fiveHour.status,'unavailable');
+    assert.equal(harness.windows.weekly.status,'unavailable');
+  }
+});
+
+test('usage reads AGY quota pools with its native usage command and keeps explicit windows separate', async t => {
+  const captured=join(tmpdir(),`agy-usage-args-${process.pid}-${Math.random().toString(16).slice(2)}.jsonl`);
+  t.after(()=>rm(captured,{force:true}));
+  const payload={command:{data:{groups:[
+    {name:'Gemini models',description:'ignored account details',buckets:[
+      {window:'5h',remaining_fraction:0.72,reset_time:'2030-03-17T08:00:00.000Z'},
+      {window:'1h',remaining_fraction:0.01,reset_time:'2030-03-17T07:00:00.000Z'},
+      {window:'weekly',remaining_fraction:0.41,reset_time:'2030-03-21T00:00:00.000Z'},
+    ]},
+    {name:'Claude models',description:'ignored account details',buckets:[
+      {window:'5h',remaining_fraction:0.9,reset_time:'2030-03-17T09:00:00.000Z'},
+      {window:'weekly',remaining_fraction:0.6,reset_time:'2030-03-22T00:00:00.000Z'},
+    ]},
+  ]}}};
+  const body=`import {appendFileSync} from 'node:fs';appendFileSync(${JSON.stringify(captured)},JSON.stringify(process.argv.slice(2))+'\\n');if(process.argv[2]==='models'){console.log('gemini-3.8-flash-medium\\tGemini 3.8 Flash (Medium)');process.exit(0)}if(process.argv.slice(2).join(' ')!=='-p /usage --output-format json --print-timeout 10s')process.exit(41);console.log(${JSON.stringify(JSON.stringify(payload))});`;
+  const {base}=await setup(t,{agyEnabled:true,agyBody:body});
+  const response=await fetch(`${base}/v1/usage`);
+  assert.equal(response.status,200);
+  const usage=await response.json();
+  const agy=usage.harnesses.find(item=>item.harnessId==='antigravity-cli');
+  assert.equal(agy.status,'ready');
+  assert.deepEqual(agy.windows,{
+    fiveHour:{status:'available',usedPercent:28,remainingPercent:72,resetsAt:'2030-03-17T08:00:00.000Z'},
+    weekly:{status:'available',usedPercent:59,remainingPercent:41,resetsAt:'2030-03-21T00:00:00.000Z'},
+  });
+  assert.equal(agy.groups.length,2);
+  const gemini=agy.groups.find(group=>group.id==='gemini');
+  const claude=agy.groups.find(group=>group.id==='claude');
+  assert.ok(gemini); assert.ok(claude);
+  assert.equal(gemini.windows.fiveHour.status,'available');
+  assert.ok(Math.abs(gemini.windows.fiveHour.usedPercent-28)<1e-8);
+  assert.equal(gemini.windows.fiveHour.remainingPercent,72);
+  assert.equal(gemini.windows.fiveHour.resetsAt,'2030-03-17T08:00:00.000Z');
+  assert.ok(Math.abs(gemini.windows.weekly.usedPercent-59)<1e-8);
+  assert.equal(gemini.windows.weekly.remainingPercent,41);
+  assert.ok(Math.abs(claude.windows.fiveHour.usedPercent-10)<1e-8);
+  assert.equal(claude.windows.fiveHour.remainingPercent,90);
+  assert.equal(claude.windows.fiveHour.resetsAt,'2030-03-17T09:00:00.000Z');
+  assert.ok(Math.abs(claude.windows.weekly.usedPercent-40)<1e-8);
+  assert.equal(claude.windows.weekly.remainingPercent,60);
+  const invocations=(await readFile(captured,'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+  assert.ok(invocations.some(args=>args.join(' ')==='-p /usage --output-format json --print-timeout 10s'));
+  assert.equal(JSON.stringify(usage).includes('ignored account details'),false);
+});
+
+test('AGY quota status fails closed for malformed output and unsuccessful CLI exit', async t => {
+  for (const [name, output, exitCode] of [
+    ['malformed','not json',0],
+    ['cli-error',JSON.stringify({command:{data:{groups:[{name:'Gemini',buckets:[{window:'5h',remaining_fraction:0.5,reset_time:'2030-03-17T08:00:00Z'}]}]}}}),9],
+  ]) {
+    const body=`if(process.argv[2]==='models'){console.log('gemini-3.8-flash-medium\\tGemini 3.8 Flash (Medium)');process.exit(0)}console.log(${JSON.stringify(output)});process.exit(${exitCode});`;
+    const {base}=await setup(t,{agyEnabled:true,agyBody:body});
+    const response=await fetch(`${base}/v1/usage`);
+    assert.equal(response.status,200,name);
+    const usage=await response.json();
+    const agy=usage.harnesses.find(item=>item.harnessId==='antigravity-cli');
+    assert.equal(agy.status,'ready',name);
+    assert.equal(agy.windows.fiveHour.status,'unavailable',name);
+    assert.equal(agy.windows.weekly.status,'unavailable',name);
+    assert.deepEqual(agy.groups,[],name);
+    assert.equal(JSON.stringify(usage).includes(output),false,name);
+  }
+});
+
+test('Claude usage parses distinct ANSI PTY windows and never returns raw account text', async t => {
+  const marker=join(tmpdir(),`claude-usage-pty-${process.pid}-${Math.random().toString(16).slice(2)}.txt`);
+  t.after(()=>rm(marker,{force:true}));
+  const screen='Signed in as private-user@example.invalid\r\n\u001b[32mCurrent session (5-hour window)\u001b[0m\r\n\u001b[1m42% used\u001b[0m\r\nResets at 2030-03-17T08:00:00.000Z\r\n\u001b[36mWeekly limit\u001b[0m\r\n18% remaining\r\nResets at 2030-03-21T00:00:00.000Z\r\n';
+  const claudeBody=`import {appendFileSync} from 'node:fs';process.stdin.setEncoding('utf8');let input='';let sent=false;process.stdin.on('data',chunk=>{input+=chunk;if(!sent&&input.includes('/usage')){sent=true;appendFileSync(${JSON.stringify(marker)},'term='+process.env.TERM+';usage='+input.includes('/usage')+';screenReader='+process.argv.includes('--ax-screen-reader')+';cwd='+process.cwd());process.stdout.write(${JSON.stringify(screen)});process.exit(0)}});`;
+  const codexBody=`if(process.argv[2]==='app-server'){process.stdin.setEncoding('utf8');let input='';process.stdin.on('data',chunk=>{input+=chunk;const lines=input.split('\\n');input=lines.pop()||'';for(const line of lines){let request;try{request=JSON.parse(line)}catch{continue}if(request.id===1)process.stdout.write(JSON.stringify({id:1,result:{}})+'\\n');if(request.id===2)process.stdout.write(JSON.stringify({id:2,result:{}})+'\\n')}})}else process.stdin.resume();`;
+  const {base}=await setup(t,{claudeBody,codexBody});
+  const response=await fetch(`${base}/v1/usage`);
+  assert.equal(response.status,200);
+  const usage=await response.json();
+  const claude=usage.harnesses.find(item=>item.harnessId==='claude-code');
+  assert.equal(claude.status,'ready');
+  assert.deepEqual(claude.windows,{
+    fiveHour:{status:'available',usedPercent:42,remainingPercent:58,resetsAt:'2030-03-17T08:00:00.000Z'},
+    weekly:{status:'available',usedPercent:82,remainingPercent:18,resetsAt:'2030-03-21T00:00:00.000Z'},
+  });
+  const markerText=await readFile(marker,'utf8');
+  assert.match(markerText,/term=xterm-256color;usage=true;screenReader=true/);
+  assert.match(markerText,/cwd=\/tmp/);
+  const serialized=JSON.stringify(usage);
+  assert.equal(serialized.includes('private-user@example.invalid'),false);
+  assert.equal(serialized.includes('Signed in as'),false);
+  assert.equal(serialized.includes('Current session'),false);
+});
+
+test('Claude status-line quota sentinel normalizes official windows and drops session identifiers', async t => {
+  const marker=join(tmpdir(),`claude-status-line-${process.pid}-${Math.random().toString(16).slice(2)}.json`);
+  t.after(()=>rm(marker,{force:true}));
+  const rateLimits={
+    rate_limits:{
+      five_hour:{used_percentage:23.5,resets_at:1900000000},
+      seven_day:{used_percentage:41.2,resets_at:1900600000},
+    },
+    session_id:'private-session-7f4d1a',
+    account:{email:'private-user@example.invalid',plan:'secret-plan-name'},
+    model:{id:'private-model-id'},
+  };
+  const claudeBody=`import {appendFileSync} from 'node:fs';import {spawnSync} from 'node:child_process';process.stdin.setEncoding('utf8');let input='';let sent=false;process.stdin.on('data',chunk=>{input+=chunk;if(!sent&&input.includes('/usage')){sent=true;const settingsIndex=process.argv.indexOf('--settings');const settings=JSON.parse(process.argv[settingsIndex+1]);const match=settings.statusLine.command.match(/^'([^']+)' '([^']+)'$/);appendFileSync(${JSON.stringify(marker)},JSON.stringify({args:process.argv.slice(2),statusLine:settings.statusLine,scriptPath:match?.[2]})+'\\n');if(!match)process.exit(31);const result=spawnSync(match[1],[match[2]],{input:${JSON.stringify(JSON.stringify(rateLimits))},encoding:'utf8'});process.stdout.write(result.stdout||'');process.exit(result.status??0)}});`;
+  const codexBody=`if(process.argv[2]==='app-server'){process.stdin.setEncoding('utf8');let input='';process.stdin.on('data',chunk=>{input+=chunk;const lines=input.split('\\n');input=lines.pop()||'';for(const line of lines){let request;try{request=JSON.parse(line)}catch{continue}if(request.id===1)process.stdout.write(JSON.stringify({id:1,result:{}})+'\\n');if(request.id===2)process.stdout.write(JSON.stringify({id:2,result:{}})+'\\n')}})}else process.stdin.resume();`;
+  const {base}=await setup(t,{claudeBody,codexBody});
+  const response=await fetch(`${base}/v1/usage`);
+  assert.equal(response.status,200);
+  const usage=await response.json();
+  const claude=usage.harnesses.find(item=>item.harnessId==='claude-code');
+  assert.deepEqual(claude.windows,{
+    fiveHour:{status:'available',usedPercent:23.5,remainingPercent:76.5,resetsAt:new Date(1900000000*1000).toISOString()},
+    weekly:{status:'available',usedPercent:41.2,remainingPercent:58.8,resetsAt:new Date(1900600000*1000).toISOString()},
+  });
+  const captured=JSON.parse((await readFile(marker,'utf8')).trim());
+  const sourceIndex=captured.args.indexOf('--setting-sources');
+  assert.notEqual(sourceIndex,-1);
+  assert.equal(captured.args[sourceIndex+1],'local');
+  assert.ok(captured.args.includes('--ax-screen-reader'));
+  assert.equal(captured.statusLine.type,'command');
+  assert.equal(captured.statusLine.refreshInterval,1);
+  assert.match(captured.scriptPath,/status-line\.mjs$/);
+  const serialized=JSON.stringify(usage);
+  for(const privateValue of ['private-session-7f4d1a','private-user@example.invalid','secret-plan-name','private-model-id','__FOREMAN_CLAUDE_QUOTA_']) assert.equal(serialized.includes(privateValue),false,privateValue);
+});
+
+test('Claude status-line quota sentinel leaves missing, invalid, and oversized data unavailable', async t => {
+  const codexBody=`if(process.argv[2]==='app-server'){process.stdin.setEncoding('utf8');let input='';process.stdin.on('data',chunk=>{input+=chunk;const lines=input.split('\\n');input=lines.pop()||'';for(const line of lines){let request;try{request=JSON.parse(line)}catch{continue}if(request.id===1)process.stdout.write(JSON.stringify({id:1,result:{}})+'\\n');if(request.id===2)process.stdout.write(JSON.stringify({id:2,result:{}})+'\\n')}})}else process.stdin.resume();`;
+  const cases=[
+    ['one-window',{
+      rate_limits:{five_hour:{used_percentage:0,resets_at:1900000000},seven_day:null},
+      session_id:'private-missing-window-session',
+    },{fiveHour:{status:'available',usedPercent:0,remainingPercent:100,resetsAt:new Date(1900000000*1000).toISOString()},weekly:{status:'unavailable'}}],
+    ['invalid-values',{
+      rate_limits:{five_hour:{used_percentage:100.1,resets_at:1900000000},seven_day:{used_percentage:'41.2',resets_at:-1}},
+      session_id:'private-invalid-window-session',
+    },{fiveHour:{status:'unavailable'},weekly:{status:'unavailable'}}],
+    ['oversized-input',{
+      rate_limits:{five_hour:{used_percentage:23.5},seven_day:{used_percentage:41.2}},
+      filler:'x'.repeat(70_000),
+      session_id:'private-oversized-session',
+    },{fiveHour:{status:'unavailable'},weekly:{status:'unavailable'}}],
+  ];
+  for(const [name,payload,expected] of cases){
+    const claudeBody=`import {spawnSync} from 'node:child_process';process.stdin.setEncoding('utf8');let input='';let sent=false;process.stdin.on('data',chunk=>{input+=chunk;if(!sent&&input.includes('/usage')){sent=true;const settings=JSON.parse(process.argv[process.argv.indexOf('--settings')+1]);const match=settings.statusLine.command.match(/^'([^']+)' '([^']+)'$/);if(!match)process.exit(31);const result=spawnSync(match[1],[match[2]],{input:${JSON.stringify(JSON.stringify(payload))},encoding:'utf8'});process.stdout.write(result.stdout||'');process.exit(result.status??0)}});`;
+    const {base}=await setup(t,{claudeBody,codexBody});
+    const response=await fetch(`${base}/v1/usage`);
+    assert.equal(response.status,200,name);
+    const usage=await response.json();
+    const claude=usage.harnesses.find(item=>item.harnessId==='claude-code');
+    assert.deepEqual(claude.windows,expected,name);
+    for(const privateValue of ['private-missing-window-session','private-invalid-window-session','private-oversized-session']) assert.equal(JSON.stringify(usage).includes(privateValue),false,name);
+    assert.equal(JSON.stringify(usage).includes('x'.repeat(100)),false,name);
+  }
+});
+
+test('Claude usage reports unavailable for unlabeled or malformed PTY values and bounds screen capture', async t => {
+  const codexBody=`if(process.argv[2]==='app-server'){process.stdin.setEncoding('utf8');let input='';process.stdin.on('data',chunk=>{input+=chunk;const lines=input.split('\\n');input=lines.pop()||'';for(const line of lines){let request;try{request=JSON.parse(line)}catch{continue}if(request.id===1)process.stdout.write(JSON.stringify({id:1,result:{}})+'\\n');if(request.id===2)process.stdout.write(JSON.stringify({id:2,result:{}})+'\\n')}})}else process.stdin.resume();`;
+  const cases=[
+    ['malformed','Signed in as private-user@example.invalid\r\nCurrent session (5-hour window)\r\n42%\r\nWeekly limit\r\nabout 18 percent used\r\n'],
+    ['oversized',`${'x'.repeat(66_000)}\r\nCurrent session (5-hour window)\r\n42% used\r\nWeekly limit\r\n18% used\r\n`],
+  ];
+  for(const [name,screen] of cases){
+    const claudeBody=`process.stdin.setEncoding('utf8');let input='';let sent=false;process.stdin.on('data',chunk=>{input+=chunk;if(!sent&&input.includes('/usage')){sent=true;process.stdout.write(${JSON.stringify(screen)});process.exit(0)}});`;
+    const {base}=await setup(t,{claudeBody,codexBody});
+    const response=await fetch(`${base}/v1/usage`);
+    assert.equal(response.status,200,name);
+    const usage=await response.json();
+    const claude=usage.harnesses.find(item=>item.harnessId==='claude-code');
+    assert.deepEqual(claude.windows,{fiveHour:{status:'unavailable'},weekly:{status:'unavailable'}},name);
+    const serialized=JSON.stringify(usage);
+    assert.equal(serialized.includes('private-user@example.invalid'),false,name);
+    assert.equal(serialized.includes('x'.repeat(100)),false,name);
+  }
+});
+
+test('activity SSE emits contiguous ordered events and bounds sanitized summaries', async t => {
+  const lines=Array.from({length:70},(_,index)=>JSON.stringify({type:'assistant',message:{content:[{type:'text',text:`progress ${index}\u0000`+'x'.repeat(240)}]}}));
+  const toolLine=JSON.stringify({type:'stream_event',event:{type:'content_block_start',content_block:{type:'tool_use',name:'Read File'}}});
+  const body=`process.stdin.resume();process.stdin.on('end',()=>{console.log(JSON.stringify({type:'system',subtype:'init',model:'claude-requested',session_id:'activity-session'}));console.log(${JSON.stringify(toolLine)});setTimeout(()=>{for(const line of ${JSON.stringify(lines)})console.log(line);console.log(JSON.stringify({type:'result',subtype:'success',result:'done',model:'claude-requested',session_id:'activity-session',usage:{input_tokens:1,output_tokens:1}}));},150);});`;
+  const {base,baseCommit}=await setup(t,{claudeBody:body});
+  const seeded=await (await fetch(`${base}/extensions/foreman-workspace/v1/workspaces`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({base_commit:baseCommit})})).json();
+  const response=await fetch(`${base}/v1/responses`,{method:'POST',headers:{'Content-Type':'application/json',Accept:'text/event-stream','UHP-Version':'2026-09-12','Idempotency-Key':'activity-bounds'},body:JSON.stringify({input:'Say bounded answer',model:'claude-requested',metadata:{harness_id:'claude-code',workspace_id:seeded.workspace_id},stream:true,timeout_seconds:5,max_step:1})});
+  assert.equal(response.status,200);
+  const reader=response.body.getReader(); const decoder=new TextDecoder(); let buffer=''; const events=[]; let toolAt; let terminalAt;
+  while(true){const {done,value}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true});const frames=buffer.split('\n\n');buffer=frames.pop()??'';for(const frame of frames){const line=frame.split('\n').find(item=>item.startsWith('data: '));if(!line)continue;const item=JSON.parse(line.slice(6));events.push(item);if(item.type==='response.activity'&&item.response.activity.summary==='Using the ReadFile tool')toolAt=Date.now();if(item.type==='response.completed')terminalAt=Date.now();}}
+  assert.equal(events[0].type,'response.created');
+  assert.equal(events[0].sequence_number,0);
+  const activities=events.filter(item=>item.type==='response.activity');
+  assert.ok(activities.length>1,JSON.stringify(events));
+  assert.ok(activities.length<=64);
+  assert.equal(activities[0].sequence_number,1);
+  assert.ok(activities.some(item=>item.response.activity.summary==='Using the ReadFile tool'));
+  assert.ok(toolAt!==undefined&&terminalAt!==undefined&&toolAt<terminalAt);
+  assert.equal(events.at(-1).type,'response.completed');
+  assert.equal(events.at(-1).sequence_number,activities.length+1);
+  const summaries=activities.map(item=>item.response.activity.summary);
+  assert.ok(summaries.every(summary=>summary.length<=200&&!/[\u0000-\u001f\u007f-\u009f]/.test(summary)));
+  assert.equal(activities.every(item=>item.response.status==='in_progress'),true);
 });

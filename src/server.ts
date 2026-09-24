@@ -11,7 +11,7 @@ import { HindsightClient } from './hindsight.js';
 import { LocalBridge } from './local-bridge.js';
 import { browseRepositories, repositoryName } from './repository-browser.js';
 import { inspectRepository } from './repository-inspector.js';
-import { loadWorkspaceSetup, saveWorkspaceSetup, validateWorkspaceSetup } from './workspace-setup.js';
+import { deleteWorkspaceSetup, findSavedProjectForRepository, loadWorkspaceSetup, saveWorkspaceSetup, validateWorkspaceSetup } from './workspace-setup.js';
 
 const config=loadConfig();
 const workspacePolicyConfigured=Boolean(config.workspaceSourceRepo||config.workspaceBridgeUrl||config.workspaceAllowedScope.length||config.validationCommands.length);
@@ -40,7 +40,7 @@ const createProjectRuntime=async(projectId:string,workspace:Awaited<ReturnType<t
 const uiRoot=resolve(fileURLToPath(new URL('../dist/ui/',import.meta.url)));
 const body=async(req:IncomingMessage):Promise<any>=>{let data='';for await(const chunk of req)data+=chunk;if(data.length>1_000_000)throw Object.assign(new Error('Request body too large'),{statusCode:413});return data?JSON.parse(data):{};};
 const json=(res:ServerResponse,status:number,data:unknown)=>{res.writeHead(status,{'content-type':'application/json; charset=utf-8','cache-control':'no-store'});res.end(JSON.stringify(data));};
-const controllerForPath=async(path:string,query?:URLSearchParams):Promise<Controller>=>{
+const controllerForPath=async(path:string,query?:URLSearchParams,method?:string):Promise<Controller>=>{
   const state=await store.load();
   let projectId=query?.get('projectId')??undefined;
   let match=path.match(/^\/api\/projects\/([^/]+)/);
@@ -55,18 +55,46 @@ const controllerForPath=async(path:string,query?:URLSearchParams):Promise<Contro
     const saved=await loadWorkspaceSetup(config.dataDir,projectId).catch(()=>undefined);
     const setupPath=resolve(config.dataDir,'workspaces',`${projectId}.json`);
     const hasSavedSetup=Boolean(saved)||await access(setupPath).then(()=>true,()=>false);
-    if(hasSavedSetup&&!(path.endsWith('/workspace-setup')&&saved))throw Object.assign(new Error('Local repository bridge is unavailable for this project; restart Foreman to retry it'),{statusCode:503});
+    const administrativeDelete=method==='DELETE'&&/^\/api\/(?:projects\/[^/]+(?:\/planner)?|tasks\/[^/]+(?:\/plan)?)$/.test(path);
+    if(hasSavedSetup&&!(path.endsWith('/workspace-setup')&&saved)&&!administrativeDelete)throw Object.assign(new Error('Local repository bridge is unavailable for this project; restart Foreman to retry it'),{statusCode:503});
   }
   return controller;
 };
 const server=createServer(async(req,res)=>{
   const url=new URL(req.url??'/',`http://${req.headers.host??'localhost'}`), path=url.pathname;
   try {
-    const activeController=await controllerForPath(path,url.searchParams);
+    const projectUsageMatch=path.match(/^\/api\/projects\/([^/]+)\/usage$/);
+    if(req.method==='GET'&&projectUsageMatch){
+      const projectId=decodeURIComponent(projectUsageMatch[1]!);
+      const runtime=projectControllers.get(projectId);
+      const unavailable={status:'unavailable' as const};
+      const fallback={harnesses:['claude-code','codex-cli','antigravity-cli'].map(harnessId=>({harnessId,status:'unavailable' as const,windows:{fiveHour:unavailable,weekly:unavailable}}))};
+      const baseUrl=runtime?.bridge.status?.baseUrl;
+      if(!baseUrl){json(res,200,fallback);return;}
+      try{json(res,200,await new UhpClient({baseUrl,timeoutMs:15_000}).usage());return;}
+      catch{json(res,200,fallback);return;}
+    }
+    const activeController=await controllerForPath(path,url.searchParams,req.method);
     if(req.method==='GET'&&path==='/api/repositories/browse'){json(res,200,await browseRepositories(url.searchParams.get('path')??undefined));return;}
     if(req.method==='GET'&&path==='/api/repositories/inspect'){const selected=url.searchParams.get('path');if(!selected)throw Object.assign(new Error('Choose a repository folder'),{statusCode:400});json(res,200,await inspectRepository(selected));return;}
     if(req.method==='POST'&&path==='/api/projects/open'){
-      const workspace=await validateWorkspaceSetup(await body(req)),projectId=`prj_${randomUUID()}`;
+      const workspace=await validateWorkspaceSetup(await body(req));
+      const savedState=await store.load(),existingId=await findSavedProjectForRepository(config.dataDir,savedState.projects,workspace.repoPath);
+      if(existingId){
+        let runtime=projectControllers.get(existingId);
+        if(runtime){
+          const bridgeBaseUrl=runtime.bridge.status?.baseUrl;if(!bridgeBaseUrl)throw Object.assign(new Error('Local repository bridge is unavailable for this project'),{statusCode:503});
+          runtime.controller.configureVerifiedWorkspace({repoPath:workspace.repoPath,allowedScope:workspace.allowedScope,commands:workspace.validationCommands,bridgeBaseUrl,timeoutMs:config.validationTimeoutMs,maxOutputBytes:config.validationMaxOutputBytes});
+          const saved=await saveWorkspaceSetup(config.dataDir,existingId,{repoPath:workspace.repoPath,allowedScope:workspace.allowedScope,validationCommands:workspace.validationCommands});
+          projectControllers.set(existingId,{...runtime,workspace:saved});
+        }else{
+          const {scoped,bridge}=await createProjectRuntime(existingId,workspace);
+          try{await scoped.refreshDiscovery();await scoped.recover();const saved=await saveWorkspaceSetup(config.dataDir,existingId,{repoPath:workspace.repoPath,allowedScope:workspace.allowedScope,validationCommands:workspace.validationCommands});projectControllers.set(existingId,{controller:scoped,bridge,workspace:saved});}
+          catch(error){projectControllers.delete(existingId);await bridge.stop();throw error;}
+        }
+        const resumed=await projectControllers.get(existingId)!.controller.state();const project=resumed.projects.find(item=>item.id===existingId);if(!project)throw new Error('Saved project disappeared while reopening its repository');json(res,200,project);return;
+      }
+      const projectId=`prj_${randomUUID()}`;
       const {scoped,bridge}=await createProjectRuntime(projectId,workspace);
       try {await scoped.refreshDiscovery();const project=await scoped.createProject(repositoryName(workspace.repoPath),projectId);const saved=await saveWorkspaceSetup(config.dataDir,projectId,{repoPath:workspace.repoPath,allowedScope:workspace.allowedScope,validationCommands:workspace.validationCommands});projectControllers.set(projectId,{controller:scoped,bridge,workspace:saved});json(res,201,project);return;}
       catch(error){projectControllers.delete(projectId);await bridge.stop();throw error;}
@@ -82,10 +110,20 @@ const server=createServer(async(req,res)=>{
       await send(); const timer=setInterval(()=>{void send().catch(()=>undefined);},1000); req.on('close',()=>clearInterval(timer)); return;
     }
     if(req.method==='POST'&&path==='/api/projects'){const b=await body(req);json(res,201,await activeController.createProject(String(b.name??'')));return;}
+    let deleteMatch=path.match(/^\/api\/projects\/([^/]+)$/);if(req.method==='DELETE'&&deleteMatch){const projectId=decodeURIComponent(deleteMatch[1]!);const result=await activeController.deleteProject(projectId);const runtime=projectControllers.get(projectId);projectControllers.delete(projectId);configuredProjectIds.delete(projectId);if(runtime)await runtime.bridge.stop().catch(()=>undefined);await deleteWorkspaceSetup(config.dataDir,projectId);json(res,200,result);return;}
+    deleteMatch=path.match(/^\/api\/projects\/([^/]+)\/planner$/);if(req.method==='DELETE'&&deleteMatch){json(res,200,await activeController.resetProjectPlanner(decodeURIComponent(deleteMatch[1]!)));return;}
+    deleteMatch=path.match(/^\/api\/tasks\/([^/]+)\/plan$/);if(req.method==='DELETE'&&deleteMatch){json(res,200,await activeController.resetTaskPlan(decodeURIComponent(deleteMatch[1]!)));return;}
+    deleteMatch=path.match(/^\/api\/tasks\/([^/]+)$/);if(req.method==='DELETE'&&deleteMatch){json(res,200,await activeController.deleteTask(decodeURIComponent(deleteMatch[1]!)));return;}
+    const plannerMatch=path.match(/^\/api\/projects\/([^/]+)\/planner\/messages$/);if(req.method==='POST'&&plannerMatch){const b=await body(req);json(res,200,await activeController.sendProjectPlannerMessage(decodeURIComponent(plannerMatch[1]!),String(b.text??'')));return;}
+    const plannerRecoveryMatch=path.match(/^\/api\/projects\/([^/]+)\/planner\/assignments\/([^/]+)\/recover-tasks$/);if(req.method==='POST'&&plannerRecoveryMatch){json(res,200,await activeController.recoverProjectPlannerTasks(decodeURIComponent(plannerRecoveryMatch[1]!),decodeURIComponent(plannerRecoveryMatch[2]!)));return;}
     let m=path.match(/^\/api\/roles\/([^/]+)\/config$/);if(req.method==='PUT'&&m){const b=await body(req);json(res,200,await activeController.selectRoleConfig(decodeURIComponent(m[1]!),b.config));return;}
     m=path.match(/^\/api\/projects\/([^/]+)\/roles\/([^/]+)\/config$/);if(req.method==='PUT'&&m){const b=await body(req);json(res,200,await activeController.selectRoleConfig(decodeURIComponent(m[2]!),b.config,decodeURIComponent(m[1]!)));return;}
     m=path.match(/^\/api\/runs\/([^/]+)\/roles\/([^/]+)\/config$/);if(req.method==='PUT'&&m){const b=await body(req);json(res,200,await activeController.selectRoleConfig(decodeURIComponent(m[2]!),b.config,undefined,decodeURIComponent(m[1]!)));return;}
-    m=path.match(/^\/api\/projects\/([^/]+)\/tasks$/);if(req.method==='POST'&&m){const b=await body(req);json(res,201,await activeController.createTask(decodeURIComponent(m[1]!),String(b.title??'')));return;}
+    m=path.match(/^\/api\/projects\/([^/]+)\/tasks$/);if(req.method==='POST'&&m){const b=await body(req);json(res,201,await activeController.createTask(decodeURIComponent(m[1]!),typeof b.title==='string'&&Object.keys(b).length===1?b.title:b));return;}
+    m=path.match(/^\/api\/tasks\/([^/]+)$/);if(req.method==='PATCH'&&m){json(res,200,await activeController.updateTask(decodeURIComponent(m[1]!),await body(req)));return;}
+    m=path.match(/^\/api\/tasks\/([^/]+)\/start$/);if(req.method==='POST'&&m){json(res,202,await activeController.startTaskWork(decodeURIComponent(m[1]!),await body(req)));return;}
+    m=path.match(/^\/api\/tasks\/([^/]+)\/start-preview$/);if(req.method==='GET'&&m){json(res,200,await activeController.taskStartPreview(decodeURIComponent(m[1]!)));return;}
+    m=path.match(/^\/api\/tasks\/([^/]+)\/steer$/);if(req.method==='POST'&&m){const b=await body(req);json(res,200,await activeController.steerTask(decodeURIComponent(m[1]!),String(b.text??'')));return;}
     m=path.match(/^\/api\/tasks\/([^/]+)\/runs$/);if(req.method==='POST'&&m){json(res,201,await activeController.createRun(decodeURIComponent(m[1]!)));return;}
     m=path.match(/^\/api\/runs\/([^/]+)\/start$/);if(req.method==='POST'&&m){json(res,202,await activeController.startWork(decodeURIComponent(m[1]!),await body(req)));return;}
     m=path.match(/^\/api\/runs\/([^/]+)\/guidance$/);if(req.method==='POST'&&m){const b=await body(req);json(res,201,await activeController.addGuidance(decodeURIComponent(m[1]!),String(b.text??'')));return;}

@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { isAbsolute, resolve, sep } from 'node:path';
 
 export interface WorkspaceValidationCommand {
@@ -71,6 +71,13 @@ export async function saveWorkspaceSetup(dataDir: string, projectId: string, inp
   return config;
 }
 
+/** Remove repository ownership when its Foreman project is deleted. */
+export async function deleteWorkspaceSetup(dataDir:string,projectId:string):Promise<void>{
+  if(!isAbsolute(dataDir))throw new Error('Workspace data directory must be absolute');
+  validateProjectId(projectId);
+  await rm(resolve(dataDir,'workspaces',`${projectId}.json`),{force:true});
+}
+
 /** Load persisted settings and revalidate the repository before exposing them. */
 export async function loadWorkspaceSetup(dataDir: string, projectId: string): Promise<ValidatedWorkspace | undefined> {
   validateProjectId(projectId);
@@ -81,6 +88,15 @@ export async function loadWorkspaceSetup(dataDir: string, projectId: string): Pr
   let input: unknown;
   try { input = JSON.parse(text); } catch { throw new Error('Saved workspace setup is malformed'); }
   return validateWorkspaceSetup(input);
+}
+
+/** Find the newest saved project that already owns this canonical Git checkout. */
+export async function findSavedProjectForRepository(dataDir:string,projects:ReadonlyArray<{id:string;createdAt:string}>,repoPath:string):Promise<string|undefined>{
+  for(const project of [...projects].sort((a,b)=>b.createdAt.localeCompare(a.createdAt))){
+    const setup=await loadWorkspaceSetup(dataDir,project.id).catch(()=>undefined);
+    if(setup?.repoPath===resolve(repoPath))return project.id;
+  }
+  return undefined;
 }
 
 function validateProjectId(projectId: string): void {
