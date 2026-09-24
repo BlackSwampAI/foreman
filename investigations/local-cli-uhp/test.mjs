@@ -805,12 +805,26 @@ test('Claude statusLine collector ignores missing, malformed, invalid, and overs
   }
 });
 
+test('Claude usage asks the signed-in CLI for quota without a prompt or API key', async t => {
+  const marker=join(tmpdir(),`claude-control-usage-${process.pid}-${Math.random().toString(16).slice(2)}.json`);
+  t.after(()=>rm(marker,{force:true}));
+  const claudeBody=`import {writeFileSync} from 'node:fs';let input='';process.stdin.setEncoding('utf8');process.stdin.on('data',chunk=>input+=chunk);process.stdin.on('end',()=>{const request=JSON.parse(input.trim());writeFileSync(${JSON.stringify(marker)},JSON.stringify({request,apiKey:process.env.ANTHROPIC_API_KEY??null}));console.log(JSON.stringify({type:'control_response',response:{request_id:request.request_id,subtype:'success',response:{rate_limits_available:true,rate_limits:{limits:[{kind:'session',percent:23.5,resets_at:'2030-01-01T12:00:00Z'},{kind:'weekly_all',percent:41.2,resets_at:'2030-01-07T12:00:00Z'}]},session:{total_cost_usd:0,model_usage:{}}}}}));});`;
+  const {base}=await setup(t,{claudeBody});
+  const usage=await (await fetch(`${base}/v1/usage`)).json();
+  const claude=usage.harnesses.find(item=>item.harnessId==='claude-code');
+  assert.equal(claude.windows.fiveHour.usedPercent,23.5);
+  assert.equal(claude.windows.weekly.usedPercent,41.2);
+  const sent=JSON.parse(await readFile(marker,'utf8'));
+  assert.deepEqual(sent.request,{type:'control_request',request_id:'foreman-usage',request:{subtype:'get_usage'}});
+  assert.equal(sent.apiKey,null);
+});
+
 test('Claude usage reads only fresh cache snapshots and expires past reset windows', async t => {
   const now=Date.now();
   const futureReset=Math.floor(now/1000)+3600;
   const noModelCallMarker=join(tmpdir(),`claude-usage-no-model-call-${process.pid}-${Math.random().toString(16).slice(2)}`);
   t.after(()=>rm(noModelCallMarker,{force:true}));
-  const claudeBody=`import {writeFileSync} from 'node:fs';writeFileSync(${JSON.stringify(noModelCallMarker)},'called');process.stdin.resume();`;
+  const claudeBody=`import {writeFileSync} from 'node:fs';let input='';process.stdin.setEncoding('utf8');process.stdin.on('data',chunk=>input+=chunk);process.stdin.on('end',()=>{if(!input.includes('"subtype":"get_usage"'))writeFileSync(${JSON.stringify(noModelCallMarker)},'model-called')});`;
   const cases=[
     ['valid',{version:1,capturedAt:now,rate_limits:{five_hour:{used_percentage:23.5,resets_at:futureReset},seven_day:{used_percentage:41.2,resets_at:futureReset+3600}}},{fiveHour:{status:'available',usedPercent:23.5,remainingPercent:76.5,resetsAt:new Date(futureReset*1000).toISOString()},weekly:{status:'available',usedPercent:41.2,remainingPercent:58.8,resetsAt:new Date((futureReset+3600)*1000).toISOString()}}],
     ['stale',{version:1,capturedAt:now-16*60_000,rate_limits:{five_hour:{used_percentage:23.5,resets_at:futureReset},seven_day:{used_percentage:41.2,resets_at:futureReset+3600}}},{fiveHour:{status:'unavailable'},weekly:{status:'unavailable'}}],
