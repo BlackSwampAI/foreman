@@ -1,7 +1,7 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import { App, type State } from '../ui/main.js';
+import { App, type State, type TaskStartPreview } from '../ui/main.js';
 
 describe('project Planner UI',()=>{
   it('shows the continuing Planner, task tree, start controls, and named navigation with inline icons',()=>{
@@ -15,5 +15,22 @@ describe('project Planner UI',()=>{
     const state:State={projects:[{id:'prj_fixture',name:'Opened repository',plannerMessages:[{id:'pmsg_user',role:'user',text:'Add a health endpoint.',createdAt:'2026-01-01T00:00:00.000Z'},{id:'pmsg_planner',role:'planner',assignmentId:'asgn_fixture',text:'I prepared a task.\n{"reply":"See [the docs](https://example.com/docs) for context.","tasks":[{"title":"Add health endpoint"}]}',createdAt:'2026-01-01T00:01:00.000Z'}],tasks:[]}],roles:[]};
     const html=renderToStaticMarkup(createElement(App,{initialState:state}));
     expect(html).toContain('See ');expect(html).toContain('href="https://example.com/docs"');expect(html).not.toContain('I prepared a task.');expect(html).toContain('Earlier Planner proposal');expect(html).toContain('Create proposed tasks');expect(html).not.toContain('&quot;tasks&quot;');expect(html).toContain('Message project Planner');
+  });
+  it('puts task plan approval first and keeps run settings collapsed under Advanced options',()=>{
+    const state:State={projects:[{id:'prj_review',name:'Review project',tasks:[{id:'tsk_review',title:'Add search endpoint',goal:'Let clients search active records.',validationCriteria:['Returns matching records','Rejects invalid query'],suggestedAllowedPaths:['src/search/'],status:'ready'}]}],roles:['orchestrator','worker','reviewer'].map(id=>({id,name:id,enabled:true,config:{harnessId:'local',model:'safe-model'},availableConfigs:[{harnessId:'local',model:'safe-model'}]}))};
+    const preview:TaskStartPreview={taskId:'tsk_review',scope:['src/search/'],roleConfigs:Object.fromEntries(['orchestrator','worker','reviewer'].map(id=>[id,{harnessId:'local',model:'safe-model'}])),validationCriteria:['Returns matching records','Rejects invalid query'],validationCommands:[{name:'Tests',command:'pnpm',args:['test']}],budgets:{roleTurns:{planner:3,orchestrator:2,worker:1,reviewer:1},workerAttempts:1},baseCommit:'a'.repeat(40),requiresExplicitBase:false,reasons:[],canStart:true};
+    const html=renderToStaticMarkup(createElement(App,{initialState:state,initialTaskStartPreview:preview}));
+    expect(html).toContain('Add search endpoint');expect(html).toContain('Let clients search active records.');expect(html).toContain('Returns matching records');expect(html).toContain('Rejects invalid query');expect(html).toContain('Approve task &amp; start work');expect(html).toContain('TASK PLAN APPROVAL');expect(html).toContain('review the verified result and approve or reject it separately');expect(html).toContain('Advanced options');expect(html).toContain('<details class="task-advanced">');expect(html).not.toContain('Start work</button>');
+  });
+  it('surfaces preview blockers in task review and prevents task plan approval',()=>{
+    const state:State={projects:[{id:'prj_blocked',name:'Blocked project',tasks:[{id:'tsk_blocked',title:'Update report',goal:'Update the report.',validationCriteria:['Report lint passes'],status:'ready'}]}],roles:[]};
+    const preview:TaskStartPreview={taskId:'tsk_blocked',scope:[],roleConfigs:{},validationCriteria:['Report lint passes'],validationCommands:[],requiresExplicitBase:true,reasons:['Choose at least one allowed path before starting this task','Dependency tsk_prior must be completed and promoted'],dependencyTaskIds:['tsk_prior'],canStart:false};
+    const html=renderToStaticMarkup(createElement(App,{initialState:state,initialTaskStartPreview:preview}));
+    expect(html).toContain('Resolve these blockers before starting');expect(html).toContain('Choose at least one allowed path before starting this task');expect(html).toContain('Dependency tsk_prior must be completed and promoted');expect(html).toContain('Related work must be integrated first');expect(html).toContain('pins the updated current HEAD automatically');expect(html).toContain('Approve task &amp; start work');expect(html).toMatch(/<button class="primary task-approve-button" disabled="">Approve task &amp; start work<\/button>/);
+  });
+  it('shows a persisted task plan approval separately from later result approval',()=>{
+    const state:State={projects:[{id:'prj_approved',name:'Approved project',tasks:[{id:'tsk_approved',title:'Document API',goal:'Document the API.',validationCriteria:['Docs build passes'],status:'in progress',planApproval:{status:'approved',approvedAt:'2026-01-02T00:00:00.000Z',specDigest:'digest',runId:'run_approved'},runs:[]}]}],roles:[]};
+    const html=renderToStaticMarkup(createElement(App,{initialState:state}));
+    expect(html).toContain('Task plan approved');expect(html).toContain('Run run_approved');expect(html).toContain('Result review and approval are still separate.');
   });
 });
