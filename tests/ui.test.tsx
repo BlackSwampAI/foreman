@@ -69,7 +69,7 @@ describe('project Planner UI',()=>{
     expect(html).toContain('Historical rejection superseded by verified evidence');
     expect(html).toContain('Worker assignment asgn_worker');
     expect(html).not.toContain('Worker Attempt Rejected');expect(html).not.toContain('Worker Evidence Rejected');
-    expect(html).toContain('TASK PLAN APPROVAL');expect(html).toContain('Approve task &amp; start work');
+    expect(html).toContain('This run has verified Worker evidence');expect(html).toContain('Resolve its review, human decision, or promotion before starting another run');expect(html).toContain('Go to Evidence &amp; approval');expect(html).not.toContain('Approve task &amp; start work');
   });
   it('keeps the run view concise by default while leaving approval and details reachable',()=>{
     const longDiff='+++ b/src/endpoint.ts\n'+('line with implementation detail\n'.repeat(80));
@@ -80,7 +80,19 @@ describe('project Planner UI',()=>{
     expect(plannerIndex).toBeGreaterThanOrEqual(0);expect(workflowIndex).toBeGreaterThan(plannerIndex);expect(taskReviewIndex).toBeGreaterThan(workflowIndex);
     expect(html).toContain('<details class="workflow-more"><summary>Details</summary>');expect(html).toContain('<details class="run-meta-disclosure"><summary>Session and usage details</summary>');
     expect(html).toContain('<details class="evidence-block diff-block">');expect(html).not.toContain('<details class="evidence-block diff-block" open');expect(html).not.toContain('<details class="workflow-more" open');
-    expect(html).toContain('Approve task &amp; start work');expect(html).toContain('Reviewer phase, Blocked. Select for activity and evidence');expect(html).toContain(longDiff);
+    expect(html).toContain('This run has verified Worker evidence');expect(html).toContain('Go to Reviewer retry');expect(html).not.toContain('Go to Evidence &amp; approval');expect(html).not.toContain('Approve task &amp; start work');expect(html).toContain('Reviewer phase, Blocked. Select for activity and evidence');expect(html).toContain(longDiff);
+  });
+  it('selects the latest run by default so its failed Reviewer retry remains reachable',()=>{
+    const state:State={projects:[{id:'prj_latest_run',name:'Latest run project',tasks:[{id:'tsk_latest_run',title:'Add endpoint',goal:'Add the endpoint.',status:'failed',runs:[
+      {id:'run_old_failed',status:'failed',controller:{startedAt:'2026-09-24T11:00:00.000Z',phase:'stopped',active:false},assignments:[{id:'asgn_old_worker',roleId:'worker',status:'failed'}]},
+      {id:'run_latest_failed',status:'failed',controller:{startedAt:'2026-09-24T12:00:00.000Z',phase:'stopped',stoppedReason:'Reviewer submission returned HTTP 400: review_evidence_invalid',active:false},assignments:[{id:'asgn_latest_worker',roleId:'worker',status:'succeeded'},{id:'asgn_latest_reviewer',roleId:'reviewer',status:'failed',error:'Reviewer submission returned HTTP 400: review_evidence_invalid'}],workerEvidence:{workerAssignmentId:'asgn_latest_worker',responseId:'resp_latest_worker',pinnedBaseCommit:'a'.repeat(40),completeSnapshot:{reportedComplete:true,reportedErrors:0,entryCount:1},scopeVerified:true,allowedScope:['src/'],entries:[],changes:[],reviewDiff:'verified diff'},validation:{status:'passed',observations:[{name:'Tests',command:'pnpm',args:['test'],exitCode:0,timedOut:false,output:'passed',outputTruncated:false,passed:true}]}}
+    ]}]}],roles:[...['orchestrator','worker','reviewer'].map(id=>({id,name:id,enabled:true,config:{harnessId:'fixture',model:'simulated'},availableConfigs:[{harnessId:'fixture',model:'simulated'}]}))]};
+    const html=renderToStaticMarkup(createElement(App,{initialState:state}));
+    expect(html).toContain('<div class="detail-row"><span>Run ID</span><code>run_latest_failed</code></div>');
+    expect(html).toContain('Go to Reviewer retry');expect(html).not.toContain('Go to Evidence &amp; approval');expect(html).not.toContain('Approve task &amp; start work');
+    expect(html).toContain('Reviewer submission returned HTTP 400: review_evidence_invalid');expect(html).not.toContain('Cleared by successful validation');
+    const recovered=structuredClone(state),recoveredRun=recovered.projects[0]!.tasks[0]!.runs![1]!;recoveredRun.status='review';recoveredRun.assignments![1]!.status='succeeded';delete recoveredRun.assignments![1]!.error;
+    const recoveredHtml=renderToStaticMarkup(createElement(App,{initialState:recovered}));expect(recoveredHtml).not.toContain('Reviewer submission returned HTTP 400: review_evidence_invalid');
   });
   it('keeps project identity and repository switching in the compact header without a duplicate workspace card',()=>{
     const state:State={projects:[{id:'prj_scope',name:'Scope project',repoPath:'/repo/scope-project',tasks:[{id:'tsk_scope',title:'Add endpoint',goal:'Add the requested endpoint.',status:'ready'}]}],roles:[]};
@@ -104,5 +116,22 @@ describe('project Planner UI',()=>{
     expect(html).toContain('class="task-actions"><summary>Task actions</summary>');expect(html).not.toContain('<details class="task-actions" open');
     expect(html).toContain('Reset approved plan');expect(html).toContain('Delete task');expect(html).toContain('danger-action');
     expect(html).not.toContain('class="admin-confirm"');expect(html).not.toContain('aria-labelledby="admin-action-title"');expect(html).not.toContain('/api/tasks/tsk_approved_actions/plan');expect(html).not.toContain('/api/tasks/tsk_approved_actions"');
+  });
+  it('shows live provider activity with role and model identity',()=>{
+    const state:State={projects:[{id:'prj_live_activity',name:'Activity project',tasks:[{id:'tsk_live_activity',title:'Live task',runs:[{id:'run_live_activity',status:'running',assignments:[{id:'asgn_live_worker',roleId:'worker',status:'running',requestedConfig:{harnessId:'codex',model:'gpt-6-sol'}},{id:'asgn_live_reviewer',roleId:'reviewer',status:'running',requestedConfig:{harnessId:'anthropic',model:'claude-sonnet'}}]}]}]},{id:'prj_other',name:'Other project',plannerAssignments:[{id:'asgn_other_planner',roleId:'planner',status:'running'}]}],roles:[{id:'worker',name:'Worker',enabled:true},{id:'reviewer',name:'Reviewer',enabled:true},{id:'planner',name:'Planner',enabled:true}],events:[{id:'evt_provider_activity',type:'assignment.progress',entityType:'assignment',entityId:'asgn_live_worker',at:'2026-09-24T12:00:00.000Z',data:{assignmentId:'asgn_live_worker',providerEvent:{response:{activity:{kind:'tool',summary:'Reading src/index.ts'}}}}},{id:'evt_future_activity',type:'response.activity',entityType:'assignment',entityId:'asgn_live_reviewer',at:'2026-09-24T12:01:00.000Z',data:{assignmentId:'asgn_live_reviewer',roleId:'reviewer',model:'claude-sonnet',activity:{kind:'phase',summary:'Reviewing verified diff'}}},{id:'evt_other_project_activity',type:'assignment.progress',entityType:'assignment',entityId:'asgn_other_planner',at:'2026-09-24T12:02:00.000Z',data:{assignmentId:'asgn_other_planner',providerEvent:{response:{activity:{kind:'tool',summary:'SECRET unrelated project update'}}}}}]};
+    const html=renderToStaticMarkup(createElement(App,{initialState:state,initialCliUsage:{harnesses:[{harnessId:'codex',windows:{fiveHour:{status:'available',usedPercent:27,remainingPercent:73,resetsAt:'2026-09-24T18:00:00.000Z'},weekly:{status:'unsupported'}}}]}}));
+    expect(html).toContain('Streaming activity');expect(html).toContain('Worker · gpt-6-sol');expect(html).toContain('Tool · Reading src/index.ts');expect(html).toContain('Reviewer · claude-sonnet');expect(html).toContain('Phase · Reviewing verified diff');expect(html).not.toContain('SECRET unrelated project update');expect(html).toContain('73% remaining');expect(html).not.toContain('27% used');expect(html).toContain('Unsupported');expect(html).toContain('Codex');expect(html).toContain('Provider');expect(html).toContain('5h window');expect(html).toContain('Resets');expect(html).not.toContain('Claude and Antigravity');expect(html).toContain('Quota data is shown when the connected harness reports it.');
+    const treeIndex=html.indexOf('class="tree card"'),treeEndIndex=html.indexOf('</aside>',treeIndex),liveResponseIndex=html.indexOf('aria-label="Streaming activity"'),cliUsageIndex=html.indexOf('aria-label="CLI usage"'),projectDetailsIndex=html.indexOf('Project details · usage &amp; activity');
+    expect(treeIndex).toBeGreaterThan(-1);expect(cliUsageIndex).toBeGreaterThan(treeEndIndex);expect(liveResponseIndex).toBeGreaterThan(-1);expect(cliUsageIndex).toBeGreaterThan(liveResponseIndex);expect(projectDetailsIndex).toBeGreaterThan(cliUsageIndex);
+  });
+  it('renders separate quota groups reported for one provider',()=>{
+    const state:State={projects:[{id:'prj_usage_groups',name:'Usage groups'}],roles:[]};
+    const html=renderToStaticMarkup(createElement(App,{initialState:state,initialCliUsage:{harnesses:[{harnessId:'agy',groups:[{id:'gemini',label:'Gemini',windows:{fiveHour:{status:'available',usedPercent:22,remainingPercent:78}}},{id:'claude-gpt',label:'Claude/GPT',windows:{weekly:{status:'available',usedPercent:41,remainingPercent:59}}}]}]}}));
+    expect(html).toContain('Agy · Gemini');expect(html).toContain('Agy · Claude/GPT');expect(html).toContain('78% remaining');expect(html).toContain('59% remaining');expect(html).not.toContain('22% used');expect(html).not.toContain('41% used');expect(html).toContain('Quota group');
+  });
+  it('defaults role configuration to an available scope when no run exists',()=>{
+    const state:State={projects:[{id:'prj_no_run',name:'No run project',tasks:[{id:'tsk_no_run',title:'Ready task',runs:[]}]}],roles:[{id:'worker',name:'Worker',enabled:true,config:{harnessId:'codex',model:'gpt-6-sol'},availableConfigs:[{harnessId:'codex',model:'gpt-6-sol'}]}]};
+    const html=renderToStaticMarkup(createElement(App,{initialState:state}));
+    expect(html).toContain('class="outline small settings-button" type="button">Settings</button>');expect(html).not.toContain('aria-label="Configuration scope"');expect(html).not.toContain('id="roles"');expect(html).not.toContain('/api/runs/undefined/roles/worker/config');
   });
 });

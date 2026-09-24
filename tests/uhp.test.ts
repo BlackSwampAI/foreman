@@ -25,6 +25,37 @@ describe("UHP adapter", () => {
     expect(result.modelFallback).toBe(false);
   });
 
+  it("preserves separate AGY quota groups and canonical five-hour/weekly windows", async () => {
+    const body = { harnesses: [{
+      harnessId: "antigravity-cli",
+      status: "ready",
+      windows: {
+        fiveHour: { status: "available", usedPercent: 28, remainingPercent: 72, resetsAt: "2030-03-17T08:00:00.000Z" },
+        weekly: { status: "available", usedPercent: 59, remainingPercent: 41, resetsAt: "2030-03-21T00:00:00.000Z" },
+      },
+      groups: [
+        { id: "gemini", label: "Gemini", windows: {
+          fiveHour: { status: "available", usedPercent: 28, remainingPercent: 72, resetsAt: "2030-03-17T08:00:00.000Z" },
+          weekly: { status: "available", usedPercent: 59, remainingPercent: 41, resetsAt: "2030-03-21T00:00:00.000Z" },
+        } },
+        { id: "claude", label: "Claude", windows: {
+          fiveHour: { status: "available", usedPercent: 10, remainingPercent: 90, resetsAt: "2030-03-17T09:00:00.000Z" },
+          weekly: { status: "available", usedPercent: 40, remainingPercent: 60, resetsAt: "2030-03-22T00:00:00.000Z" },
+        } },
+      ],
+    }] };
+    const fetcher: typeof fetch = async (input) => {
+      expect(new URL(String(input)).pathname).toBe("/v1/usage");
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json", "UHP-Version": "2026-09-12" } });
+    };
+    const client = new UhpClient({ baseUrl: "http://usage-fixture", fetch: fetcher });
+    const usage = await client.usage();
+    const expected = body.harnesses[0]!;
+    expect(usage.harnesses[0]?.windows).toEqual(expected.windows);
+    expect(usage.harnesses[0]?.groups).toEqual(expected.groups);
+    expect(usage.harnesses[0]?.groups?.map((group) => group.id)).toEqual(["gemini", "claude"]);
+  });
+
   it("accepts a bound Antigravity unavailable-model report for every role and preserves reported usage", async () => {
     const server = await fixture({ antigravityCli: true, missingActualModel: true, capabilities: { readOnlyReviewer: true } });
     const client = new UhpClient({ baseUrl: server.baseUrl, harnessId: "antigravity-cli", model: "gemini-3.8-flash-medium" });

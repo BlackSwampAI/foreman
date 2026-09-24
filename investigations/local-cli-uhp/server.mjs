@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile, readdir, lstat, readlink, realpath, rm, access, symlink, chmod, open } from 'node:fs/promises';
-import { accessSync, constants as fsConstants } from 'node:fs';
+import { accessSync, constants as fsConstants, readFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { posix } from 'node:path';
@@ -34,13 +34,15 @@ if (AGY_WORKER_EFFORT !== undefined && !['low', 'medium', 'high'].includes(AGY_W
   throw new Error('AGY_WORKER_EFFORT must be low, medium, or high');
 }
 const HARNESS = {
-  claude: { id: 'claude-code', bin: process.env.CLAUDE_BIN ?? 'claude', authDir: process.env.CLAUDE_CONFIG_DIR, model: process.env.CLAUDE_MODEL },
-  codex: { id: 'codex-cli', bin: process.env.CODEX_BIN ?? 'codex', authDir: process.env.CODEX_HOME, model: process.env.CODEX_MODEL },
+  claude: { id: 'claude-code', bin: process.env.CLAUDE_BIN ?? 'claude', authDir: process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), model: process.env.CLAUDE_MODEL ?? 'sonnet' },
+  codex: { id: 'codex-cli', bin: process.env.CODEX_BIN ?? 'codex', authDir: process.env.CODEX_HOME ?? join(homedir(), '.codex'), model: process.env.CODEX_MODEL ?? 'gpt-6-sol' },
   agy: { id: 'antigravity-cli', bin: process.env.AGY_BIN ?? 'agy', authDir: process.env.AGY_CONFIG_DIR ?? join(homedir(), '.gemini', 'antigravity-cli'), model: process.env.AGY_MODEL ?? 'gemini-3.8-flash-low' },
 };
 const tasks = new Map();
 const workspaces = new Map();
 let agyModelsCache = { expires: 0, models: [] };
+let codexRateLimitCache = { expires: 0, value: undefined };
+let usageStatusCache = { expires: 0, value: undefined, pending: undefined };
 let state = { keys: {}, responses: {}, workspaces: {} };
 
 function agyDiscoveryEnvironment(source = process.env) {
@@ -77,10 +79,337 @@ function executableConfigured(bin) {
   if (bin.includes('/')) { try { accessSync(bin, fsConstants.X_OK); return true; } catch { return false; } }
   return (process.env.PATH ?? '').split(':').some(dir => { try { accessSync(join(dir, bin), fsConstants.X_OK); return true; } catch { return false; } });
 }
-function configured(h) { return !!h?.authDir && typeof h.model === 'string' && h.model.trim() !== '' && h.model.trim().toLowerCase() !== 'undefined' && (!!SOURCE_REPO && executableConfigured(BWRAP) && (h.id !== 'antigravity-cli' || executableConfigured(h.bin)) && readableDirectory(h.authDir)); }
+function configured(h) { return !!h?.authDir && typeof h.model === 'string' && h.model.trim() !== '' && h.model.trim().toLowerCase() !== 'undefined' && (!!SOURCE_REPO && executableConfigured(BWRAP) && executableConfigured(h.bin) && readableDirectory(h.authDir)); }
 function readableDirectory(path) { try { return accessSync(path, fsConstants.R_OK) === undefined; } catch { return false; } }
 function outputText(r) { return typeof r.output_text === 'string' ? r.output_text : ''; }
 function reportedModel(value) { return typeof value === 'string' && value.trim() !== '' && value.trim().toLowerCase() !== 'undefined' ? value.trim() : undefined; }
+
+const ACTIVITY_LIMIT = 32;
+const ACTIVITY_TOTAL_LIMIT = 64;
+const ACTIVITY_TEXT_LIMIT = 200;
+function safeActivityText(value) {
+  if (typeof value !== 'string') return undefined;
+  const safe = value.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, ACTIVITY_TEXT_LIMIT);
+  return safe || undefined;
+}
+function activitySummary(kind, event) {
+  if (!event || typeof event !== 'object') return undefined;
+  if (kind === 'claude') {
+    if (event.type === 'assistant') {
+      const content = event.message?.content;
+      const text = Array.isArray(content) ? content.filter(item => item?.type === 'text').map(item => item.text).join(' ') : '';
+      return safeActivityText(text);
+    }
+    if (event.type === 'stream_event') {
+      const inner = event.event;
+      if (inner?.type === 'content_block_start' && inner.content_block?.type === 'tool_use') return `Using ${safeToolName(inner.content_block.name)}`;
+    }
+  } else if (kind === 'codex-cli') {
+    if (event.type === 'item.completed' && event.item?.type === 'agent_message') return safeActivityText(event.item.text);
+    if (event.type === 'item.started') {
+      const type = event.item?.type;
+      if (type === 'command_execution') return 'Running checks';
+      if (type === 'file_change') return 'Editing files';
+      if (type === 'mcp_tool_call' || type === 'web_search') return 'Using a tool';
+      if (type === 'agent_message') return undefined;
+    }
+  } else {
+    if (event.event === 'step_update') {
+      const step = event.step_update ?? {};
+      if (step.step_type === 'tool' && ['ACTIVE','STARTED','RUNNING'].includes(step.state)) return `Using ${safeToolName(step.tool_name ?? step.tool_info?.name)}`;
+      if (step.step_type === 'thinking' || step.step_type === 'planning') return 'Planning next steps';
+    }
+    if (event.event === 'result' && typeof event.result?.response === 'string') return safeActivityText(event.result.response);
+  }
+  return undefined;
+}
+function safeToolName(value) {
+  if (typeof value !== 'string') return 'a tool';
+  const name = value.replace(/[^A-Za-z0-9_.-]/g, '').slice(0, 40);
+  return name ? `the ${name} tool` : 'a tool';
+}
+function recordActivity(task, summary) {
+  if (task.activityTotal >= ACTIVITY_TOTAL_LIMIT) return;
+  const safe = safeActivityText(summary);
+  if (!safe || task.activity.at(-1)?.summary === safe) return;
+  task.activity.push({ index: ++task.activityTotal, kind: /^Using /.test(safe) ? 'tool' : 'commentary', summary: safe });
+  if (task.activity.length > ACTIVITY_LIMIT) task.activity.splice(0, task.activity.length - ACTIVITY_LIMIT);
+  for (const notify of task.activityListeners) notify();
+}
+
+function codexQuotaWindow(rateLimits, duration) {
+  const buckets = [rateLimits?.rateLimits, rateLimits?.rateLimitsByLimitId?.codex, ...Object.entries(rateLimits?.rateLimitsByLimitId ?? {}).filter(([id]) => id !== 'codex').map(([, bucket]) => bucket)].filter(Boolean);
+  const window = buckets.flatMap(bucket => [bucket.primary, bucket.secondary]).find(item => item?.windowDurationMins === duration && Number.isFinite(item.usedPercent));
+  if (!window) return { status: 'unsupported' };
+  const usedPercent = Math.max(0, Math.min(100, window.usedPercent));
+  return { status: 'available', usedPercent, remainingPercent: 100 - usedPercent, ...(Number.isFinite(window.resetsAt) ? { resetsAt: new Date(window.resetsAt * 1000).toISOString() } : {}) };
+}
+async function readCodexRateLimits() {
+  if (codexRateLimitCache.expires > Date.now()) return codexRateLimitCache.value;
+  const h = HARNESS.codex;
+  if (!configured(h)) return { status: 'unavailable', fiveHour: { status: 'unavailable' }, weekly: { status: 'unavailable' } };
+  const result = await new Promise(resolveResult => {
+    let child, output = '', remainder = '', settled = false, initialized = false;
+    const finish = value => { if (settled) return; settled = true; clearTimeout(timer); child?.kill('SIGKILL'); resolveResult(value); };
+    const consume = chunk => {
+      output = (output + chunk).slice(-64_000);
+      const lines = output.split(/\r?\n/); output = lines.pop() ?? '';
+      for (const line of lines) {
+        try {
+          const message = JSON.parse(line);
+          if (message.id === 1 && message.result && !initialized) {
+            initialized = true;
+            child.stdin.write('{"method":"initialized","params":{}}\n');
+            child.stdin.write('{"method":"account/rateLimits/read","id":2}\n');
+          } else if (message.id === 2) {
+            if (message.result?.rateLimits || message.result?.rateLimitsByLimitId) finish({ status: 'available', fiveHour: codexQuotaWindow(message.result, 300), weekly: codexQuotaWindow(message.result, 10080) });
+            else finish({ status: 'unavailable', fiveHour: { status: 'unavailable' }, weekly: { status: 'unavailable' } });
+          }
+        } catch { /* ignore malformed, bounded app-server diagnostics */ }
+      }
+    };
+    const timer = setTimeout(() => finish({ status: 'unavailable', fiveHour: { status: 'unavailable' }, weekly: { status: 'unavailable' } }), 4_000);
+    try {
+      const env = Object.fromEntries(['PATH','HOME','USER','LOGNAME','LANG','LC_ALL','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY','SSL_CERT_FILE','SSL_CERT_DIR','NODE_EXTRA_CA_CERTS'].flatMap(name => typeof process.env[name] === 'string' ? [[name, process.env[name]]] : []));
+      env.HOME ??= homedir(); env.CODEX_HOME = h.authDir;
+      if (typeof process.env.XDG_CONFIG_HOME === 'string') env.XDG_CONFIG_HOME = process.env.XDG_CONFIG_HOME;
+      child = spawn(h.bin, ['app-server'], { env, stdio: ['pipe', 'pipe', 'ignore'], shell: false, windowsHide: true });
+      child.stdout.setEncoding('utf8'); child.stdout.on('data', consume);
+      child.stdin.on('error', () => {});
+      child.once('error', () => finish({ status: 'unavailable', fiveHour: { status: 'unavailable' }, weekly: { status: 'unavailable' } }));
+      child.once('close', () => { if (!settled) finish({ status: 'unavailable', fiveHour: { status: 'unavailable' }, weekly: { status: 'unavailable' } }); });
+      child.stdin.write('{"method":"initialize","id":1,"params":{"clientInfo":{"name":"foreman-usage","title":"Foreman usage status","version":"1.0.0"}}}\n');
+    } catch { finish({ status: 'unavailable', fiveHour: { status: 'unavailable' }, weekly: { status: 'unavailable' } }); }
+  });
+  codexRateLimitCache = { expires: Date.now() + 30_000, value: result };
+  return result;
+}
+
+function unavailableUsageWindows() {
+  return { fiveHour: { status: 'unavailable' }, weekly: { status: 'unavailable' } };
+}
+function normalizeAgyQuotaWindow(buckets, duration) {
+  const bucket = buckets.find(item => item && item.window === duration);
+  if (!bucket || !Number.isFinite(bucket.remaining_fraction) || bucket.remaining_fraction < 0 || bucket.remaining_fraction > 1) return { status: 'unavailable' };
+  const remainingPercent = Math.round(bucket.remaining_fraction * 10_000) / 100;
+  const usedPercent = Math.round((1 - bucket.remaining_fraction) * 10_000) / 100;
+  const parsedReset = typeof bucket.reset_time === 'string' ? Date.parse(bucket.reset_time) : NaN;
+  return { status: 'available', usedPercent, remainingPercent, ...(Number.isFinite(parsedReset) ? { resetsAt: new Date(parsedReset).toISOString() } : {}) };
+}
+function normalizeAgyQuotaGroups(payload) {
+  const rawGroups = payload?.command?.data?.groups;
+  if (!Array.isArray(rawGroups)) return [];
+  const seenIds = new Set();
+  return rawGroups.slice(0, 20).map((raw, index) => {
+    const name = typeof raw?.name === 'string' ? raw.name.toLowerCase() : '';
+    const base = /claude/.test(name) ? { id: 'claude', label: 'Claude' } : /gemini/.test(name) ? { id: 'gemini', label: 'Gemini' } : /\bgpt\b/.test(name) ? { id: 'gpt', label: 'GPT' } : { id: `quota-pool-${index + 1}`, label: `Quota pool ${index + 1}` };
+    let id = base.id;
+    for (let suffix = 2; seenIds.has(id); suffix++) id = `${base.id}-${suffix}`;
+    seenIds.add(id);
+    const buckets = Array.isArray(raw?.buckets) ? raw.buckets : [];
+    return { ...base, id, windows: { fiveHour: normalizeAgyQuotaWindow(buckets, '5h'), weekly: normalizeAgyQuotaWindow(buckets, 'weekly') } };
+  });
+}
+function parseClaudeQuotaScreen(screen) {
+  const unavailable = unavailableUsageWindows();
+  const visible = String(screen)
+    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, ' ')
+    .replace(/\u001b\[[0-?]*[ -/]*m/g, '')
+    .replace(/\u001b\[[0-?]*[ -/]*[Hf]/g, '\n')
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, ' ')
+    .replace(/\u001b[@-Z\\-_]/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g, ' ');
+  const lines = visible.split(/\n/).map(line => line.replace(/\s+/g, ' ').trim()).filter(Boolean);
+  const rows = [];
+  for (let i = 0; i < lines.length; i++) {
+    const text = lines[i].toLowerCase();
+    const fiveHour = /\b(?:5\s*[- ]?\s*h(?:our)?s?|five\s*[- ]?\s*hours?|current\s+session)\b/i.test(text);
+    const weekly = /\b(?:weekly|week)\b/i.test(text);
+    if (fiveHour || weekly) rows.push({ index: i, kind: fiveHour ? 'fiveHour' : 'weekly' });
+  }
+  const values = {};
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const end = Math.min(lines.length, row.index + 4, rows[i + 1]?.index ?? lines.length);
+    const segment = lines.slice(row.index, end).join(' ');
+    const match = segment.match(/\b(\d{1,3}(?:\.\d+)?)\s*%\s*(used|utili[sz]ed|consumed|remaining|left)\b/i);
+    if (!match) continue;
+    const percent = Number(match[1]);
+    if (!Number.isFinite(percent) || percent < 0 || percent > 100) continue;
+    const isUsed = /^(?:used|utili[sz]ed|consumed)$/i.test(match[2]);
+    const usedPercent = Math.round((isUsed ? percent : 100 - percent) * 100) / 100;
+    const remainingPercent = Math.round((100 - usedPercent) * 100) / 100;
+    const resetMatch = segment.match(/\breset(?:s|ting)?\s+(?:at\s+)?(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\b/i);
+    const parsedReset = resetMatch ? Date.parse(resetMatch[1]) : NaN;
+    values[row.kind] = { status: 'available', usedPercent, remainingPercent, ...(Number.isFinite(parsedReset) ? { resetsAt: new Date(parsedReset).toISOString() } : {}) };
+  }
+  return { fiveHour: values.fiveHour ?? unavailable.fiveHour, weekly: values.weekly ?? unavailable.weekly };
+}
+function shellQuote(value) { return `'${String(value).replaceAll("'", "'\\''")}'`; }
+function claudeStatusLineScript(sentinel) {
+  return `const sentinel = ${JSON.stringify(sentinel)};\nlet input = '';\nlet inputBytes = 0;\nlet oversized = false;\nprocess.stdin.setEncoding('utf8');\nprocess.stdin.on('data', chunk => { inputBytes += Buffer.byteLength(chunk); if (inputBytes > 65536) { oversized = true; input = ''; process.stdin.destroy(); return; } input += chunk; });\nprocess.stdin.on('end', () => { if (oversized) return; try { const data = JSON.parse(input); const limits = data && typeof data === 'object' ? data.rate_limits : undefined; const pick = value => { if (!value || typeof value !== 'object' || typeof value.used_percentage !== 'number' || !Number.isFinite(value.used_percentage) || value.used_percentage < 0 || value.used_percentage > 100) return null; const out = { used_percentage: value.used_percentage }; if (Number.isSafeInteger(value.resets_at) && value.resets_at > 0) out.resets_at = value.resets_at; return out; }; const payload = { five_hour: pick(limits?.five_hour), seven_day: pick(limits?.seven_day) }; if (!payload.five_hour && !payload.seven_day) return; process.stdout.write(sentinel + JSON.stringify(payload) + '\\n'); } catch {} });\n`;
+}
+function normalizeClaudeStatusWindow(raw) {
+  if (!raw || typeof raw !== 'object' || typeof raw.used_percentage !== 'number' || !Number.isFinite(raw.used_percentage) || raw.used_percentage < 0 || raw.used_percentage > 100) return { status: 'unavailable' };
+  const usedPercent = Math.round(raw.used_percentage * 100) / 100;
+  const remainingPercent = Math.round((100 - usedPercent) * 100) / 100;
+  const reset = raw.resets_at;
+  const resetMs = Number.isSafeInteger(reset) && reset > 0 ? reset * 1000 : NaN;
+  return { status: 'available', usedPercent, remainingPercent, ...(Number.isFinite(resetMs) && Number.isFinite(new Date(resetMs).getTime()) ? { resetsAt: new Date(resetMs).toISOString() } : {}) };
+}
+function parseClaudeStatusLineOutput(output, sentinel) {
+  const unavailable = unavailableUsageWindows();
+  let fiveHour = unavailable.fiveHour, weekly = unavailable.weekly;
+  let index = String(output).lastIndexOf(sentinel);
+  while (index >= 0) {
+    const tail = String(output).slice(index + sentinel.length, index + sentinel.length + 512);
+    const match = tail.match(/\{"five_hour":(?:\{[^{}]*\}|null),"seven_day":(?:\{[^{}]*\}|null)\}/);
+    if (match) {
+      try {
+        const value = JSON.parse(match[0]);
+        fiveHour = normalizeClaudeStatusWindow(value.five_hour);
+        weekly = normalizeClaudeStatusWindow(value.seven_day);
+        if (fiveHour.status === 'available' || weekly.status === 'available') break;
+      } catch {}
+    }
+    index = String(output).lastIndexOf(sentinel, index - 1);
+  }
+  return { fiveHour, weekly };
+}
+async function readClaudeQuotaUsage() {
+  const h = HARNESS.claude;
+  const unavailable = unavailableUsageWindows();
+  if (!configured(h)) return unavailable;
+  let scriptBin, claudeBin;
+  try { scriptBin = await resolveBinary('script'); claudeBin = await resolveBinary(h.bin); } catch { return unavailable; }
+  const ptyWorkDir = join(tmpdir(), `foreman-claude-usage-${randomUUID()}`);
+  try { await mkdir(ptyWorkDir, { recursive: false, mode: 0o700 }); } catch { return unavailable; }
+  const ptyPidPath = join(ptyWorkDir, 'pty-child.pid');
+  const statusLinePath = join(ptyWorkDir, 'status-line.mjs');
+  const sentinel = `__FOREMAN_CLAUDE_QUOTA_${randomUUID()}__`;
+  try { await writeFile(statusLinePath, claudeStatusLineScript(sentinel), { mode: 0o700, flag: 'wx' }); }
+  catch { await rm(ptyWorkDir, { recursive: true, force: true }).catch(() => undefined); return unavailable; }
+  return await new Promise(resolveResult => {
+    let child, output = '', settled = false;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(sendUsage); clearTimeout(stopSession); clearTimeout(hardStop);
+      try {
+        const ptyPid = Number(readFileSync(ptyPidPath, 'utf8').trim());
+        if (Number.isSafeInteger(ptyPid) && ptyPid > 1) process.kill(-ptyPid, 'SIGKILL');
+      } catch {}
+      if (child?.pid && process.platform !== 'win32') { try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); } }
+      else child?.kill('SIGKILL');
+      void rm(ptyWorkDir, { recursive: true, force: true }).catch(() => undefined);
+      resolveResult(value);
+    };
+    const readQuota = () => {
+      const structured = parseClaudeStatusLineOutput(output, sentinel);
+      const screen = parseClaudeQuotaScreen(output);
+      return { fiveHour: structured.fiveHour.status === 'available' ? structured.fiveHour : screen.fiveHour, weekly: structured.weekly.status === 'available' ? structured.weekly : screen.weekly };
+    };
+    const hardStop = setTimeout(() => finish(readQuota()), 12_000);
+    const sendUsage = setTimeout(() => { if (!settled && child?.stdin && !child.stdin.destroyed) child.stdin.write('/usage\r'); }, 2_000);
+    const stopSession = setTimeout(() => { if (!settled && child?.stdin && !child.stdin.destroyed) child.stdin.write('\u0003'); }, 9_000);
+    try {
+      const env = Object.fromEntries(['PATH','HOME','USER','LOGNAME','LANG','LC_ALL','TERM','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY','SSL_CERT_FILE','SSL_CERT_DIR','NODE_EXTRA_CA_CERTS','ANTHROPIC_API_KEY','CLAUDE_CONFIG_DIR'].flatMap(name => typeof process.env[name] === 'string' ? [[name, process.env[name]]] : []));
+      env.HOME ??= homedir();
+      env.TERM = 'xterm-256color';
+      env.CLAUDE_CONFIG_DIR = h.authDir;
+      const statusLineCommand = `${shellQuote(process.execPath)} ${shellQuote(statusLinePath)}`;
+      const settings = JSON.stringify({ statusLine: { type: 'command', command: statusLineCommand, refreshInterval: 1 } });
+      const command = `stty rows 45 cols 140; printf '%s' "$$" > ${shellQuote(ptyPidPath)}; exec ${shellQuote(claudeBin)} --setting-sources local --ax-screen-reader --settings ${shellQuote(settings)}`;
+      child = spawn(scriptBin, ['-qefc', command, '/dev/null'], { cwd: ptyWorkDir, env, stdio: ['pipe', 'pipe', 'ignore'], shell: false, windowsHide: true, detached: process.platform !== 'win32' });
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data', chunk => {
+        output += chunk;
+        if (Buffer.byteLength(output) > 64_000) finish(unavailable);
+      });
+      child.once('error', () => finish(unavailable));
+      child.once('close', code => {
+        if (settled) return;
+        finish(readQuota());
+      });
+    } catch { finish(unavailable); }
+  });
+}
+async function readAgyQuotaUsage() {
+  const h = HARNESS.agy;
+  if (!configured(h)) return { groups: [], windows: unavailableUsageWindows() };
+  return await new Promise(resolveResult => {
+    let child, output = '', settled = false;
+    const unavailable = { groups: [], windows: unavailableUsageWindows() };
+    const finish = value => { if (settled) return; settled = true; clearTimeout(timer); child?.kill('SIGKILL'); resolveResult(value); };
+    const timer = setTimeout(() => finish(unavailable), 12_000);
+    try {
+      const env = agyDiscoveryEnvironment();
+      env.HOME ??= homedir();
+      env.AGY_CONFIG_DIR = h.authDir;
+      child = spawn(h.bin, ['-p', '/usage', '--output-format', 'json', '--print-timeout', '10s'], { cwd: tmpdir(), env, stdio: ['ignore', 'pipe', 'ignore'], shell: false, windowsHide: true });
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data', chunk => {
+        output += chunk;
+        if (Buffer.byteLength(output) > 64_000) { finish(unavailable); return; }
+      });
+      child.once('error', () => finish(unavailable));
+      child.once('close', code => {
+        if (code !== 0 || settled) return finish(unavailable);
+        try {
+          const groups = normalizeAgyQuotaGroups(JSON.parse(output));
+          const first = groups[0]?.windows;
+          finish({ groups, windows: first ?? unavailableUsageWindows() });
+        } catch { finish(unavailable); }
+      });
+    } catch { finish(unavailable); }
+  });
+}
+async function readUsageStatus() {
+  if (usageStatusCache.expires > Date.now()) return usageStatusCache.value;
+  if (usageStatusCache.pending) return usageStatusCache.pending;
+  const pending = (async () => {
+    const harnesses = await Promise.all(Object.values(HARNESS).map(async h => {
+      const ready = configured(h);
+      if (!ready) return { harnessId: h.id, status: 'unavailable', windows: unavailableUsageWindows() };
+      try {
+        if (h.id === 'codex-cli') {
+          const codex = await readCodexRateLimits();
+          return { harnessId: h.id, status: 'ready', windows: { fiveHour: codex.fiveHour, weekly: codex.weekly } };
+        }
+        if (h.id === 'antigravity-cli') {
+          const agy = await readAgyQuotaUsage();
+          return { harnessId: h.id, status: 'ready', windows: agy.windows, groups: agy.groups };
+        }
+        if (h.id === 'claude-code') {
+          const claude = await readClaudeQuotaUsage();
+          return { harnessId: h.id, status: 'ready', windows: claude };
+        }
+        return { harnessId: h.id, status: 'ready', windows: unavailableUsageWindows() };
+      } catch { return { harnessId: h.id, status: 'ready', windows: unavailableUsageWindows() }; }
+    }));
+    return { harnesses };
+  })();
+  usageStatusCache.pending = pending;
+  try {
+    const value = await pending;
+    usageStatusCache = { expires: Date.now() + 120_000, value, pending: undefined };
+    return value;
+  } catch {
+    const value = { harnesses: Object.values(HARNESS).map(h => ({ harnessId: h.id, status: configured(h) ? 'ready' : 'unavailable', windows: unavailableUsageWindows(), ...(h.id === 'antigravity-cli' ? { groups: [] } : {}) })) };
+    usageStatusCache = { expires: Date.now() + 120_000, value, pending: undefined };
+    return value;
+  }
+}
+function observeCliActivity(task, kind, chunk) {
+  task.activityRemainder = (task.activityRemainder + chunk).slice(-MAX_OUTPUT * 3);
+  const lines = task.activityRemainder.split(/\r?\n/);
+  task.activityRemainder = lines.pop() ?? '';
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    try { const value = JSON.parse(line); recordActivity(task, activitySummary(kind, value)); } catch { /* malformed CLI lines are never surfaced */ }
+  }
+}
 
 function parseClaude(text) {
   const lines = text.split(/\r?\n/).filter(line => line.trim() !== '');
@@ -182,6 +511,12 @@ function agyWorkerPrompt(prompt) {
 
 function validRelativePath(path) {
   return typeof path === 'string' && path.length > 0 && !path.startsWith('/') && !path.includes('\\') && !path.includes('\0') && path.split('/').every(p => p && p !== '.' && p !== '..' && p !== '.git');
+}
+function validScopePath(path) {
+  // Foreman represents an allowed directory scope as a slash-terminated root
+  // (for example, "docs/"). Validate the same relative path after removing
+  // exactly that directory marker; do not accept empty or repeated segments.
+  return typeof path === 'string' && validRelativePath(path.endsWith('/') ? path.slice(0, -1) : path);
 }
 function linkEscapes(path, target) {
   if (!target || target.includes('\0') || posix.isAbsolute(target)) return true;
@@ -400,7 +735,7 @@ async function claudeAuthMountArgs(ws) {
 function validateReviewEvidence(metadata) {
   const evidence = metadata?.review_evidence;
   if (metadata?.foreman_review_mode !== 'read_only' || (metadata?.foreman_role_id ?? metadata?.role_id) !== 'reviewer') throw Error('review_request_invalid');
-  if (!evidence || evidence.validation !== 'verified_by_foreman_git_comparison' || evidence.scopeVerified !== true || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(evidence.baseCommit ?? '') || !Array.isArray(evidence.allowedScope) || !evidence.allowedScope.length || evidence.allowedScope.length > 200 || evidence.allowedScope.some(p => !validRelativePath(p)) || typeof evidence.reviewDiff !== 'string' || !evidence.reviewDiff.trim() || Buffer.byteLength(evidence.reviewDiff) > MAX_REVIEW_DIFF || !evidence.controllerValidation || typeof evidence.controllerValidation !== 'object' || Array.isArray(evidence.controllerValidation)) throw Error('review_evidence_invalid');
+  if (!evidence || evidence.validation !== 'verified_by_foreman_git_comparison' || evidence.scopeVerified !== true || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(evidence.baseCommit ?? '') || !Array.isArray(evidence.allowedScope) || !evidence.allowedScope.length || evidence.allowedScope.length > 200 || evidence.allowedScope.some(p => !validScopePath(p)) || typeof evidence.reviewDiff !== 'string' || !evidence.reviewDiff.trim() || Buffer.byteLength(evidence.reviewDiff) > MAX_REVIEW_DIFF || !evidence.controllerValidation || typeof evidence.controllerValidation !== 'object' || Array.isArray(evidence.controllerValidation)) throw Error('review_evidence_invalid');
   const validation = evidence.controllerValidation;
   const observations = JSON.stringify(validation);
   if (typeof evidence.workerResponseId !== 'string' || !evidence.workerResponseId.trim() || evidence.workerResponseId.length > 200 || validation.passed !== true || validation.policy?.requireAllChecksPass !== true || !Number.isInteger(validation.policy?.configuredCheckCount) || validation.policy.configuredCheckCount < 1 || !Array.isArray(validation.observations) || !validation.observations.length || validation.observations.length !== validation.policy.configuredCheckCount || validation.observations.some(o => !o || o.passed !== true || o.exitCode !== 0 || o.timedOut !== false || o.outputTruncated !== false) || Buffer.byteLength(observations) > 16_000 || Buffer.byteLength(JSON.stringify(evidence)) > 68_000) throw Error('review_evidence_invalid');
@@ -678,8 +1013,9 @@ async function runTask(record, prompt) {
   if (taskWorkspace?.boundary && !persistentRole) record.metadata.execution_boundary = taskWorkspace.boundary;
   if (reviewerState?.boundary) record.metadata.reviewer_boundary = reviewerState.boundary;
   const active = tasks.get(record.id); active.child = child;
+  recordActivity(active, 'Waiting for CLI response');
   let out = '', stdoutBytes = 0, cliOutputOverflow = false;
-  child.stdout.setEncoding('utf8'); child.stdout.on('data', chunk => { stdoutBytes += Buffer.byteLength(chunk); if ((reviewer || kind !== 'claude') && stdoutBytes > MAX_OUTPUT * 3 && !cliOutputOverflow) { cliOutputOverflow = true; child.kill('SIGTERM'); } out = (out + chunk).slice(-MAX_OUTPUT * 3); });
+  child.stdout.setEncoding('utf8'); child.stdout.on('data', chunk => { observeCliActivity(active, kind, chunk); stdoutBytes += Buffer.byteLength(chunk); if ((reviewer || kind !== 'claude') && stdoutBytes > MAX_OUTPUT * 3 && !cliOutputOverflow) { cliOutputOverflow = true; child.kill('SIGTERM'); } out = (out + chunk).slice(-MAX_OUTPUT * 3); });
   let stderrTail = '';
   child.stderr.setEncoding('utf8'); child.stderr.on('data', chunk => { stderrTail = (stderrTail + chunk).slice(-4000); }); // Bounded in-memory diagnostics only; never persist raw stderr.
   child.stdin?.on('error', () => {});
@@ -759,7 +1095,7 @@ async function runTask(record, prompt) {
     record.metadata.role_session = { binding: record.metadata.role_session_binding, cli_session_id: parsed.session, state_path: record.metadata.role_session_state_path };
   }
   await persist();
-  active.resolve?.();
+  for (const finish of active.finishListeners ?? []) finish();
   if (kind === 'codex-cli' && !persistentRole) {
     const codexHome = reviewer ? reviewerState.codexHome : taskWorkspace.codexHome;
     if (codexHome) await rm(codexHome, { recursive: true, force: true }).catch(() => undefined);
@@ -1005,6 +1341,9 @@ const server = createServer(async (req, res) => {
       if (agyModels.some(model => model.id === HARNESS.agy.model)) harnesses.push({ id: HARNESS.agy.id, name: HARNESS.agy.id });
       return send(res, 200, { harnesses });
     }
+    if (req.method === 'GET' && url.pathname === '/v1/usage') {
+      return send(res, 200, await readUsageStatus());
+    }
     const models = url.pathname.match(/^\/v1\/harnesses\/([^/]+)\/models$/);
     if (req.method === 'GET' && models) {
       const h = cliFor(decodeURIComponent(models[1]));
@@ -1066,9 +1405,9 @@ const server = createServer(async (req, res) => {
       const id = `resp_${randomUUID()}`;
       const record = { id, object: 'response', status: 'in_progress', requested_model: b.model, metadata: { ...b.metadata, harness_id: h.id, ...(workspaceId ? { workspace_id: workspaceId } : {}) }, timeout_seconds: timeout, max_step: steps };
       if (ws) { ws.responseId = id; state.workspaces[ws.id].responseId = id; }
-      state.keys[key] = id; state.responses[id] = record; const task = { response: record, resolve: null }; tasks.set(id, task);
+      state.keys[key] = id; state.responses[id] = record; const task = { response: record, finishListeners: new Set(), activity: [], activityTotal: 0, activityListeners: new Set(), activityRemainder: '' }; recordActivity(task, 'Preparing isolated runtime'); tasks.set(id, task);
       await persist(); // durable idempotency intent before spawning any CLI process
-      runTask(record, b.input).catch(async error => { record.status = 'failed'; record.error = { message: 'CLI task failed internally' }; if(task.reviewerWorkDir) { await rm(task.reviewerWorkDir,{recursive:true,force:true}).catch(()=>undefined); task.reviewerWorkDir=undefined; } const ws = workspaces.get(record.metadata.workspace_id); if (ws) { record.metadata.execution_boundary = ws.boundary ?? { proven: false, error: 'execution_boundary_unavailable' }; record.metadata.execution_stage = ws.executionStage ?? 'task_setup'; if (ws.boundaryDiagnostic) record.metadata.execution_boundary_diagnostic = ws.boundaryDiagnostic; else if (/^boundary_probe_failed:/.test(String(error?.message))) record.metadata.execution_boundary_diagnostic = { category: String(error.message).split(':')[1] ?? 'probe_failed', exit_code: Number(String(error.message).split(':')[2]) || null, signal: null }; if (record.metadata.harness_id === 'codex-cli' && record.metadata.foreman_review_mode !== 'read_only') { record.metadata.cli_exit = { exit_code: null, signal: null }; record.metadata.cli_failure_category = record.metadata.execution_stage === 'resolve_auth' ? 'host_auth_unavailable' : record.metadata.execution_stage === 'boundary_probe' ? 'boundary_setup' : record.metadata.execution_stage === 'runtime_mount' ? 'runtime_setup' : 'cli_setup'; await rm(ws.codexHome, { recursive: true, force: true }).catch(() => undefined); } } await persist(); task.resolve?.(); });
+      runTask(record, b.input).catch(async error => { record.status = 'failed'; record.error = { message: 'CLI task failed internally' }; if(task.reviewerWorkDir) { await rm(task.reviewerWorkDir,{recursive:true,force:true}).catch(()=>undefined); task.reviewerWorkDir=undefined; } const ws = workspaces.get(record.metadata.workspace_id); if (ws) { record.metadata.execution_boundary = ws.boundary ?? { proven: false, error: 'execution_boundary_unavailable' }; record.metadata.execution_stage = ws.executionStage ?? 'task_setup'; if (ws.boundaryDiagnostic) record.metadata.execution_boundary_diagnostic = ws.boundaryDiagnostic; else if (/^boundary_probe_failed:/.test(String(error?.message))) record.metadata.execution_boundary_diagnostic = { category: String(error.message).split(':')[1] ?? 'probe_failed', exit_code: Number(String(error.message).split(':')[2]) || null, signal: null }; if (record.metadata.harness_id === 'codex-cli' && record.metadata.foreman_review_mode !== 'read_only') { record.metadata.cli_exit = { exit_code: null, signal: null }; record.metadata.cli_failure_category = record.metadata.execution_stage === 'resolve_auth' ? 'host_auth_unavailable' : record.metadata.execution_stage === 'boundary_probe' ? 'boundary_setup' : record.metadata.execution_stage === 'runtime_mount' ? 'runtime_setup' : 'cli_setup'; await rm(ws.codexHome, { recursive: true, force: true }).catch(() => undefined); } } await persist(); for (const finish of task.finishListeners) finish(); });
       return streamResponse(res, record, task);
     }
     send(res, 404, { error: { code: 'not_found' } });
@@ -1078,17 +1417,36 @@ function streamResponse(res, record, task = tasks.get(record.id)) {
   let closed = false;
   let finished = false;
   let heartbeat;
+  let sequence = 0;
+  let activityCursor = 1;
+  const flushActivity = () => {
+    if (closed || res.destroyed || !task) return;
+    const items = task.activity ?? [];
+    // If the bounded ring evicted earlier items, continue with the oldest item still available.
+    if (items.length) activityCursor = Math.max(activityCursor, items[0].index);
+    while (items.length && activityCursor <= items.at(-1).index) {
+      const activity = items.find(item => item.index === activityCursor);
+      activityCursor++;
+      if (!activity) continue;
+      event(res, 'response.activity', sequence++, { id: record.id, object: 'response', status: 'in_progress', activity: { kind: activity.kind, summary: activity.summary } });
+    }
+  };
   const stopHeartbeat = () => { if (heartbeat) { clearInterval(heartbeat); heartbeat = undefined; } };
-  res.on('close', () => { closed = true; stopHeartbeat(); });
+  res.on('close', () => { closed = true; stopHeartbeat(); task?.activityListeners?.delete(flushActivity); task?.finishListeners?.delete(finish); });
   res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', 'UHP-Version': VERSION });
-  event(res, 'response.created', 0, { id: record.id, object: 'response', status: 'in_progress', metadata: record.metadata });
+  event(res, 'response.created', sequence++, { id: record.id, object: 'response', status: 'in_progress', metadata: record.metadata });
+  if (task?.activityListeners) task.activityListeners.add(flushActivity);
+  flushActivity();
   const finish = () => {
     if (finished) return;
     finished = true;
     stopHeartbeat();
+    if (task?.activityListeners) task.activityListeners.delete(flushActivity);
+    if (task?.finishListeners) task.finishListeners.delete(finish);
     if (closed || res.destroyed) return;
     const r = record; const type = `response.${r.status}`;
-    event(res, type, 1, r); res.end();
+    flushActivity();
+    event(res, type, sequence++, r); res.end();
   };
   if (record.status !== 'in_progress') finish();
   else {
@@ -1097,7 +1455,7 @@ function streamResponse(res, record, task = tasks.get(record.id)) {
       res.write(': keep-alive\n\n');
     }, SSE_KEEPALIVE_MS);
     heartbeat.unref?.();
-    if (task) task.resolve = finish;
+    if (task?.finishListeners) task.finishListeners.add(finish);
     else finish();
   }
 }

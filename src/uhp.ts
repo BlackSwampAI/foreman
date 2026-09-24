@@ -79,6 +79,11 @@ export interface UhpDiscovery {
   selectedModel?: UhpModel;
 }
 
+export interface UhpUsageWindow { status: "available" | "unsupported" | "unavailable"; usedPercent?: number; remainingPercent?: number; resetsAt?: string }
+export interface UhpUsageGroup { id: string; label: string; windows: { fiveHour: UhpUsageWindow; weekly: UhpUsageWindow } }
+export interface UhpHarnessUsage { harnessId: string; status: "ready" | "unavailable"; windows: { fiveHour: UhpUsageWindow; weekly: UhpUsageWindow }; groups?: UhpUsageGroup[] }
+export interface UhpUsageStatus { harnesses: UhpHarnessUsage[] }
+
 export interface UhpHarness { id: string; [key: string]: unknown }
 export interface UhpModel { id: string; available?: boolean; [key: string]: unknown }
 export interface UhpResponse {
@@ -282,6 +287,33 @@ export class UhpClient implements UhpAdapter {
       if (controller.signal.aborted) throw new UhpError("UHP request exceeded its inactivity timeout");
       throw error;
     } finally { clearTimeout(timer); }
+  }
+
+  async usage(): Promise<UhpUsageStatus> {
+    const response = await this.requestJson("GET", "v1/usage", undefined, true, UHP_VERSION);
+    if (!Array.isArray(response.harnesses)) throw new UhpError("UHP usage response did not include harnesses");
+    const harnesses = response.harnesses.flatMap((value): UhpHarnessUsage[] => {
+      if (!value || typeof value !== "object") return [];
+      const item = value as Record<string, unknown>;
+      const windows = item.windows && typeof item.windows === "object" ? item.windows as Record<string, unknown> : {};
+      const parseWindow = (raw: unknown): UhpUsageWindow => {
+        const w = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+        const status = w.status === "available" || w.status === "unsupported" || w.status === "unavailable" ? w.status : "unavailable";
+        return { status, ...(status === "available" && typeof w.usedPercent === "number" && Number.isFinite(w.usedPercent) ? { usedPercent: Math.max(0, Math.min(100, w.usedPercent)) } : {}), ...(status === "available" && typeof w.remainingPercent === "number" && Number.isFinite(w.remainingPercent) ? { remainingPercent: Math.max(0, Math.min(100, w.remainingPercent)) } : {}), ...(status === "available" && typeof w.resetsAt === "string" ? { resetsAt: w.resetsAt } : {}) };
+      };
+      if (typeof item.harnessId !== "string") return [];
+      const groups = Array.isArray(item.groups) ? item.groups.flatMap((raw): UhpUsageGroup[] => {
+        if (!raw || typeof raw !== "object") return [];
+        const group = raw as Record<string, unknown>;
+        const id = typeof group.id === "string" && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(group.id) && group.id.length <= 40 ? group.id : undefined;
+        const label = typeof group.label === "string" && (/^(?:Gemini|Claude|GPT)$/.test(group.label) || /^Quota pool [1-9][0-9]{0,2}$/.test(group.label)) ? group.label : undefined;
+        if (!id || !label) return [];
+        const groupWindows = group.windows && typeof group.windows === "object" ? group.windows as Record<string, unknown> : {};
+        return [{ id, label, windows: { fiveHour: parseWindow(groupWindows.fiveHour), weekly: parseWindow(groupWindows.weekly) } }];
+      }) : [];
+      return [{ harnessId: item.harnessId, status: item.status === "ready" ? "ready" : "unavailable", windows: { fiveHour: parseWindow(windows.fiveHour), weekly: parseWindow(windows.weekly) }, ...(Array.isArray(item.groups) ? { groups } : {}) }];
+    });
+    return { harnesses };
   }
 
   async cancel(input: { submissionId: string; externalId?: string; idempotencyKey: string }): Promise<{ status: string }> {

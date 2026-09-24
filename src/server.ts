@@ -63,6 +63,17 @@ const controllerForPath=async(path:string,query?:URLSearchParams,method?:string)
 const server=createServer(async(req,res)=>{
   const url=new URL(req.url??'/',`http://${req.headers.host??'localhost'}`), path=url.pathname;
   try {
+    const projectUsageMatch=path.match(/^\/api\/projects\/([^/]+)\/usage$/);
+    if(req.method==='GET'&&projectUsageMatch){
+      const projectId=decodeURIComponent(projectUsageMatch[1]!);
+      const runtime=projectControllers.get(projectId);
+      const unavailable={status:'unavailable' as const};
+      const fallback={harnesses:['claude-code','codex-cli','antigravity-cli'].map(harnessId=>({harnessId,status:'unavailable' as const,windows:{fiveHour:unavailable,weekly:unavailable}}))};
+      const baseUrl=runtime?.bridge.status?.baseUrl;
+      if(!baseUrl){json(res,200,fallback);return;}
+      try{json(res,200,await new UhpClient({baseUrl,timeoutMs:15_000}).usage());return;}
+      catch{json(res,200,fallback);return;}
+    }
     const activeController=await controllerForPath(path,url.searchParams,req.method);
     if(req.method==='GET'&&path==='/api/repositories/browse'){json(res,200,await browseRepositories(url.searchParams.get('path')??undefined));return;}
     if(req.method==='GET'&&path==='/api/repositories/inspect'){const selected=url.searchParams.get('path');if(!selected)throw Object.assign(new Error('Choose a repository folder'),{statusCode:400});json(res,200,await inspectRepository(selected));return;}

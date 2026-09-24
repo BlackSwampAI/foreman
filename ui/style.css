@@ -86,3 +86,57 @@
 .admin-action-error { display: block; margin-top: 14px; }
 .danger-button { border: 1px solid #b42318; border-radius: 8px; padding: 9px 14px; color: #fff; background: #b42318; font: inherit; font-weight: 650; cursor: pointer; }
 .danger-button:disabled { opacity: .6; cursor: wait; }
+
+/* Three column workspace: the inspector has room for readable activity, while the conversation stays focused. */
+.layout{grid-template-columns:minmax(225px,260px) minmax(380px,1fr) minmax(350px,410px);gap:14px}
+.tree{max-height:calc(100vh - 74px);overflow:auto;scrollbar-color:#27425a transparent}
+.tree-foot{position:sticky;bottom:0;z-index:2;margin-top:12px;padding:9px 0;background:#0d1d2d}
+.inspector-visible{min-width:0}
+.inspector-visible>.inspector-disclosure{display:flex;flex-direction:column;gap:10px;align-self:start;margin-top:10px;padding:10px;border:1px solid #1a344b;border-radius:8px;background:linear-gradient(150deg,#0d1c2a,#0a1723)}
+.inspector-visible>.inspector-disclosure>summary{cursor:pointer;color:#bfd2e0;font-size:10px;font-weight:650;list-style:none}
+.inspector-visible>.inspector-disclosure>summary::-webkit-details-marker{display:none}
+.stream-card{padding:12px 13px 8px;border-color:#205268;background:linear-gradient(150deg,#0b2231,#0a1927)}
+.stream-row{display:grid;grid-template-columns:7px minmax(0,1fr) auto;align-items:start;gap:8px;padding:9px 0;border-top:1px solid #172e42}
+.stream-row .event-dot{margin-top:4px}
+.stream-row>div{min-width:0}
+.stream-row b{display:block;color:#d2e1ec;font-size:9px;line-height:1.4;overflow-wrap:anywhere}
+.stream-row small{display:block;margin-top:3px;color:#91a9bb;font-size:8px;line-height:1.45;overflow-wrap:anywhere}
+.stream-row time{color:#69829a;font-size:7px;white-space:nowrap}
+.service-strip{display:flex;align-items:center;gap:6px;margin-left:auto;min-width:0}
+.service-chip{display:flex;align-items:center;gap:5px;padding:5px 7px;border:1px solid #1c3549;border-radius:6px;background:#0a1927;color:#a9bfd0;font-size:8px;white-space:nowrap}
+.service-chip .dot{width:6px;height:6px}
+.service-chip small{color:#728ba0;font-size:7px}
+.topbar .system{margin-left:0}
+.cli-usage-card{margin-top:12px}
+@media(max-width:1150px){.layout{grid-template-columns:220px minmax(360px,1fr) minmax(300px,340px)}.inspector{grid-column:auto;display:flex}.tree{grid-row:auto}.service-chip small{display:none}}
+@media(max-width:900px){.layout{grid-template-columns:minmax(200px,240px) minmax(0,1fr)}.inspector-visible{grid-column:2}.center{grid-column:2}.service-strip{gap:4px}.service-chip{padding:4px 5px}}
+@media(max-width:760px){.layout{grid-template-columns:minmax(0,1fr)}.tree{max-height:none;overflow:visible}.tree-foot{position:static;margin-top:12px;background:transparent}.center,.inspector-visible{grid-column:auto}.inspector-visible{grid-row:auto}.service-strip{display:none}.inspector-visible>.inspector-disclosure{padding:10px}.cli-usage-card{margin-top:10px}}
+
+/* Role configuration lives in a focused, scrollable workspace settings dialog. */
+.settings-button{flex:none;min-height:32px;padding:6px 11px;font-size:10px}
+.settings-backdrop{position:fixed;z-index:70;inset:0;display:grid;place-items:center;padding:18px;background:#020812c9;backdrop-filter:blur(5px)}
+.settings-dialog{display:flex;flex-direction:column;gap:12px;width:min(760px,100%);max-height:min(90vh,900px);overflow:auto;padding:18px;border:1px solid #31536b;border-radius:10px;background:#0b1927;box-shadow:0 25px 90px #000a;color:#d6e5f0}
+.settings-dialog>header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.settings-dialog>header h2{margin:4px 0 0;color:#edf6fc;font-size:19px}
+.settings-dialog>.inspector-card{margin:0;width:100%;max-height:none;overflow:visible}
+.settings-dialog>.inspector-card .role-inspect{font-size:11px}
+.settings-dialog>.inspector-card .role-inspect>div span,.settings-dialog>.inspector-card .role-inspect>div code{font-size:10px}
+.settings-dialog>footer{display:flex;justify-content:flex-end;padding-top:10px;border-top:1px solid #20384b}
+@media(max-width:760px){.settings-dialog{padding:13px;max-height:94vh}.settings-dialog>.inspector-card .scope-tabs{position:sticky;top:0;z-index:2;background:#0d1b29}.settings-button{min-height:30px;padding:5px 8px}}
+
+/* Keep quota labels and figures readable in the narrow project tree. */
+.settings-description{margin:0;color:#a9bfd0;font-size:12px;line-height:1.5}
+.settings-dialog :focus-visible{outline:2px solid #42d4e8;outline-offset:2px}
+/* CLI quota presentation: stacked windows stay readable beside two provider pools. */
+.cli-usage-row{padding:12px 0;border-top:1px solid #172e42}
+.cli-usage-row>b{display:flex;align-items:baseline;gap:6px;margin-bottom:8px;color:#e2eef7;font-size:13px;line-height:1.4}
+.cli-usage-row>b small{font-size:10px;font-weight:500;color:#7994aa}
+.cli-usage-row>div{display:grid;grid-template-columns:70px minmax(0,1fr);gap:6px;padding:7px 0}
+.cli-usage-row>div>span{font-size:12px;line-height:1.35;color:#a1b7c8}
+.cli-usage-row>div>small{grid-column:2;color:#88a4b7;font-size:11px;line-height:1.4;overflow-wrap:anywhere}
+.cli-usage-row .cli-usage-value{display:grid;grid-template-columns:minmax(0,1fr);gap:3px;min-width:0;padding:0;border:0;background:none}
+.cli-usage-row .quota-percent{color:#8de2c0;font-size:14px;font-weight:750;line-height:1.25;overflow-wrap:anywhere}
+.cli-usage-row .cli-usage-value code{display:block;color:#b1c6d5;font-size:11px;line-height:1.45;overflow-wrap:anywhere;white-space:normal}
+.cli-usage-card .usage-disclosure{font-size:10px;line-height:1.5}
+@media(max-width:1150px){.cli-usage-row>div{grid-template-columns:64px minmax(0,1fr);gap:5px}}
+@media(max-width:760px){.cli-usage-row>div{grid-template-columns:72px minmax(0,1fr)}}
