@@ -56,6 +56,19 @@ describe("UHP adapter", () => {
     expect(usage.harnesses[0]?.groups?.map((group) => group.id)).toEqual(["gemini", "claude"]);
   });
 
+  it("preserves only valid quota observation timestamps", async () => {
+    const observedAt = "2026-09-24T12:34:56.000Z";
+    const fetcher: typeof fetch = async () => new Response(JSON.stringify({ harnesses: [{
+      harnessId: "claude-code", status: "ready", windows: {
+        fiveHour: { status: "available", usedPercent: 23.5, remainingPercent: 76.5, observedAt },
+        weekly: { status: "available", usedPercent: 41.2, remainingPercent: 58.8, observedAt: "not-a-timestamp" },
+      },
+    }] }), { status: 200, headers: { "content-type": "application/json", "UHP-Version": "2026-09-12" } });
+    const usage = await new UhpClient({ baseUrl: "http://usage-fixture", fetch: fetcher }).usage();
+    expect(usage.harnesses[0]?.windows.fiveHour.observedAt).toBe(observedAt);
+    expect(usage.harnesses[0]?.windows.weekly.observedAt).toBeUndefined();
+  });
+
   it("accepts a bound Antigravity unavailable-model report for every role and preserves reported usage", async () => {
     const server = await fixture({ antigravityCli: true, missingActualModel: true, capabilities: { readOnlyReviewer: true } });
     const client = new UhpClient({ baseUrl: server.baseUrl, harnessId: "antigravity-cli", model: "gemini-3.8-flash-medium" });

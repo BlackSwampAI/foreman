@@ -71,6 +71,44 @@ this experiment. State is stored at
 work directories under `LOCAL_CLI_UHP_WORK` (default `/tmp/local-cli-uhp-work`).
 The HTTP listener binds loopback only and has no authentication; keep it local.
 
+### Claude subscription usage cache
+
+Claude Code exposes `rate_limits` to a configured status-line command after
+the first API response ([official status-line data](https://code.claude.com/docs/en/statusline#available-data));
+the bridge no longer starts a Claude TUI or sends a prompt to collect quota.
+Install
+[`claude-statusline-collector.mjs`](claude-statusline-collector.mjs) as a
+status-line command by merging this entry into the existing Claude settings
+object (preserve its other keys). Replace the placeholder with the absolute
+path to the collector in your checkout:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "node /absolute/path/to/your/foreman/checkout/investigations/local-cli-uhp/claude-statusline-collector.mjs"
+  }
+}
+```
+
+Merge the `statusLine` entry into `~/.claude/settings.json` (or the settings
+file for your configured Claude directory) without replacing its other keys.
+The collector reads bounded status-line JSON,
+persists only the five-hour and seven-day percentages/reset timestamps using an
+atomic mode-0600 cache at `~/.cache/foreman/claude-usage.json`, and prints a
+short quota summary only when at least one limit is present. It performs no
+network access and reads no auth/config files. `FOREMAN_CLAUDE_USAGE_CACHE`
+overrides the cache path for tests or managed setups; set the same override in
+the Claude Code environment and the bridge environment. The bridge accepts
+snapshots up to 15 minutes old, rejects expired resets, and labels Claude
+values with their `Last reported` time. If a later status-line invocation has
+no rate limits (for example, after changing auth mode), it does not overwrite
+the last snapshot; that snapshot expires after 15 minutes. A status-line
+command can be invoked again with an existing status-line payload without
+making a new model/API request ([settings docs](https://code.claude.com/docs/en/settings#statusline)). Live quota population remains unverified until
+Claude has returned a real API response and the status-line collector receives
+a payload containing quota limits.
+
 Requests are limited to 16,000 prompt characters, 120 seconds, and 64,000
 returned output characters. Claude's invocation also limits turns to at most
 10. Codex's internal step count is not controllable through the selected CLI

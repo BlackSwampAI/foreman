@@ -199,10 +199,10 @@ function normalizeAgyQuotaWindow(buckets, duration) {
 function normalizeAgyQuotaGroups(payload) {
   const rawGroups = payload?.command?.data?.groups;
   if (!Array.isArray(rawGroups)) return [];
+  const geminiGroups = rawGroups.filter(raw => typeof raw?.name === 'string' && /gemini/i.test(raw.name) && !/claude|\bgpt\b/i.test(raw.name)).slice(0, 20);
   const seenIds = new Set();
-  return rawGroups.slice(0, 20).map((raw, index) => {
-    const name = typeof raw?.name === 'string' ? raw.name.toLowerCase() : '';
-    const base = /claude/.test(name) ? { id: 'claude', label: 'Claude' } : /gemini/.test(name) ? { id: 'gemini', label: 'Gemini' } : /\bgpt\b/.test(name) ? { id: 'gpt', label: 'GPT' } : { id: `quota-pool-${index + 1}`, label: `Quota pool ${index + 1}` };
+  return geminiGroups.map((raw, index) => {
+    const base = { id: 'gemini', label: 'Gemini' };
     let id = base.id;
     for (let suffix = 2; seenIds.has(id); suffix++) id = `${base.id}-${suffix}`;
     seenIds.add(id);
@@ -210,130 +210,32 @@ function normalizeAgyQuotaGroups(payload) {
     return { ...base, id, windows: { fiveHour: normalizeAgyQuotaWindow(buckets, '5h'), weekly: normalizeAgyQuotaWindow(buckets, 'weekly') } };
   });
 }
-function parseClaudeQuotaScreen(screen) {
-  const unavailable = unavailableUsageWindows();
-  const visible = String(screen)
-    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, ' ')
-    .replace(/\u001b\[[0-?]*[ -/]*m/g, '')
-    .replace(/\u001b\[[0-?]*[ -/]*[Hf]/g, '\n')
-    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, ' ')
-    .replace(/\u001b[@-Z\\-_]/g, '\n')
-    .replace(/\r/g, '\n')
-    .replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g, ' ');
-  const lines = visible.split(/\n/).map(line => line.replace(/\s+/g, ' ').trim()).filter(Boolean);
-  const rows = [];
-  for (let i = 0; i < lines.length; i++) {
-    const text = lines[i].toLowerCase();
-    const fiveHour = /\b(?:5\s*[- ]?\s*h(?:our)?s?|five\s*[- ]?\s*hours?|current\s+session)\b/i.test(text);
-    const weekly = /\b(?:weekly|week)\b/i.test(text);
-    if (fiveHour || weekly) rows.push({ index: i, kind: fiveHour ? 'fiveHour' : 'weekly' });
-  }
-  const values = {};
-  for (let i = 0; i < rows.length; i++) {
-    const row = rows[i];
-    const end = Math.min(lines.length, row.index + 4, rows[i + 1]?.index ?? lines.length);
-    const segment = lines.slice(row.index, end).join(' ');
-    const match = segment.match(/\b(\d{1,3}(?:\.\d+)?)\s*%\s*(used|utili[sz]ed|consumed|remaining|left)\b/i);
-    if (!match) continue;
-    const percent = Number(match[1]);
-    if (!Number.isFinite(percent) || percent < 0 || percent > 100) continue;
-    const isUsed = /^(?:used|utili[sz]ed|consumed)$/i.test(match[2]);
-    const usedPercent = Math.round((isUsed ? percent : 100 - percent) * 100) / 100;
-    const remainingPercent = Math.round((100 - usedPercent) * 100) / 100;
-    const resetMatch = segment.match(/\breset(?:s|ting)?\s+(?:at\s+)?(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\b/i);
-    const parsedReset = resetMatch ? Date.parse(resetMatch[1]) : NaN;
-    values[row.kind] = { status: 'available', usedPercent, remainingPercent, ...(Number.isFinite(parsedReset) ? { resetsAt: new Date(parsedReset).toISOString() } : {}) };
-  }
-  return { fiveHour: values.fiveHour ?? unavailable.fiveHour, weekly: values.weekly ?? unavailable.weekly };
+const CLAUDE_USAGE_CACHE_MAX_AGE_MS = 15 * 60_000;
+const CLAUDE_USAGE_CACHE_MAX_BYTES = 4096;
+function claudeUsageCachePath() {
+  return resolve(process.env.FOREMAN_CLAUDE_USAGE_CACHE || join(process.env.XDG_CACHE_HOME || join(homedir(), '.cache'), 'foreman', 'claude-usage.json'));
 }
-function shellQuote(value) { return `'${String(value).replaceAll("'", "'\\''")}'`; }
-function claudeStatusLineScript(sentinel) {
-  return `const sentinel = ${JSON.stringify(sentinel)};\nlet input = '';\nlet inputBytes = 0;\nlet oversized = false;\nprocess.stdin.setEncoding('utf8');\nprocess.stdin.on('data', chunk => { inputBytes += Buffer.byteLength(chunk); if (inputBytes > 65536) { oversized = true; input = ''; process.stdin.destroy(); return; } input += chunk; });\nprocess.stdin.on('end', () => { if (oversized) return; try { const data = JSON.parse(input); const limits = data && typeof data === 'object' ? data.rate_limits : undefined; const pick = value => { if (!value || typeof value !== 'object' || typeof value.used_percentage !== 'number' || !Number.isFinite(value.used_percentage) || value.used_percentage < 0 || value.used_percentage > 100) return null; const out = { used_percentage: value.used_percentage }; if (Number.isSafeInteger(value.resets_at) && value.resets_at > 0) out.resets_at = value.resets_at; return out; }; const payload = { five_hour: pick(limits?.five_hour), seven_day: pick(limits?.seven_day) }; if (!payload.five_hour && !payload.seven_day) return; process.stdout.write(sentinel + JSON.stringify(payload) + '\\n'); } catch {} });\n`;
-}
-function normalizeClaudeStatusWindow(raw) {
-  if (!raw || typeof raw !== 'object' || typeof raw.used_percentage !== 'number' || !Number.isFinite(raw.used_percentage) || raw.used_percentage < 0 || raw.used_percentage > 100) return { status: 'unavailable' };
-  const usedPercent = Math.round(raw.used_percentage * 100) / 100;
-  const remainingPercent = Math.round((100 - usedPercent) * 100) / 100;
+function normalizeClaudeCachedWindow(raw, capturedAt, now = Date.now()) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || typeof raw.used_percentage !== 'number' || !Number.isFinite(raw.used_percentage) || raw.used_percentage < 0 || raw.used_percentage > 100) return { status: 'unavailable' };
   const reset = raw.resets_at;
   const resetMs = Number.isSafeInteger(reset) && reset > 0 ? reset * 1000 : NaN;
-  return { status: 'available', usedPercent, remainingPercent, ...(Number.isFinite(resetMs) && Number.isFinite(new Date(resetMs).getTime()) ? { resetsAt: new Date(resetMs).toISOString() } : {}) };
+  if (Number.isFinite(resetMs) && resetMs <= now) return { status: 'unavailable' };
+  const usedPercent = Math.round(raw.used_percentage * 100) / 100;
+  const remainingPercent = Math.round((100 - usedPercent) * 100) / 100;
+  return { status: 'available', usedPercent, remainingPercent, observedAt: new Date(capturedAt).toISOString(), ...(Number.isFinite(resetMs) && Number.isFinite(new Date(resetMs).getTime()) ? { resetsAt: new Date(resetMs).toISOString() } : {}) };
 }
-function parseClaudeStatusLineOutput(output, sentinel) {
+async function readClaudeQuotaUsage(now = Date.now()) {
   const unavailable = unavailableUsageWindows();
-  let fiveHour = unavailable.fiveHour, weekly = unavailable.weekly;
-  let index = String(output).lastIndexOf(sentinel);
-  while (index >= 0) {
-    const tail = String(output).slice(index + sentinel.length, index + sentinel.length + 512);
-    const match = tail.match(/\{"five_hour":(?:\{[^{}]*\}|null),"seven_day":(?:\{[^{}]*\}|null)\}/);
-    if (match) {
-      try {
-        const value = JSON.parse(match[0]);
-        fiveHour = normalizeClaudeStatusWindow(value.five_hour);
-        weekly = normalizeClaudeStatusWindow(value.seven_day);
-        if (fiveHour.status === 'available' || weekly.status === 'available') break;
-      } catch {}
-    }
-    index = String(output).lastIndexOf(sentinel, index - 1);
-  }
-  return { fiveHour, weekly };
-}
-async function readClaudeQuotaUsage() {
-  const h = HARNESS.claude;
-  const unavailable = unavailableUsageWindows();
-  if (!configured(h)) return unavailable;
-  let scriptBin, claudeBin;
-  try { scriptBin = await resolveBinary('script'); claudeBin = await resolveBinary(h.bin); } catch { return unavailable; }
-  const ptyWorkDir = join(tmpdir(), `foreman-claude-usage-${randomUUID()}`);
-  try { await mkdir(ptyWorkDir, { recursive: false, mode: 0o700 }); } catch { return unavailable; }
-  const ptyPidPath = join(ptyWorkDir, 'pty-child.pid');
-  const statusLinePath = join(ptyWorkDir, 'status-line.mjs');
-  const sentinel = `__FOREMAN_CLAUDE_QUOTA_${randomUUID()}__`;
-  try { await writeFile(statusLinePath, claudeStatusLineScript(sentinel), { mode: 0o700, flag: 'wx' }); }
-  catch { await rm(ptyWorkDir, { recursive: true, force: true }).catch(() => undefined); return unavailable; }
-  return await new Promise(resolveResult => {
-    let child, output = '', settled = false;
-    const finish = value => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(sendUsage); clearTimeout(stopSession); clearTimeout(hardStop);
-      try {
-        const ptyPid = Number(readFileSync(ptyPidPath, 'utf8').trim());
-        if (Number.isSafeInteger(ptyPid) && ptyPid > 1) process.kill(-ptyPid, 'SIGKILL');
-      } catch {}
-      if (child?.pid && process.platform !== 'win32') { try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); } }
-      else child?.kill('SIGKILL');
-      void rm(ptyWorkDir, { recursive: true, force: true }).catch(() => undefined);
-      resolveResult(value);
-    };
-    const readQuota = () => {
-      const structured = parseClaudeStatusLineOutput(output, sentinel);
-      const screen = parseClaudeQuotaScreen(output);
-      return { fiveHour: structured.fiveHour.status === 'available' ? structured.fiveHour : screen.fiveHour, weekly: structured.weekly.status === 'available' ? structured.weekly : screen.weekly };
-    };
-    const hardStop = setTimeout(() => finish(readQuota()), 12_000);
-    const sendUsage = setTimeout(() => { if (!settled && child?.stdin && !child.stdin.destroyed) child.stdin.write('/usage\r'); }, 2_000);
-    const stopSession = setTimeout(() => { if (!settled && child?.stdin && !child.stdin.destroyed) child.stdin.write('\u0003'); }, 9_000);
-    try {
-      const env = Object.fromEntries(['PATH','HOME','USER','LOGNAME','LANG','LC_ALL','TERM','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY','SSL_CERT_FILE','SSL_CERT_DIR','NODE_EXTRA_CA_CERTS','ANTHROPIC_API_KEY','CLAUDE_CONFIG_DIR'].flatMap(name => typeof process.env[name] === 'string' ? [[name, process.env[name]]] : []));
-      env.HOME ??= homedir();
-      env.TERM = 'xterm-256color';
-      env.CLAUDE_CONFIG_DIR = h.authDir;
-      const statusLineCommand = `${shellQuote(process.execPath)} ${shellQuote(statusLinePath)}`;
-      const settings = JSON.stringify({ statusLine: { type: 'command', command: statusLineCommand, refreshInterval: 1 } });
-      const command = `stty rows 45 cols 140; printf '%s' "$$" > ${shellQuote(ptyPidPath)}; exec ${shellQuote(claudeBin)} --setting-sources local --ax-screen-reader --settings ${shellQuote(settings)}`;
-      child = spawn(scriptBin, ['-qefc', command, '/dev/null'], { cwd: ptyWorkDir, env, stdio: ['pipe', 'pipe', 'ignore'], shell: false, windowsHide: true, detached: process.platform !== 'win32' });
-      child.stdout.setEncoding('utf8');
-      child.stdout.on('data', chunk => {
-        output += chunk;
-        if (Buffer.byteLength(output) > 64_000) finish(unavailable);
-      });
-      child.once('error', () => finish(unavailable));
-      child.once('close', code => {
-        if (settled) return;
-        finish(readQuota());
-      });
-    } catch { finish(unavailable); }
-  });
+  try {
+    const path = claudeUsageCachePath();
+    const info = await lstat(path);
+    if (!info.isFile() || info.size > CLAUDE_USAGE_CACHE_MAX_BYTES || (info.mode & 0o077) !== 0 || (typeof process.getuid === 'function' && info.uid !== process.getuid())) return unavailable;
+    const cache = JSON.parse(await readFile(path, 'utf8'));
+    if (!cache || cache.version !== 1 || !Number.isFinite(cache.capturedAt) || cache.capturedAt > now + 60_000 || now - cache.capturedAt > CLAUDE_USAGE_CACHE_MAX_AGE_MS) return unavailable;
+    const limits = cache.rate_limits;
+    if (!limits || typeof limits !== 'object' || Array.isArray(limits)) return unavailable;
+    return { fiveHour: normalizeClaudeCachedWindow(limits.five_hour, cache.capturedAt, now), weekly: normalizeClaudeCachedWindow(limits.seven_day, cache.capturedAt, now) };
+  } catch { return unavailable; }
 }
 async function readAgyQuotaUsage() {
   const h = HARNESS.agy;
@@ -393,13 +295,25 @@ async function readUsageStatus() {
   usageStatusCache.pending = pending;
   try {
     const value = await pending;
-    usageStatusCache = { expires: Date.now() + 120_000, value, pending: undefined };
+    usageStatusCache = { expires: usageStatusCacheDeadline(value, Date.now()), value, pending: undefined };
     return value;
   } catch {
     const value = { harnesses: Object.values(HARNESS).map(h => ({ harnessId: h.id, status: configured(h) ? 'ready' : 'unavailable', windows: unavailableUsageWindows(), ...(h.id === 'antigravity-cli' ? { groups: [] } : {}) })) };
     usageStatusCache = { expires: Date.now() + 120_000, value, pending: undefined };
     return value;
   }
+}
+function usageStatusCacheDeadline(value, now = Date.now()) {
+  let expires = now + 120_000;
+  const claude = value?.harnesses?.find(item => item.harnessId === 'claude-code');
+  for (const window of [claude?.windows?.fiveHour, claude?.windows?.weekly]) {
+    if (window?.status !== 'available') continue;
+    const observedAt = typeof window.observedAt === 'string' ? Date.parse(window.observedAt) : NaN;
+    if (Number.isFinite(observedAt)) expires = Math.min(expires, observedAt + CLAUDE_USAGE_CACHE_MAX_AGE_MS);
+    const resetAt = typeof window.resetsAt === 'string' ? Date.parse(window.resetsAt) : NaN;
+    if (Number.isFinite(resetAt)) expires = Math.min(expires, resetAt);
+  }
+  return expires;
 }
 function observeCliActivity(task, kind, chunk) {
   task.activityRemainder = (task.activityRemainder + chunk).slice(-MAX_OUTPUT * 3);
