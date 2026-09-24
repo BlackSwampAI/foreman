@@ -45,4 +45,10 @@ describe('project Planner UI',()=>{
     const html=renderToStaticMarkup(createElement(App,{initialState:state}));
     expect(html).toContain('Task plan approved');expect(html).toContain('Run run_approved');expect(html).toContain('Result review and approval are still separate.');
   });
+  it('keeps the active repository summary compact and makes its allowed path list optional',()=>{
+    const state:State={projects:[{id:'prj_scope',name:'Scope project',tasks:[]}],roles:[]};
+    const workspace={repoPath:'/repo/scope-project',head:'a'.repeat(40),dirty:false,allowedScope:['nodes/','README.md'],validationCommands:[]};
+    const html=renderToStaticMarkup(createElement(App,{initialState:state,initialWorkspaceSetup:workspace}));
+    expect(html).toContain('ALLOWED FILES');expect(html).toContain('<b>2 allowed paths</b>');expect(html).toContain('<details class="repo-scope-list" aria-label="Allowed repository paths">');expect(html).toContain('Show all 2 paths');expect(html).toContain('nodes/, README.md');expect(html).not.toContain('<details class="repo-scope-list" aria-label="Allowed repository paths" open');
+  });
 });
