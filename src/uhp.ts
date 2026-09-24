@@ -79,7 +79,7 @@ export interface UhpDiscovery {
   selectedModel?: UhpModel;
 }
 
-export interface UhpUsageWindow { status: "available" | "unsupported" | "unavailable"; usedPercent?: number; remainingPercent?: number; resetsAt?: string }
+export interface UhpUsageWindow { status: "available" | "unsupported" | "unavailable"; usedPercent?: number; remainingPercent?: number; resetsAt?: string; observedAt?: string }
 export interface UhpUsageGroup { id: string; label: string; windows: { fiveHour: UhpUsageWindow; weekly: UhpUsageWindow } }
 export interface UhpHarnessUsage { harnessId: string; status: "ready" | "unavailable"; windows: { fiveHour: UhpUsageWindow; weekly: UhpUsageWindow }; groups?: UhpUsageGroup[] }
 export interface UhpUsageStatus { harnesses: UhpHarnessUsage[] }
@@ -299,7 +299,8 @@ export class UhpClient implements UhpAdapter {
       const parseWindow = (raw: unknown): UhpUsageWindow => {
         const w = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
         const status = w.status === "available" || w.status === "unsupported" || w.status === "unavailable" ? w.status : "unavailable";
-        return { status, ...(status === "available" && typeof w.usedPercent === "number" && Number.isFinite(w.usedPercent) ? { usedPercent: Math.max(0, Math.min(100, w.usedPercent)) } : {}), ...(status === "available" && typeof w.remainingPercent === "number" && Number.isFinite(w.remainingPercent) ? { remainingPercent: Math.max(0, Math.min(100, w.remainingPercent)) } : {}), ...(status === "available" && typeof w.resetsAt === "string" ? { resetsAt: w.resetsAt } : {}) };
+        const observedAt = typeof w.observedAt === "string" && Number.isFinite(Date.parse(w.observedAt)) && new Date(w.observedAt).toISOString() === w.observedAt ? w.observedAt : undefined;
+        return { status, ...(status === "available" && typeof w.usedPercent === "number" && Number.isFinite(w.usedPercent) ? { usedPercent: Math.max(0, Math.min(100, w.usedPercent)) } : {}), ...(status === "available" && typeof w.remainingPercent === "number" && Number.isFinite(w.remainingPercent) ? { remainingPercent: Math.max(0, Math.min(100, w.remainingPercent)) } : {}), ...(status === "available" && typeof w.resetsAt === "string" ? { resetsAt: w.resetsAt } : {}), ...(status === "available" && observedAt ? { observedAt } : {}) };
       };
       if (typeof item.harnessId !== "string") return [];
       const groups = Array.isArray(item.groups) ? item.groups.flatMap((raw): UhpUsageGroup[] => {

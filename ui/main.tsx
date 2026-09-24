@@ -33,7 +33,7 @@ type EventItem = { id: string; type: string; entityType?: string; entityId?: str
 export type State = { projects: Project[]; roles?: Role[]; events?: EventItem[] };
 type ServiceState = { status?: string; configured?: boolean; error?: string; discovery?: unknown };
 type Services = { uhp?: ServiceState; memory?: ServiceState };
-type CliUsageWindow = { status?: string; used?: number; remaining?: number; limit?: number; usedPercent?: number; remainingPercent?: number; resetsAt?: string; resetAt?: string; [key:string]: unknown };
+type CliUsageWindow = { status?: string; used?: number; remaining?: number; limit?: number; usedPercent?: number; remainingPercent?: number; resetsAt?: string; resetAt?: string; observedAt?: string; [key:string]: unknown };
 type CliUsageWindows = {fiveHour?:CliUsageWindow;weekly?:CliUsageWindow};
 type CliUsageGroup = {id:string;label:string;windows?:CliUsageWindows};
 type CliUsage = { harnesses?: Array<{harnessId:string;windows?:CliUsageWindows;groups?:CliUsageGroup[]}> };
@@ -520,23 +520,33 @@ export function App({initialState,initialWorkspaceSetup,initialTaskStartPreview,
   useEffect(()=>{setSelectedWorkflowRole(workflowRoleForPhase(initialWorkflowPhase?.id));setSelectedWorkflowPhase(initialWorkflowPhase?.id);},[task?.id,run?.id]);
   const streamActivity=streamingActivityRows();
   const cliUsageRows=()=> (cliUsage?.harnesses??[]).flatMap(harness=>{
-    const groups=harness.groups?.length?harness.groups:[{id:'provider',label:label(harness.harnessId),windows:harness.windows}];
-    return groups.map(group=><div className="cli-usage-row" key={`${harness.harnessId}-${group.id}`}>
-      <b>{harness.groups?.length?`${label(harness.harnessId)} · ${group.label}`:label(harness.harnessId)} <small>{harness.groups?.length?'Quota group':'Provider'}</small></b>
-      {(['fiveHour','weekly'] as const).map(windowName=>{
+    const hasGroups=!!harness.groups?.length;
+    const groups=hasGroups?harness.groups!:[{id:'provider',label:label(harness.harnessId),windows:harness.windows}];
+    const visibleGroups=harness.harnessId==='antigravity-cli'&&hasGroups?groups.filter(group=>group.id==='gemini'||group.id.startsWith('gemini-')):groups;
+    return visibleGroups.map(group=>{
+      const provider=harness.harnessId==='antigravity-cli'?'gemini':harness.harnessId==='claude-code'?'claude':'codex';
+      const providerLabel=harness.harnessId==='antigravity-cli'?'Antigravity · Gemini':harness.harnessId==='claude-code'?'Claude':'Codex';
+      const observedAt=harness.harnessId==='claude-code'?group.windows?.fiveHour?.observedAt??group.windows?.weekly?.observedAt:undefined;
+      return <div className={`usage-provider usage-${provider}`} key={`${harness.harnessId}-${group.id}`}>
+      <div className="usage-provider-head"><span className="usage-mark" aria-hidden="true">{provider==='gemini'?'✦':provider==='claude'?'✳':'◉'}</span><b>{providerLabel}</b></div>
+      <div className="usage-windows">{(['fiveHour','weekly'] as const).map(windowName=>{
         const usage=group.windows?.[windowName];
-        const title=windowName==='fiveHour'?'5h window':'Weekly';
+        const title=windowName==='fiveHour'?'5h':'Week';
         const status=usage?.status;
-        const values=[['used','Used'],['remaining','Remaining'],['limit','Limit']].flatMap(([key,labelText])=>typeof usage?.[key]==='number'?[`${labelText} ${(usage[key] as number).toLocaleString()}`]:[]);
-        const percent=typeof usage?.remainingPercent==='number'?`${usage.remainingPercent}% remaining`:typeof usage?.usedPercent==='number'?`${usage.usedPercent}% used`:'';
-        const statusText=!usage?'Unavailable':status==='unsupported'?'Unsupported':status==='unavailable'?'Unavailable':status==='available'?'Available · quota figures not reported':label(status??'Unavailable');
-        return <div key={windowName} role="group" aria-label={`${group.label} ${title} usage`}>
-          <span>{title}</span>
-          <div className="cli-usage-value">{percent&&<strong className="quota-percent">{percent}</strong>}{values.length>0&&<code>{values.join(' · ')}</code>}{!percent&&!values.length&&<code>{statusText}</code>}</div>
-          {usage?.resetsAt||usage?.resetAt?<small>Resets {stamp(String(usage.resetsAt??usage.resetAt))}</small>:null}
+        const known=typeof usage?.remainingPercent==='number'||typeof usage?.usedPercent==='number';
+        const usedPercent=typeof usage?.usedPercent==='number'?usage.usedPercent:typeof usage?.remainingPercent==='number'?100-usage.remainingPercent:0;
+        const percent=known?`${Math.round(usedPercent)}%`:'—';
+        const statusText=!usage||status==='unavailable'?'Unavailable':status==='unsupported'?'Unsupported':status==='available'?'No quota data':label(status??'Unavailable');
+        const reset=usage?.resetsAt??usage?.resetAt;
+        const details=[known?`${Math.round(usedPercent)}% used${typeof usage?.used==='number'&&typeof usage?.limit==='number'?` · ${usage.used.toLocaleString()} of ${usage.limit.toLocaleString()}`:''}`:statusText,reset?`Resets ${stamp(String(reset))}`:'',harness.harnessId==='claude-code'&&usage?.observedAt?`Last reported ${stamp(usage.observedAt)}`:''].filter(Boolean).join(' · ');
+        return <div className="usage-window" key={windowName} role="group" aria-label={`${group.label} ${windowName==='fiveHour'?'5 hour':'weekly'} usage`} title={details}>
+          <div className="usage-window-head"><span>{title}</span><b>{known?percent:statusText}</b></div>
+          <div className={`usage-track ${known?'':'is-unknown'}`} role={known?'meter':'img'} aria-label={`${providerLabel} ${windowName==='fiveHour'?'5 hour':'weekly'} usage: ${known?percent+' used':statusText}`} {...(known?{'aria-valuemin':0,'aria-valuemax':100,'aria-valuenow':Math.max(0,Math.min(100,Math.round(usedPercent)))}:{})}><span style={{width:`${Math.max(0,Math.min(100,usedPercent))}%`}}/></div>
         </div>;
-      })}
-    </div>);
+      })}</div>
+      {observedAt&&<small className="usage-observed">Reported {stamp(observedAt)}</small>}
+    </div>;
+    });
   });
 
   return <div className="app">
@@ -554,6 +564,7 @@ export function App({initialState,initialWorkspaceSetup,initialTaskStartPreview,
       <div className="layout">
         <aside className="tree card">
           <div className="card-title"><div><span className="overline">HIERARCHY</span><h2>Project tree</h2></div></div>
+          <div className="tree-content">
           {project&&<details className="project-settings"><summary>Project settings</summary><div className="settings-actions"><button className="outline small" type="button" onClick={()=>{setAdminActionError('');setAdminAction({kind:'reset-planner',projectId:project.id});}}>Reset Planner conversation</button><button className="outline small danger-action" type="button" onClick={()=>{setAdminActionError('');setAdminAction({kind:'delete-project',projectId:project.id});}}>Delete project</button></div></details>}
           {state.projects.length === 0 ? <div className="empty"><span className="empty-icon"><Icon name="repo"/></span><b>No repository open</b><p>Open a local Git repository to begin.</p><button className="primary small" onClick={openRepoDialog}>Open repository</button></div> : state.projects.map(p=><div key={p.id} className="project-node">
             <button className={`node project ${project?.id===p.id?'selected':''}`} onClick={()=>{setSelectedProject(p.id);setSelectedTask('');setSelectedRun('');setView('overview')}}><span className="folder"><Icon name="folder"/></span><b>{p.name}</b><span className="node-count">{p.tasks?.length ?? 0}</span></button>
@@ -562,7 +573,8 @@ export function App({initialState,initialWorkspaceSetup,initialTaskStartPreview,
               {task?.id===t.id && <div className="runs">{t.runs?.map(r=><button key={r.id} className={`node run ${run?.id===r.id?'selected':''}`} onClick={()=>{setSelectedRun(r.id);setView('run')}}><span className={`status-ring ${r.status==='running'?'busy':''}`} aria-hidden="true"/><span>Run</span><span className={`pill ${r.status==='running'?'live':''}`}>{label(r.status)}</span></button>)}<button className="add-run" onClick={()=>document.querySelector('.task-work')?.scrollIntoView({behavior:'smooth',block:'center'})} disabled={!t.id} aria-label={`Review ${t.title} and start work`}>Review task · Start work below</button></div>}
             </div>)}{addingTask?<form className="add-task-form" onSubmit={submitTask}><input autoFocus aria-label="Task description" placeholder="What should Foreman change?" value={taskTitle} onChange={e=>setTaskTitle(e.target.value)} /><button className="primary small" type="submit" disabled={pending||!taskTitle.trim()}>{pending?'Adding…':'Add task'}</button><button className="outline small" type="button" onClick={()=>setAddingTask(false)}>Cancel</button></form>:<button className="add-task" onClick={addTask}>Add task</button>}</div>}
           </div>)}
-          <div className="tree-foot"><span className="dot green"/> Hierarchy from local state</div>
+          </div>
+          <section className="usage-dock" aria-label="Harness usage"><div className="usage-dock-title"><span className="overline">USAGE</span><span className={`dot ${cliUsage?.harnesses?.length?'green':'muted'}`} aria-hidden="true"/></div>{cliUsage?.harnesses?.length?cliUsageRows():<p className="usage-dock-empty">{cliUsage?'No usage data':'Usage unavailable'}</p>}</section>
         </aside>
         <section className="center">
 
@@ -623,7 +635,6 @@ export function App({initialState,initialWorkspaceSetup,initialTaskStartPreview,
         </section>
         <aside className="inspector inspector-visible" aria-label="Run inspector">
           <section className="card inspector-card stream-card" aria-label="Streaming activity"><div className="card-title"><div><span className="overline">LIVE RESPONSE</span><h2>Streaming activity</h2></div><span className="count-badge">{streamActivity.length}</span></div>{streamActivity.map(({event,role,model,summary})=><div className="stream-row" key={event.id}><span className="event-dot"/><div><b>{role}{model?` · ${model}`:''}</b><small>{summary}</small></div><time>{stamp(event.at)}</time></div>)}{!streamActivity.length&&<div className="aside-empty">Provider activity appears here when a role is responding.</div>}</section>
-          <section className="card inspector-card cli-usage-card" aria-label="CLI usage"><div className="card-title"><div><span className="overline">CLI USAGE</span><h2>Harness usage</h2></div></div>{cliUsage?.harnesses?.length?cliUsageRows():<p className="aside-empty">{cliUsage?'No harness usage data reported.':'Unavailable · usage endpoint did not return data for this project.'}</p>}<p className="usage-disclosure">Quota data is shown when the connected harness reports it. Missing values are marked unavailable.</p></section>
           <details className="inspector-disclosure"><summary>Project details · usage &amp; activity</summary>
           <section className="card inspector-card"><div className="card-title"><div><span className="overline">SELECTED RUN</span><h2>Run details</h2></div><span className="number-badge">1</span></div>{run ? <><div className="detail-row"><span>Status</span><b><span className="dot green"/>{label(run.status)}</b></div><div className="detail-row"><span>Run ID</span><code>{run.id}</code></div><div className="detail-row"><span>Guidance entries</span><b>{run.guidance?.length ?? 0}</b></div><div className="detail-row"><span>Assignments</span><b>{run.assignments?.length ?? 0}</b></div>{(['inputTokens','outputTokens','totalTokens','thinkingTokens','cachedInputTokens','runtimeMs','requestCount'] as const).map(k=><div className="detail-row" key={`usage-${k}`}><span>Run {({inputTokens:'input tokens',outputTokens:'output tokens',totalTokens:'total tokens',thinkingTokens:'thinking tokens',cachedInputTokens:'cached input',runtimeMs:'runtime',requestCount:'requests'})[k]}</span><b className="unknown">{usageValue(run.usage,k)}</b></div>)}</> : <div className="aside-empty">Choose or start a run to inspect its state.</div>}</section>
 
