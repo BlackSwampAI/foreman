@@ -99,6 +99,7 @@ const server=createServer(async(req,res)=>{
     }
     if(req.method==='POST'&&path==='/api/projects'){const b=await body(req);json(res,201,await activeController.createProject(String(b.name??'')));return;}
     const plannerMatch=path.match(/^\/api\/projects\/([^/]+)\/planner\/messages$/);if(req.method==='POST'&&plannerMatch){const b=await body(req);json(res,200,await activeController.sendProjectPlannerMessage(decodeURIComponent(plannerMatch[1]!),String(b.text??'')));return;}
+    const plannerRecoveryMatch=path.match(/^\/api\/projects\/([^/]+)\/planner\/assignments\/([^/]+)\/recover-tasks$/);if(req.method==='POST'&&plannerRecoveryMatch){json(res,200,await activeController.recoverProjectPlannerTasks(decodeURIComponent(plannerRecoveryMatch[1]!),decodeURIComponent(plannerRecoveryMatch[2]!)));return;}
     let m=path.match(/^\/api\/roles\/([^/]+)\/config$/);if(req.method==='PUT'&&m){const b=await body(req);json(res,200,await activeController.selectRoleConfig(decodeURIComponent(m[1]!),b.config));return;}
     m=path.match(/^\/api\/projects\/([^/]+)\/roles\/([^/]+)\/config$/);if(req.method==='PUT'&&m){const b=await body(req);json(res,200,await activeController.selectRoleConfig(decodeURIComponent(m[2]!),b.config,decodeURIComponent(m[1]!)));return;}
     m=path.match(/^\/api\/runs\/([^/]+)\/roles\/([^/]+)\/config$/);if(req.method==='PUT'&&m){const b=await body(req);json(res,200,await activeController.selectRoleConfig(decodeURIComponent(m[2]!),b.config,undefined,decodeURIComponent(m[1]!)));return;}

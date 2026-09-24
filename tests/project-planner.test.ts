@@ -18,10 +18,10 @@ describe('project Planner workflow',()=>{
   it('persists one project conversation, creates separate tasks without starting workers, and isolates repositories',async()=>{
     const dir=await mkdtemp(join(tmpdir(),'foreman-project-planner-'));dirs.push(dir);const store=new JsonStore(join(dir,'state.json'));
     const submitted:Array<{roleId:string;projectId:string;prompt:string;config:Record<string,unknown>}>=[];
-    const plannerReplies=[JSON.stringify({reply:'I split this into two independent tasks.',tasks:[
+    const plannerReplies=[`I’ll check the requested behavior, then propose separate implementation tasks.\n${JSON.stringify({reply:'I split this into two independent tasks.',tasks:[
       {ref:'readme',title:'Update README',goal:'Document the requested behavior.',suggestedAllowedPaths:['README.md'],validationCriteria:['README renders and links resolve.']},
       {ref:'endpoint',title:'Add REST endpoint',goal:'Implement the requested endpoint.',suggestedAllowedPaths:['src/http/'],validationCriteria:['Endpoint tests pass.'],dependsOn:['readme']}
-    ]}),JSON.stringify({reply:'The README task is ready to start.'}),JSON.stringify({reply:'A separate repository conversation.'}),JSON.stringify({reply:'New model, same repository.'})];
+    ]})}`,JSON.stringify({reply:'The README task is ready to start.'}),JSON.stringify({reply:'A separate repository conversation.'}),JSON.stringify({reply:'New model, same repository.'})];
     const adapter:UhpAdapter={submit:async input=>{submitted.push({roleId:input.roleId,projectId:input.projectId,prompt:input.prompt,config:input.config});return {externalId:`external-${submitted.length}`,responseId:`response-${submitted.length}`,sessionId:`session-${submitted.length}`,status:'completed',outputText:plannerReplies.shift()??'Fixture reply'};},cancel:async()=>({status:'cancelled'})};
     await store.mutate(state=>{for(const role of state.roles){role.enabled=true;role.availableConfigs=[{harnessId:'fixture',model:'model-fixture'},{harnessId:'fixture',model:'other-model'}];role.config={harnessId:'fixture',model:'model-fixture'};}});
     const controller=new Controller(store,adapter);const first:any=await controller.createProject('Repository A'),second:any=await controller.createProject('Repository B');
@@ -63,10 +63,10 @@ describe('project Planner workflow',()=>{
 
   it('rejects a malformed proposal batch without creating a partial task set',async()=>{
     const dir=await mkdtemp(join(tmpdir(),'foreman-project-planner-'));dirs.push(dir);const store=new JsonStore(join(dir,'state.json'));
-    const adapter:UhpAdapter={submit:async()=>({externalId:'bad-proposal',status:'completed',outputText:JSON.stringify({reply:'Malformed proposal.',tasks:[{title:'Valid first task',goal:'A goal',suggestedAllowedPaths:['README.md'],validationCriteria:['Pass']},{title:'Invalid second task',goal:'A goal',suggestedAllowedPaths:[],validationCriteria:['Pass']}]})}),cancel:async()=>({status:'cancelled'})};
+    const adapter:UhpAdapter={submit:async()=>({externalId:'bad-proposal',status:'completed',outputText:JSON.stringify({reply:'Malformed proposal.',tasks:[{title:'Valid first task',goal:'A goal',suggestedAllowedPaths:['README.md'],validationCriteria:['Pass']},{title:'Invalid second task',goal:'A goal',suggestedAllowedPaths:['../outside'],validationCriteria:['Pass']}]})}),cancel:async()=>({status:'cancelled'})};
     await store.mutate(state=>{for(const role of state.roles){role.enabled=true;role.availableConfigs=[{harnessId:'fixture',model:'model-fixture'}];role.config={harnessId:'fixture',model:'model-fixture'};}});
     const controller=new Controller(store,adapter),project:any=await controller.createProject('Atomic proposal');
-    const result=await controller.sendProjectPlannerMessage(project.id,'Please create two tasks.');expect(result.proposalError).toContain('Task 2 requires suggested allowed paths');expect(result.createdTasks).toHaveLength(0);
+    const result=await controller.sendProjectPlannerMessage(project.id,'Please create two tasks.');expect(result.proposalError).toContain('Invalid repository path');expect(result.createdTasks).toHaveLength(0);
     expect((await controller.state()).projects.find(value=>value.id===project.id)?.tasks).toHaveLength(0);
   });
 

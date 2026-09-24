@@ -11,4 +11,9 @@ describe('project Planner UI',()=>{
     expect(html).toContain('aria-label="Main navigation"');for(const label of ['Projects','Runs','Roles','Events','Usage'])expect(html).toContain(`>${label}</button>`);
     expect(html).toContain('aria-label="Refresh state"');expect(html).toContain('<svg aria-hidden="true" focusable="false"');expect(html).not.toContain('objtext');
   });
+  it('hides a legacy structured proposal payload and keeps the readable Planner reply',()=>{
+    const state:State={projects:[{id:'prj_fixture',name:'Opened repository',plannerMessages:[{id:'pmsg_user',role:'user',text:'Add a health endpoint.',createdAt:'2026-01-01T00:00:00.000Z'},{id:'pmsg_planner',role:'planner',assignmentId:'asgn_fixture',text:'I prepared a task.\n{"reply":"See [the docs](https://example.com/docs) for context.","tasks":[{"title":"Add health endpoint"}]}',createdAt:'2026-01-01T00:01:00.000Z'}],tasks:[]}],roles:[]};
+    const html=renderToStaticMarkup(createElement(App,{initialState:state}));
+    expect(html).toContain('See ');expect(html).toContain('href="https://example.com/docs"');expect(html).not.toContain('I prepared a task.');expect(html).toContain('Earlier Planner proposal');expect(html).toContain('Create proposed tasks');expect(html).not.toContain('&quot;tasks&quot;');expect(html).toContain('Message project Planner');
+  });
 });
