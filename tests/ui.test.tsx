@@ -45,6 +45,32 @@ describe('project Planner UI',()=>{
     const html=renderToStaticMarkup(createElement(App,{initialState:state}));
     expect(html).toContain('Task plan approved');expect(html).toContain('Run run_approved');expect(html).toContain('Result review and approval are still separate.');
   });
+  it('keeps Planner first and shows a stopped validation phase with selectable role evidence',()=>{
+    const state:State={projects:[{id:'prj_workflow',name:'Workflow project',plannerMessages:[{id:'pmsg_workflow',role:'user',text:'Add the roster import endpoint.',createdAt:'2026-09-24T12:00:00.000Z'}],tasks:[{id:'tsk_workflow',title:'Add roster import',goal:'Accept roster updates.',validationCriteria:['Import tests pass'],suggestedAllowedPaths:['src/import/'],status:'in progress',runs:[{id:'run_workflow',status:'failed',controller:{startedAt:'2026-09-24T12:01:00.000Z',phase:'stopped',stoppedReason:'Controller validation evidence exceeds the 16,000 byte inbox limit',active:false},assignments:[{id:'asgn_orchestrator',roleId:'orchestrator',status:'succeeded',result:'Worker result was ready for validation.'},{id:'asgn_worker',roleId:'worker',status:'succeeded',result:'Implemented roster import endpoint.'}],workerEvidence:{workerAssignmentId:'asgn_worker',responseId:'resp_worker',pinnedBaseCommit:'a'.repeat(40),completeSnapshot:{reportedComplete:true,reportedErrors:0,entryCount:1},scopeVerified:true,allowedScope:['src/import/'],entries:[{path:'src/import/index.ts',kind:'file'}],changes:[{path:'src/import/index.ts',kind:'added',summary:'Adds the endpoint'}]},rejectedWorkerAttempts:[{id:'rejected_worker_snapshot',proposal:{id:'proposal_worker',status:'dispatched',text:'Implement the roster import endpoint.',orchestratorAssignmentId:'asgn_orchestrator',createdAt:'2026-09-24T12:02:00.000Z'},workerAssignmentId:'asgn_worker',reason:'An earlier reconciliation rejected this snapshot.',evidenceStatus:'rejected_untrusted',createdAt:'2026-09-24T12:03:00.000Z'}]}]}]}],roles:[...['planner','orchestrator','worker','reviewer'].map(id=>({id,name:id,enabled:true,config:{harnessId:'fixture',model:'simulated'},availableConfigs:[{harnessId:'fixture',model:'simulated'}]}))],events:[{id:'evt_worker_verified',type:'worker.evidence_verified',entityType:'run',entityId:'run_workflow',at:'2026-09-24T12:03:00.000Z',data:{workerAssignmentId:'asgn_worker',scopeVerified:true}},{id:'evt_worker_evidence_rejected',type:'worker.evidence_rejected',entityType:'run',entityId:'run_workflow',at:'2026-09-24T12:03:30.000Z',data:{workerAssignmentId:'asgn_worker',error:'Inbox too large'}},{id:'evt_worker_attempt_rejected',type:'worker.attempt_rejected',entityType:'run',entityId:'run_workflow',at:'2026-09-24T12:03:40.000Z',data:{workerAssignmentId:'asgn_worker',reason:'Snapshot previously rejected'}},{id:'evt_validation_stop',type:'controller.phase_changed',entityType:'run',entityId:'run_workflow',at:'2026-09-24T12:04:00.000Z',data:{phase:'validating'}}]};
+    const html=renderToStaticMarkup(createElement(App,{initialState:state}));
+    const plannerIndex=html.indexOf('Talk to the Planner');
+    const phasesIndex=html.indexOf('Run phase progress');
+    expect(plannerIndex).toBeGreaterThanOrEqual(0);expect(phasesIndex).toBeGreaterThan(plannerIndex);
+    expect(html).toContain('Validation blocked');expect(html).toContain('Controller validation evidence exceeds the 16,000 byte inbox limit');
+    expect(html).toContain('Select workflow role');expect(html).toContain('aria-pressed="true"');
+    expect(html).toContain('phase-step done');expect(html).toContain('phase-step blocked');expect(html).toContain('phase-step waiting');
+    expect(html).toContain('aria-label="Run phase progress"');
+    expect(html).toMatch(/class="phase-step done[^\"]*"[^>]*><button[^>]*aria-label="Orchestrator phase, Done/);
+    expect(html).toMatch(/class="phase-step done[^\"]*"[^>]*><button[^>]*aria-label="Verify phase, Done/);
+    expect(html).toMatch(/class="phase-step blocked[^\"]*"[^>]*><button[^>]*aria-label="Validate phase, Blocked/);
+    expect(html).toContain('aria-label="Validate phase, Blocked. Select for activity and evidence"');
+    expect(html).toContain('aria-label="Reviewer phase, Waiting. Select for activity and evidence"');
+    expect(html).toContain('Orchestrator activity and evidence');
+    expect(html).toContain('aria-label="Worker, status Succeeded. Select for details"');
+    expect(html).toContain('aria-label="Reviewer, status Unknown. Select for details"');
+    expect(html).not.toContain('Reviewer complete');expect(html).not.toContain('Reviewer activity and evidence');
+    expect(html).not.toContain('Foreman rejected this snapshot as untrusted');
+    expect(html).toContain('Complete snapshot verified · 1 entries · Scope verified');
+    expect(html).toContain('Historical rejection superseded by verified evidence');
+    expect(html).toContain('Worker assignment asgn_worker');
+    expect(html).not.toContain('Worker Attempt Rejected');expect(html).not.toContain('Worker Evidence Rejected');
+    expect(html).toContain('TASK PLAN APPROVAL');expect(html).toContain('Approve task &amp; start work');
+  });
   it('keeps the active repository summary compact and makes its allowed path list optional',()=>{
     const state:State={projects:[{id:'prj_scope',name:'Scope project',tasks:[]}],roles:[]};
     const workspace={repoPath:'/repo/scope-project',head:'a'.repeat(40),dirty:false,allowedScope:['nodes/','README.md'],validationCommands:[]};
