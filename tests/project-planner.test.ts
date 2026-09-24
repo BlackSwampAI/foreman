@@ -70,6 +70,49 @@ describe('project Planner workflow',()=>{
     expect((await controller.state()).projects.find(value=>value.id===project.id)?.tasks).toHaveLength(0);
   });
 
+  it('normalizes bounded Planner criteria strings and drops only out-of-scope advisory paths',async()=>{
+    const dir=await mkdtemp(join(tmpdir(),'foreman-planner-normalize-'));dirs.push(dir);const store=new JsonStore(join(dir,'state.json'));
+    const raw=`Planner proposal details follow.\n${JSON.stringify({reply:'I split the work into an audit, implementation, and validation tasks.',tasks:[
+      {ref:'nba_api_audit',title:'Audit the existing NBA API integration',goal:'Review the current API integration and document the relevant behavior.',suggestedAllowedPaths:['nodes/**','README.md'],validationCriteria:'The current API behavior and constraints are documented.'},
+      {ref:'nba_node_support',title:'Add NBA node support',goal:'Implement the requested NBA node behavior within the existing node package.',suggestedAllowedPaths:['nodes/**','credentials/**'],validationCriteria:'The NBA node behavior is covered by focused tests.',dependsOn:['nba_api_audit']},
+      {ref:'nba_validation_docs',title:'Document NBA validation',goal:'Document the validation workflow and expected results.',suggestedAllowedPaths:['test/**','tests/**','README.md','docs/**'],validationCriteria:'The documented checks match the implemented behavior.',dependsOn:['nba_node_support']},
+    ]})}`;
+    const prompts:string[]=[];const adapter:UhpAdapter={submit:async input=>{prompts.push(input.prompt);return {externalId:'normalized-proposal',responseId:'normalized-response',sessionId:'normalized-session',status:'completed',outputText:raw};},cancel:async()=>({status:'cancelled'})};
+    await store.mutate(state=>{for(const role of state.roles){role.enabled=true;role.availableConfigs=[{harnessId:'fixture',model:'model-fixture'}];role.config={harnessId:'fixture',model:'model-fixture'};}});
+    const controller=new Controller(store,adapter);controller.configureVerifiedWorkspace({repoPath:'/fixture/saved-sleeper',allowedScope:['nodes/','README.md','test/','tests/','docs/'],commands:[{name:'fixture check',command:'true',args:[]}]});const project:any=await controller.createProject('Saved Sleeper proposal');
+    const result=await controller.sendProjectPlannerMessage(project.id,'Plan the NBA API integration and validation changes.');
+    expect(result.proposalError).toBeUndefined();expect(result.createdTasks).toHaveLength(3);
+    expect(result.createdTasks.map(task=>task.validationCriteria)).toEqual([
+      ['The current API behavior and constraints are documented.'],
+      ['The NBA node behavior is covered by focused tests.'],
+      ['The documented checks match the implemented behavior.'],
+    ]);
+    expect(result.createdTasks.map(task=>task.suggestedAllowedPaths)).toEqual([
+      ['nodes/','README.md'],
+      ['nodes/'],
+      ['test/','tests/','README.md','docs/'],
+    ]);
+    expect(result.createdTasks[1]!.dependsOn).toEqual([result.createdTasks[0]!.id]);expect(result.createdTasks[2]!.dependsOn).toEqual([result.createdTasks[1]!.id]);
+    const saved=(await store.load()).projects.find(item=>item.id===project.id)!;expect(saved.plannerAssignments?.[0]?.result).toBe(raw);expect(prompts[0]).toContain('validationCriteria (an array of non-empty strings)');expect(prompts[0]).toContain('Configured repository allowed scope:');expect(prompts[0]).toContain('nodes/');expect(Buffer.byteLength(prompts[0]!, 'utf8')).toBeLessThanOrEqual(24_000);
+    const recovered=await controller.recoverProjectPlannerTasks(project.id,saved.plannerAssignments![0]!.id);expect(recovered.alreadyRecovered).toBe(true);expect(recovered.createdTasks.map(task=>task.id)).toEqual(result.createdTasks.map(task=>task.id));expect((await store.load()).projects.find(item=>item.id===project.id)?.tasks).toHaveLength(3);
+  });
+
+  it('rejects unsafe Planner wildcard paths atomically even when earlier tasks are valid',async()=>{
+    const dir=await mkdtemp(join(tmpdir(),'foreman-planner-unsafe-path-'));dirs.push(dir);const store=new JsonStore(join(dir,'state.json'));
+    const proposals=[JSON.stringify({reply:'Two proposed tasks.',tasks:[
+      {ref:'safe',title:'Safe task',goal:'Update a bounded node path.',suggestedAllowedPaths:['nodes/**'],validationCriteria:'The safe path check passes.'},
+      {ref:'unsafe',title:'Unsafe wildcard task',goal:'Change an ambiguous nested path.',suggestedAllowedPaths:['nodes/**/secrets/**'],validationCriteria:'The unsafe path check passes.',dependsOn:['safe']},
+    ]}),JSON.stringify({reply:'One suggestion is outside scope.',tasks:[
+      {title:'Out of scope only',goal:'Change a path outside the configured workspace.',suggestedAllowedPaths:['credentials/**'],validationCriteria:'The path must be in scope.'},
+    ]})];
+    const adapter:UhpAdapter={submit:async()=>({externalId:'unsafe-proposal',status:'completed',outputText:proposals.shift()}),cancel:async()=>({status:'cancelled'})};
+    await store.mutate(state=>{for(const role of state.roles){role.enabled=true;role.availableConfigs=[{harnessId:'fixture',model:'model-fixture'}];role.config={harnessId:'fixture',model:'model-fixture'};}});
+    const controller=new Controller(store,adapter);controller.configureVerifiedWorkspace({repoPath:'/fixture/saved-sleeper',allowedScope:['nodes/'],commands:[{name:'fixture check',command:'true',args:[]}]});const project:any=await controller.createProject('Atomic unsafe proposal');
+    await expect(controller.createTask(project.id,{title:'Manual task',goal:'Keep manual criteria strict.',suggestedAllowedPaths:['nodes/'],validationCriteria:'A single string must still fail.'} as any)).rejects.toThrow('validation criteria must be an array');
+    const result=await controller.sendProjectPlannerMessage(project.id,'Propose two bounded tasks.');expect(result.proposalError).toContain('cannot be safely narrowed');expect(result.createdTasks).toHaveLength(0);expect((await store.load()).projects.find(item=>item.id===project.id)?.tasks).toHaveLength(0);
+    const allOutOfScope=await controller.sendProjectPlannerMessage(project.id,'Propose a task with one advisory path.');expect(allOutOfScope.proposalError).toContain('no suggested paths inside');expect(allOutOfScope.createdTasks).toHaveLength(0);expect((await store.load()).projects.find(item=>item.id===project.id)?.tasks).toHaveLength(0);
+  });
+
   it('keeps legacy run Planner conversations attached to their original run',async()=>{
     const dir=await mkdtemp(join(tmpdir(),'foreman-project-planner-'));dirs.push(dir);const store=new JsonStore(join(dir,'state.json'));
     const adapter:UhpAdapter={submit:async()=>({externalId:'new-planner',responseId:'new-response',sessionId:'new-session',status:'completed',outputText:'New project conversation.'}),cancel:async()=>({status:'cancelled'})};

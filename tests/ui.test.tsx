@@ -12,9 +12,21 @@ describe('project Planner UI',()=>{
     expect(html).toContain('aria-label="Refresh state"');expect(html).toContain('<svg aria-hidden="true" focusable="false"');expect(html).not.toContain('objtext');
   });
   it('hides a legacy structured proposal payload and keeps the readable Planner reply',()=>{
-    const state:State={projects:[{id:'prj_fixture',name:'Opened repository',plannerMessages:[{id:'pmsg_user',role:'user',text:'Add a health endpoint.',createdAt:'2026-01-01T00:00:00.000Z'},{id:'pmsg_planner',role:'planner',assignmentId:'asgn_fixture',text:'I prepared a task.\n{"reply":"See [the docs](https://example.com/docs) for context.","tasks":[{"title":"Add health endpoint"}]}',createdAt:'2026-01-01T00:01:00.000Z'}],tasks:[]}],roles:[]};
+    const state:State={projects:[{id:'prj_fixture',name:'Opened repository',plannerAssignments:[{id:'asgn_fixture',roleId:'planner',status:'succeeded',result:{reply:'See [the docs](https://example.com/docs) for context.',tasks:[{title:'Add health endpoint'}]}}],plannerMessages:[{id:'pmsg_user',role:'user',text:'Add a health endpoint.',createdAt:'2026-01-01T00:00:00.000Z'},{id:'pmsg_planner',role:'planner',assignmentId:'asgn_fixture',text:'I prepared a task.',createdAt:'2026-01-01T00:01:00.000Z'}],tasks:[]}],roles:[]};
     const html=renderToStaticMarkup(createElement(App,{initialState:state}));
-    expect(html).toContain('See ');expect(html).toContain('href="https://example.com/docs"');expect(html).not.toContain('I prepared a task.');expect(html).toContain('Earlier Planner proposal');expect(html).toContain('Create proposed tasks');expect(html).not.toContain('&quot;tasks&quot;');expect(html).toContain('Message project Planner');
+    expect(html).toContain('I prepared a task.');expect(html).not.toContain('See ');expect(html).not.toContain('href="https://example.com/docs"');expect(html).toContain('Saved Planner proposal · 1 task');expect(html).toContain('Create proposed tasks');expect(html).not.toContain('&quot;tasks&quot;');expect(html).toContain('Message project Planner');
+  });
+  it('offers recovery from saved task JSON when the Planner message only contains friendly text',()=>{
+    const assignmentId='asgn_f32a6c25-24c0-4a22-bc4a-fd536b14fa3f';
+    const proposals=[{title:'Add roster import',goal:'Import roster updates.',validationCriteria:['Import validation passes']},{title:'Add profile sync',goal:'Sync player profiles.',validationCriteria:['Sync test passes']},{title:'Document import',goal:'Document roster import.',validationCriteria:['Docs build passes']}];
+    const state:State={projects:[{id:'prj_saved_proposal',name:'Saved proposal',plannerAssignments:[{id:assignmentId,roleId:'planner',status:'succeeded',result:JSON.stringify({reply:'I split the request into three tasks.',tasks:proposals})}],plannerMessages:[{id:'pmsg_planner',role:'planner',assignmentId,text:'I split the request into three tasks.',createdAt:'2026-09-23T12:00:00.000Z'}],tasks:[]}],roles:[]};
+    const html=renderToStaticMarkup(createElement(App,{initialState:state}));
+    expect(html).toContain('I split the request into three tasks.');expect(html).toContain('Saved Planner proposal · 3 tasks');expect(html).toContain('Create proposed tasks');expect(html).not.toContain('Add roster import');expect(html).not.toContain('"tasks"');
+  });
+  it('does not offer proposal recovery for a completed conversational Planner reply',()=>{
+    const state:State={projects:[{id:'prj_conversation',name:'Conversation only',plannerAssignments:[{id:'asgn_chat',roleId:'planner',status:'succeeded',result:'I can help with that. What should happen when the endpoint receives an empty query?'}],plannerMessages:[{id:'pmsg_chat',role:'planner',assignmentId:'asgn_chat',text:'I can help with that. What should happen when the endpoint receives an empty query?',createdAt:'2026-09-23T12:00:00.000Z'}],tasks:[]}],roles:[]};
+    const html=renderToStaticMarkup(createElement(App,{initialState:state}));
+    expect(html).toContain('What should happen when the endpoint receives an empty query?');expect(html).not.toContain('Create proposed tasks');expect(html).not.toContain('Saved Planner proposal');
   });
   it('puts task plan approval first and keeps run settings collapsed under Advanced options',()=>{
     const state:State={projects:[{id:'prj_review',name:'Review project',tasks:[{id:'tsk_review',title:'Add search endpoint',goal:'Let clients search active records.',validationCriteria:['Returns matching records','Rejects invalid query'],suggestedAllowedPaths:['src/search/'],status:'ready'}]}],roles:['orchestrator','worker','reviewer'].map(id=>({id,name:id,enabled:true,config:{harnessId:'local',model:'safe-model'},availableConfigs:[{harnessId:'local',model:'safe-model'}]}))};
