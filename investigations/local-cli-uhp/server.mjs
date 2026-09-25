@@ -35,7 +35,7 @@ if (AGY_WORKER_EFFORT !== undefined && !['low', 'medium', 'high'].includes(AGY_W
   throw new Error('AGY_WORKER_EFFORT must be low, medium, or high');
 }
 const HARNESS = {
-  claude: { id: 'claude-code', bin: process.env.CLAUDE_BIN ?? 'claude', authDir: process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), model: process.env.CLAUDE_MODEL ?? 'sonnet' },
+  claude: { id: 'claude-code', bin: process.env.CLAUDE_BIN ?? 'claude', authDir: process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), model: process.env.CLAUDE_MODEL ?? 'opus' },
   codex: { id: 'codex-cli', bin: process.env.CODEX_BIN ?? 'codex', authDir: process.env.CODEX_HOME ?? join(homedir(), '.codex'), model: process.env.CODEX_MODEL ?? 'gpt-6-sol' },
   agy: { id: 'antigravity-cli', bin: process.env.AGY_BIN ?? 'agy', authDir: process.env.AGY_CONFIG_DIR ?? join(homedir(), '.gemini', 'antigravity-cli'), model: process.env.AGY_MODEL ?? 'gemini-3.8-flash-low' },
 };
@@ -81,6 +81,7 @@ function executableConfigured(bin) {
   return (process.env.PATH ?? '').split(':').some(dir => { try { accessSync(join(dir, bin), fsConstants.X_OK); return true; } catch { return false; } });
 }
 function configured(h) { return !!h?.authDir && typeof h.model === 'string' && h.model.trim() !== '' && h.model.trim().toLowerCase() !== 'undefined' && (!!SOURCE_REPO && executableConfigured(BWRAP) && executableConfigured(h.bin) && readableDirectory(h.authDir)); }
+function modelsFor(h) { return h.id === 'claude-code' && ['opus', 'sonnet'].includes(h.model) ? ['opus', 'sonnet'] : [h.model]; }
 function readableDirectory(path) { try { return accessSync(path, fsConstants.R_OK) === undefined; } catch { return false; } }
 function outputText(r) { return typeof r.output_text === 'string' ? r.output_text : ''; }
 function reportedModel(value) { return typeof value === 'string' && value.trim() !== '' && value.trim().toLowerCase() !== 'undefined' ? value.trim() : undefined; }
@@ -1265,7 +1266,7 @@ const server = createServer(async (req, res) => {
       const h = cliFor(decodeURIComponent(models[1]));
       if (!h || !configured(h)) return send(res, 404, { models: [] });
       if (h.id === 'antigravity-cli') return send(res, 200, { models: await discoverAgyModels() });
-      return send(res, 200, { models: [{ id: h.model, available: true, name: h.model }] });
+      return send(res, 200, { models: modelsFor(h).map(model => ({ id: model, available: true, name: model })) });
     }
     const responsePath = url.pathname.match(/^\/v1\/responses\/([^/]+)$/);
     if (req.method === 'GET' && responsePath) { const r = state.responses[decodeURIComponent(responsePath[1])]; return r ? send(res, 200, r) : send(res, 404, { error: { code: 'not_found' } }); }
@@ -1284,7 +1285,7 @@ const server = createServer(async (req, res) => {
       if (h.id === 'antigravity-cli') {
         const available = await discoverAgyModels();
         if (!available.some(model => model.id === b.model)) return send(res, 409, { error: { code: 'model_unavailable' } });
-      } else if (b.model !== h.model) return send(res, 409, { error: { code: 'model_unavailable' } });
+      } else if (!modelsFor(h).includes(b.model)) return send(res, 409, { error: { code: 'model_unavailable' } });
       const timeout = Number(b.timeout_seconds ?? 60), steps = Number(b.max_step ?? 1);
       if (!Number.isInteger(timeout) || timeout < 1 || timeout > MAX_TIMEOUT || !Number.isInteger(steps) || steps < 1 || steps > 100) return send(res, 400, { error: { code: 'bounds_invalid' } });
       const workspaceId = b.metadata?.workspace_id;

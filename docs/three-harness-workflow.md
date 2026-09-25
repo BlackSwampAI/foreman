@@ -147,39 +147,48 @@ returned snapshot with the pinned Git base.
    replies and assignment/session metadata appear in the run. Planner and
    Orchestrator use separate continuing contexts.
 2. **Start the controller.** Click **Start work** and set the per-role turn
-   budgets and Worker attempt limit. Defaults are Planner 3, Orchestrator 2,
-   Worker 1, Reviewer 1, and one Worker attempt. These limits count CLI turns
+   budgets and Worker attempt limit. Defaults are Planner 3, Orchestrator 3,
+   Worker 2, Reviewer 2, and two Worker attempts. These limits count CLI turns
    and Worker attempts; AGY token usage and internal steps are unbounded per
    CLI invocation, and AGY `max_step` is ignored. CLI counters are harness
    reports, may use different accounting, and do not establish provider
    request counts or cost. The controller automatically
    sends the recorded Planner request and guidance to Orchestrator. Orchestrator
    must return a strict JSON object containing a bounded `workerTask`; only a
-   successful, bound proposal can advance the run.
+   successful, bound proposal can advance the run. For an Antigravity Worker,
+   the proposal must name an exact target file. Foreman gives Orchestrator the
+   pinned in-scope file list and automatically asks for one correction if the
+   first proposal names only directories.
 3. **Worker and evidence.** Foreman dispatches the proposal with the selected
    Worker harness/model. The Worker edits only its isolated workspace seeded
    from the pinned base. Foreman obtains and verifies the complete snapshot,
    compares bytes, modes, and paths against the pinned Git base, enforces the
    allowed scope, and computes the exact diff. Incomplete snapshots and
-   out-of-scope paths stop the run.
+   out-of-scope paths stop the run. A verified snapshot with no changes fails
+   the result gate even if every configured command passes.
 4. **Validation and Reviewer.** Foreman runs every configured command in a
    disposable validation workspace with time and output bounds. After
    successful verification and validation, Foreman sends the exact verified
    diff and validation evidence to a read-only Reviewer. The Reviewer
-   recommendation is advisory; it cannot edit the result or approve it. The
-   UI records selected harness/model, response and session IDs, observed model
-   when available, and usage fields reported by the CLI. Missing fields remain
-   unavailable.
+   recommendation is advisory; it cannot edit the result or approve it. A
+   `request_changes` or `reject` verdict starts a bounded correction while
+   Orchestrator, Worker, and Reviewer turns remain: Orchestrator receives the
+   rationale as advisory feedback, a new Worker starts from the pinned base,
+   and a fresh Reviewer inspects the revised verified result. The original
+   review and evidence remain in the run history. The UI records selected
+   harness/model, response and session IDs, observed model when available, and
+   usage fields reported by the CLI. Missing fields remain unavailable.
 5. **Stop and recovery rules.** The controller enforces run budgets across
    automatic and manual role assignments. It does not retry failed CLI
-   submissions, incomplete evidence, out-of-scope changes, or changed results
-   that fail validation. One bounded follow-up Worker attempt is available
-   only after a successful, complete, scope-verified Worker result fails
-   configured validation and budget remains. Orchestrator must provide a
+   submissions, incomplete evidence, or out-of-scope changes. Bounded
+   follow-up Worker attempts are available after a successful, complete,
+   scope-verified Worker result fails validation or changes no files, while
+   budget remains. Orchestrator must provide a
    distinct strict proposal; Foreman archives the prior proposal and evidence,
    then seeds a fresh workspace from the same pinned base. This creates a new
    Worker assignment and does not retry the prior proposal or Worker result. A
-   second validation failure stops for a human.
+   further validation or Reviewer failure stops when the configured turn or
+   attempt budget is exhausted.
    During automation, Planner messages queue as steering and the controller
    offers them to Orchestrator at the next safe checkpoint. Stop reasons and
    role budgets are visible in the run.

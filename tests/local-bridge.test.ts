@@ -46,7 +46,7 @@ describe('LocalBridge', () => {
       expect(args).toEqual([f.bridge]);
       expect(options.env).toMatchObject({
         LOCAL_CLI_UHP_SOURCE_REPO: f.repo,
-        CLAUDE_CONFIG_DIR: join(f.home, '.claude'), CLAUDE_MODEL: 'sonnet',
+        CLAUDE_CONFIG_DIR: join(f.home, '.claude'), CLAUDE_MODEL: 'opus',
         CODEX_HOME: join(f.home, '.codex'), CODEX_MODEL: 'gpt-6-sol',
         AGY_CONFIG_DIR: join(f.home, '.gemini', 'antigravity-cli'), AGY_MODEL: 'gemini-3.8-flash-low', AGY_WORKER_EFFORT: 'low',
       });
