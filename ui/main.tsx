@@ -171,6 +171,34 @@ export function App({initialState,initialWorkspaceSetup,initialTaskStartPreview,
     return () => window.removeEventListener('keydown', closeOnEscape);
   }, [settingsOpen]);
   useEffect(() => {
+    const closeMenus = (except?: HTMLDetailsElement) => {
+      document.querySelectorAll<HTMLDetailsElement>('.tree-actions[open]').forEach(menu => {
+        if (menu !== except) menu.open = false;
+      });
+    };
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      const menu = target instanceof Element ? target.closest<HTMLDetailsElement>('.tree-actions') : null;
+      closeMenus(menu ?? undefined);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        const openMenus = [...document.querySelectorAll<HTMLDetailsElement>('.tree-actions[open]')];
+        if (openMenus.length) {
+          event.preventDefault();
+          closeMenus();
+          openMenus[openMenus.length - 1]?.querySelector<HTMLElement>(':scope > summary')?.focus();
+        }
+      }
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, []);
+  useEffect(() => {
     const source = new EventSource('/api/events');
     source.onopen = () => setOnline(true);
     source.onmessage = () => { setEventCount(v => v + 1); void refresh(); };
@@ -647,11 +675,10 @@ export function App({initialState,initialWorkspaceSetup,initialTaskStartPreview,
         <aside className="tree card">
           <div className="card-title"><div><span className="overline">HIERARCHY</span><h2>Project tree</h2></div></div>
           <div className="tree-content">
-          {project&&<details className="project-settings"><summary>Project settings</summary><div className="settings-actions"><button className="outline small" type="button" onClick={()=>{setAdminActionError('');setAdminAction({kind:'reset-planner',projectId:project.id});}}>Reset Planner conversation</button><button className="outline small danger-action" type="button" onClick={()=>{setAdminActionError('');setAdminAction({kind:'delete-project',projectId:project.id});}}>Delete project</button></div></details>}
           {state.projects.length === 0 ? <div className="empty"><span className="empty-icon"><Icon name="repo"/></span><b>No repository open</b><p>Open a local Git repository to begin.</p><button className="primary small" onClick={openRepoDialog}>Open repository</button></div> : state.projects.map(p=><div key={p.id} className="project-node">
-            <div className="tree-node-row"><button className={`node project ${project?.id===p.id?'selected':''}`} onClick={()=>{setSelectedProject(p.id);setSelectedTask('');setSelectedRun('');setView('overview')}}><span className="folder"><Icon name="folder"/></span><b>{p.name}</b><span className="node-count">{p.tasks?.length ?? 0}</span></button><details className="task-actions tree-actions"><summary aria-label={`Actions for project ${p.name}`} title={`Actions for project ${p.name}`}>⋯</summary><div className="settings-actions"><button className="outline small danger-action" type="button" onClick={()=>{setAdminActionError('');setAdminAction({kind:'delete-project',projectId:p.id});}}>Delete project</button></div></details></div>
+            <div className="tree-node-row"><button className={`node project ${project?.id===p.id?'selected':''}`} title={p.name} onClick={()=>{setSelectedProject(p.id);setSelectedTask('');setSelectedRun('');setView('overview')}}><span className="folder"><Icon name="folder"/></span><b>{p.name}</b><span className="node-count">{p.tasks?.length ?? 0}</span></button><details className="task-actions tree-actions"><summary aria-label={`Actions for project ${p.name}`} title={`Actions for project ${p.name}`}>⋯</summary><div className="settings-actions"><button className="outline small" type="button" aria-label={`Reset Planner conversation for ${p.name}`} onClick={e=>{e.currentTarget.closest('details')!.open=false;setAdminActionError('');setAdminAction({kind:'reset-planner',projectId:p.id});}}>Reset Planner conversation</button><button className="outline small danger-action" type="button" aria-label={`Delete project ${p.name}`} onClick={e=>{e.currentTarget.closest('details')!.open=false;setAdminActionError('');setAdminAction({kind:'delete-project',projectId:p.id});}}>Delete project</button></div></details></div>
             {project?.id===p.id && <div className="children">{p.tasks?.map(t=><div key={t.id}>
-              <div className="tree-node-row"><button className={`node task ${task?.id===t.id?'selected':''}`} title={t.title} onClick={()=>{setSelectedTask(t.id);setSelectedRun('');setView('overview')}}><span className="task-icon"><Icon name="task"/></span><span className="truncate task-node-label"><b>{t.title}</b><small>{label(t.id===task?.id?taskDisplayStatus:taskRunDisplayStatus(t))}</small></span><span className="node-count" aria-label={`${t.runs?.length ?? 0} runs`}>{t.runs?.length ?? 0}</span></button><details className="task-actions tree-actions"><summary aria-label={`Actions for task ${t.title}`} title={`Actions for task ${t.title}`}>⋯</summary><div className="settings-actions">{t.planApproval?.status==='approved'&&<button className="outline small" type="button" onClick={()=>{setAdminActionError('');setAdminAction({kind:'reset-plan',projectId:p.id,taskId:t.id});}}>Reset approved plan</button>}<button className="outline small danger-action" type="button" onClick={()=>{setAdminActionError('');setAdminAction({kind:'delete-task',projectId:p.id,taskId:t.id});}}>Delete task</button></div></details></div>
+              <div className="tree-node-row"><button className={`node task ${task?.id===t.id?'selected':''}`} title={t.title} onClick={()=>{setSelectedTask(t.id);setSelectedRun('');setView('overview')}}><span className="task-icon"><Icon name="task"/></span><span className="truncate task-node-label"><b>{t.title}</b><small>{label(t.id===task?.id?taskDisplayStatus:taskRunDisplayStatus(t))}</small></span><span className="node-count" aria-label={`${t.runs?.length ?? 0} runs`}>{t.runs?.length ?? 0}</span></button><details className="task-actions tree-actions"><summary aria-label={`Actions for task ${t.title}`} title={`Actions for task ${t.title}`}>⋯</summary><div className="settings-actions">{t.planApproval?.status==='approved'&&<button className="outline small" type="button" aria-label={`Reset approved plan for ${t.title}`} onClick={e=>{e.currentTarget.closest('details')!.open=false;setAdminActionError('');setAdminAction({kind:'reset-plan',projectId:p.id,taskId:t.id});}}>Reset approved plan</button>}<button className="outline small danger-action" type="button" aria-label={`Delete task ${t.title}`} onClick={e=>{e.currentTarget.closest('details')!.open=false;setAdminActionError('');setAdminAction({kind:'delete-task',projectId:p.id,taskId:t.id});}}>Delete task</button></div></details></div>
               {task?.id===t.id && <div className="runs">{t.runs?.map(r=><button key={r.id} className={`node run ${run?.id===r.id?'selected':''}`} onClick={()=>{setSelectedRun(r.id);setView('run')}}><span className={`status-ring ${r.status==='running'?'busy':''}`} aria-hidden="true"/><span>Run</span><span className={`pill ${r.status==='running'?'live':''}`}>{label(r.status)}</span></button>)}<button className="add-run" onClick={()=>document.querySelector('.task-work')?.scrollIntoView({behavior:'smooth',block:'center'})} disabled={!t.id} aria-label={`Review ${t.title} and start work`}>Review task · Start work below</button></div>}
             </div>)}{addingTask?<form className="add-task-form" onSubmit={submitTask}><input autoFocus aria-label="Task description" placeholder="What should Foreman change?" value={taskTitle} onChange={e=>setTaskTitle(e.target.value)} /><button className="primary small" type="submit" disabled={pending||!taskTitle.trim()}>{pending?'Adding…':'Add task'}</button><button className="outline small" type="button" onClick={()=>setAddingTask(false)}>Cancel</button></form>:<button className="add-task" onClick={addTask}>Add task</button>}</div>}
           </div>)}

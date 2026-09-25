@@ -8,7 +8,7 @@ describe('project Planner UI',()=>{
     const state:State={projects:[{id:'prj_fixture',name:'Opened repository',plannerSession:{localId:'planner-session-fixture',roleId:'planner',generation:1,status:'active',config:{harnessId:'fixture',model:'simulated'},startedAt:'2026-01-01T00:00:00.000Z'},plannerMessages:[{id:'pmsg_user',role:'user',text:'Update the node README and add a REST endpoint.',createdAt:'2026-01-01T00:00:00.000Z'},{id:'pmsg_planner',role:'planner',text:'I split this into two tasks.',createdAt:'2026-01-01T00:01:00.000Z'}],tasks:[{id:'tsk_readme_fixture',title:'Update README',goal:'Document the node behavior.',suggestedAllowedPaths:['README.md'],validationCriteria:['README check passes'],status:'ready',runs:[]},{id:'tsk_endpoint_fixture',title:'Add REST endpoint',goal:'Implement the requested API endpoint.',suggestedAllowedPaths:['src/http/'],validationCriteria:['Endpoint tests pass'],status:'ready',runs:[]}]}],roles:[...['planner','orchestrator','worker','reviewer'].map(id=>({id,name:id,enabled:true,config:{harnessId:'fixture',model:'simulated'},availableConfigs:[{harnessId:'fixture',model:'simulated'}]}))]};
     const html=renderToStaticMarkup(createElement(App,{initialState:state}));
     expect(html).toContain('Talk to the Planner');expect(html).toContain('One continuing conversation for this repository');expect(html).toContain('Update the node README and add a REST endpoint.');expect(html).toContain('Update README');expect(html).toContain('Add REST endpoint');expect(html).toContain('Start work');expect(html).toContain('Message project Planner');
-    expect(html).not.toContain('aria-label="Main navigation"');expect(html).toContain('Project tree');expect(html).toContain('class="node task selected"');
+    expect(html).not.toContain('aria-label="Main navigation"');expect(html).toContain('Project tree');expect(html).toContain('class="node project selected" title="Opened repository"');expect(html).toContain('class="node task selected" title="Update README"');
     expect(html).toContain('aria-label="Refresh state"');expect(html).toContain('<svg aria-hidden="true" focusable="false"');expect(html).not.toContain('objtext');
   });
   it('hides a legacy structured proposal payload and keeps the readable Planner reply',()=>{
@@ -101,13 +101,13 @@ describe('project Planner UI',()=>{
     expect(html).toContain('<summary>Repository details</summary>');expect(html).not.toContain('ACTIVE REPOSITORY');expect(html).not.toContain('class="repo-summary"');
     expect(html).not.toContain('class="rail"');expect(html).toContain('Project tree');expect(html).toContain('Add endpoint');expect(html).toContain('Add task');expect(html).toContain('Talk to the Planner');
   });
-  it('offers project deletion from its tree row and keeps deletion behind confirmation',()=>{
-    const state:State={projects:[{id:'prj_admin',name:'Admin project',plannerMessages:[{id:'pmsg_admin',role:'user',text:'Keep the Planner history.',createdAt:'2026-09-24T12:00:00.000Z'}],tasks:[{id:'tsk_admin',title:'Admin task',goal:'Inspect task actions.',status:'ready'}]}],roles:[]};
+  it('offers per-project Reset Planner and deletion from row menus behind confirmation',()=>{
+    const state:State={projects:[{id:'prj_admin',name:'Admin project',plannerMessages:[{id:'pmsg_admin',role:'user',text:'Keep the Planner history.',createdAt:'2026-09-24T12:00:00.000Z'}],tasks:[{id:'tsk_admin',title:'Admin task',goal:'Inspect task actions.',status:'ready'}]},{id:'prj_other_admin',name:'Other admin project',tasks:[]}],roles:[]};
     const html=renderToStaticMarkup(createElement(App,{initialState:state}));
-    expect(html).not.toContain('class="rail"');expect(html).toContain('Project tree');expect(html).toContain('class="node project selected"');expect(html).toContain('class="node task selected"');
-    expect(html).toContain('<details class="project-settings"><summary>Project settings</summary>');expect(html).not.toContain('<details class="project-settings" open');
-    expect(html).toContain('class="outline small" type="button"');expect(html).toContain('Reset Planner conversation');expect(html).toContain('Delete project');
-    expect(html).toContain('aria-label="Actions for project Admin project"');expect(html).toContain('aria-label="Actions for task Admin task"');
+    expect(html).not.toContain('class="rail"');expect(html).toContain('Project tree');expect(html).toContain('class="node project selected" title="Admin project"');expect(html).toContain('class="node task selected" title="Admin task"');expect(html).toContain('title="Other admin project"');
+    expect(html).not.toContain('project-settings');expect(html).toContain('class="outline small" type="button"');expect(html).toContain('Reset Planner conversation');expect(html).toContain('Delete project');
+    expect(html).toContain('aria-label="Actions for project Admin project"');expect(html).toContain('aria-label="Reset Planner conversation for Admin project"');expect(html).toContain('aria-label="Delete project Admin project"');expect(html).toContain('aria-label="Actions for project Other admin project"');expect(html).toContain('aria-label="Reset Planner conversation for Other admin project"');expect(html.match(/aria-label="Actions for project /g)).toHaveLength(2);
+    expect(html).toContain('aria-label="Actions for task Admin task"');
     expect(html).not.toContain('class="admin-confirm"');expect(html).not.toContain('aria-labelledby="admin-action-title"');
   });
   it('offers task row actions without sending a request before confirmation',()=>{
