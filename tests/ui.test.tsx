@@ -102,19 +102,21 @@ describe('project Planner UI',()=>{
     expect(html).toContain('<summary>Repository details</summary>');expect(html).not.toContain('ACTIVE REPOSITORY');expect(html).not.toContain('class="repo-summary"');
     expect(html).not.toContain('class="rail"');expect(html).toContain('Project tree');expect(html).toContain('Add endpoint');expect(html).toContain('Add task');expect(html).toContain('Talk to the Planner');
   });
-  it('keeps project deletion and Planner reset behind project settings and a confirmation dialog',()=>{
+  it('offers project deletion from its tree row and keeps deletion behind confirmation',()=>{
     const state:State={projects:[{id:'prj_admin',name:'Admin project',plannerMessages:[{id:'pmsg_admin',role:'user',text:'Keep the Planner history.',createdAt:'2026-09-24T12:00:00.000Z'}],tasks:[{id:'tsk_admin',title:'Admin task',goal:'Inspect task actions.',status:'ready'}]}],roles:[]};
     const html=renderToStaticMarkup(createElement(App,{initialState:state}));
     expect(html).not.toContain('class="rail"');expect(html).toContain('Project tree');expect(html).toContain('class="node project selected"');expect(html).toContain('class="node task selected"');
     expect(html).toContain('<details class="project-settings"><summary>Project settings</summary>');expect(html).not.toContain('<details class="project-settings" open');
     expect(html).toContain('class="outline small" type="button"');expect(html).toContain('Reset Planner conversation');expect(html).toContain('Delete project');
+    expect(html).toContain('aria-label="Actions for project Admin project"');expect(html).toContain('aria-label="Actions for task Admin task"');
     expect(html).not.toContain('class="admin-confirm"');expect(html).not.toContain('aria-labelledby="admin-action-title"');
   });
-  it('shows reset approved plan and delete task affordances without sending a request before confirmation',()=>{
+  it('offers task row actions without sending a request before confirmation',()=>{
     const state:State={projects:[{id:'prj_task_actions',name:'Task actions project',tasks:[{id:'tsk_approved_actions',title:'Approved task',goal:'Reset or delete this task.',status:'ready',planApproval:{status:'approved',approvedAt:'2026-09-24T12:00:00.000Z',specDigest:'fixture-digest'}}]}],roles:[]};
     const html=renderToStaticMarkup(createElement(App,{initialState:state}));
     expect(html).toContain('class="task-actions"><summary>Task actions</summary>');expect(html).not.toContain('<details class="task-actions" open');
     expect(html).toContain('Reset approved plan');expect(html).toContain('Delete task');expect(html).toContain('danger-action');
+    expect(html).toContain('aria-label="Actions for task Approved task"');
     expect(html).not.toContain('class="admin-confirm"');expect(html).not.toContain('aria-labelledby="admin-action-title"');expect(html).not.toContain('/api/tasks/tsk_approved_actions/plan');expect(html).not.toContain('/api/tasks/tsk_approved_actions"');
   });
   it('shows live provider activity with role and model identity',()=>{
