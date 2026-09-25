@@ -12,11 +12,13 @@ import { LocalBridge } from './local-bridge.js';
 import { browseRepositories, repositoryName } from './repository-browser.js';
 import { inspectRepository } from './repository-inspector.js';
 import { deleteWorkspaceSetup, findSavedProjectForRepository, loadWorkspaceSetup, saveWorkspaceSetup, validateWorkspaceSetup } from './workspace-setup.js';
+import { GitHubIntegration, requireSameOriginWrite } from './github.js';
 
 const config=loadConfig();
 const workspacePolicyConfigured=Boolean(config.workspaceSourceRepo||config.workspaceBridgeUrl||config.workspaceAllowedScope.length||config.validationCommands.length);
 if(workspacePolicyConfigured&&(!config.workspaceSourceRepo||!config.workspaceBridgeUrl||!config.workspaceAllowedScope.length||!config.validationCommands.length))throw new Error('Workspace workflow configuration is partial; configure source repo, loopback bridge URL, allowed scope, and validation commands together');
 const store=new JsonStore(resolve(config.dataDir,'state.json'));
+const github=new GitHubIntegration(store,config.dataDir);
 const uhpToken=process.env.UHP_TOKEN;
 const uhp=config.uhpBaseUrl ? new UhpClient({baseUrl:config.uhpBaseUrl,...(uhpToken?{token:uhpToken}:{}),harnessId:config.uhpHarnessId,model:config.uhpModel,timeoutMs:Math.max(config.requestTimeoutMs,45_000)}) : {
   async submit():Promise<never>{throw new Error('UHP is not configured (set UHP_BASE_URL)');},
@@ -63,6 +65,23 @@ const controllerForPath=async(path:string,query?:URLSearchParams,method?:string)
 const server=createServer(async(req,res)=>{
   const url=new URL(req.url??'/',`http://${req.headers.host??'localhost'}`), path=url.pathname;
   try {
+    const githubMatch=path.match(/^\/api\/runs\/([^/]+)\/github(?:\/(push|pr|review|merge|enqueue|refresh-local))?$/);
+    if(githubMatch){
+      const runId=decodeURIComponent(githubMatch[1]!);
+      const action=githubMatch[2];
+      if(req.method==='GET'&&!action){json(res,200,await github.getRunStatus(runId));return;}
+      if(req.method==='POST'&&action){
+        const b=await body(req);
+        const confirmKind=action==='push'?'push':action==='pr'?'pr':action==='review'?'review':action==='merge'?'merge':action==='enqueue'?'enqueue':'refresh';
+        requireSameOriginWrite(req,b,confirmKind,{bindHost:config.host,port:config.port});
+        if(action==='push'){json(res,200,await github.pushResult(runId));return;}
+        if(action==='pr'){json(res,200,await github.openPullRequest(runId));return;}
+        if(action==='review'){json(res,200,await github.submitReview(runId,{event:b.event,body:b.body,reviewedHeadSha:b.reviewedHeadSha}));return;}
+        if(action==='merge'){json(res,200,await github.mergePullRequest(runId,{reviewedHeadSha:b.reviewedHeadSha}));return;}
+        if(action==='enqueue'){json(res,200,await github.enqueuePullRequest(runId,{reviewedHeadSha:b.reviewedHeadSha}));return;}
+        json(res,200,await github.refreshLocal(runId));return;
+      }
+    }
     const projectUsageMatch=path.match(/^\/api\/projects\/([^/]+)\/usage$/);
     if(req.method==='GET'&&projectUsageMatch){
       const projectId=decodeURIComponent(projectUsageMatch[1]!);

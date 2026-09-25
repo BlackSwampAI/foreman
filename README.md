@@ -53,6 +53,26 @@ The Planner conversation belongs to the project and keeps its full visible histo
 
 The folder browser reads the server computer's filesystem. If Foreman runs on another machine, the browser shows folders on that machine. Validation commands run in Foreman's disposable copy after Worker output is verified, so review the suggested commands before opening the repository. Host CLI logins must already be configured for the harnesses you select; unavailable harnesses are not selectable. With all three CLIs available, new projects default to Codex for Planner, Orchestrator, and Reviewer and AGY Flash Low for Worker; each role can be changed in the UI.
 
+## GitHub handoff
+
+For a project whose local repository has a GitHub remote, Foreman uses the host's
+signed-in `gh` CLI to show the selected run's result branch and commit, linked
+pull request, CI checks, reviews, and merge state. The GitHub panel refreshes
+status without a model call. A missing remote or unavailable `gh` login appears
+as a recoverable status in the panel. GitHub credentials stay with the host;
+they are not put into a Worker workspace or shown in the interface.
+
+The operator's handoff is explicit:
+
+1. Inspect the verified result, validation, and Foreman Reviewer recommendation; choose **Approve result**. This approves the Foreman result only.
+2. Choose **Promote approved result** to create its verified local result commit and branch.
+3. In **GitHub**, confirm **Push result branch**. Wait for Foreman to report that the remote branch SHA matches the promoted result commit, then confirm **Open PR**. Foreman checks for an existing PR before creating one. If the remote SHA differs or cannot be checked, refresh status and resolve that state before opening or updating a PR.
+4. Inspect the actual GitHub PR diff, reviews, and individual CI checks in Foreman. Confirm a GitHub review comment, request for changes, or approval if GitHub permits it. Foreman approval does not submit a GitHub review.
+5. When GitHub requirements are met, confirm **Merge**. If branch rules require a merge queue, inspect the full diff and reviews, wait for all checks to pass, and confirm **Add to merge queue** instead. Foreman reports the queue state and does not merge immediately or submit a duplicate queue request. For direct merge, Foreman re-reads the PR head and refuses to merge if it differs from the commit reviewed in the UI. Branch protection applies; Foreman does not bypass it or enable auto-merge silently.
+6. After merge, refresh the local checkout before starting a dependent task. The GitHub base branch has advanced, but the source checkout may still be behind. Use Foreman's local refresh action only on a clean checkout that can fast-forward, or update the repository yourself and then return to Foreman. Foreman does not overwrite uncommitted changes.
+
+Push, PR creation, GitHub review, direct merge, and queue submission each require a separate UI confirmation. After a queued merge completes, refresh the local checkout as in step 6 before starting dependent work. Planner, Orchestrator, Worker, and Reviewer messages cannot invoke those actions.
+
 `pnpm dev` starts the API in watch mode and `pnpm dev:ui` starts Vite for UI development. The settings below remain available for custom or legacy setups; the normal local repository flow does not require them.
 
 | Setting | Purpose |
