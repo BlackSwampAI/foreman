@@ -163,6 +163,7 @@ const server=createServer(async(req,res)=>{
     m=path.match(/^\/api\/runs\/([^/]+)\/reviewer\/retry$/);if(req.method==='POST'&&m){await activeController.retryReviewer(decodeURIComponent(m[1]!));json(res,200,{ok:true});return;}
     m=path.match(/^\/api\/runs\/([^/]+)\/reviewer-correction\/resume$/);if(req.method==='POST'&&m){json(res,202,await activeController.resumeReviewerCorrection(decodeURIComponent(m[1]!)));return;}
     m=path.match(/^\/api\/runs\/([^/]+)\/approve$/);if(req.method==='POST'&&m){json(res,200,await activeController.approveRun(decodeURIComponent(m[1]!),await body(req)));return;}
+    m=path.match(/^\/api\/runs\/([^/]+)\/abandon-result$/);if(req.method==='POST'&&m){json(res,200,await activeController.abandonApprovedResult(decodeURIComponent(m[1]!),await body(req)));return;}
     m=path.match(/^\/api\/runs\/([^/]+)\/promotion$/);if(req.method==='POST'&&m){json(res,200,await activeController.promoteRun(decodeURIComponent(m[1]!),await body(req)));return;}
     m=path.match(/^\/api\/assignments\/([^/]+)\/cancel$/);if(req.method==='POST'&&m){json(res,200,await activeController.cancelAssignment(decodeURIComponent(m[1]!)));return;}
     m=path.match(/^\/api\/assignments\/([^/]+)\/refresh$/);if(req.method==='POST'&&m){json(res,200,await activeController.refreshAssignment(decodeURIComponent(m[1]!)));return;}

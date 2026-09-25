@@ -246,13 +246,17 @@ export class UhpClient implements UhpAdapter {
         result: responseObject.error ?? responseObject,
         reviewerExecution,
       };
-      if (input.roleId === "worker" && harness.id === "codex-cli" && status !== "completed") return {
+      // A CLI can fail before it creates a resumable session or reports its model.
+      // Preserve terminal failures and their diagnostics; completed responses still
+      // pass the strict identity checks below.
+      if (status !== "completed" && input.roleId !== "reviewer") return {
         externalId: final.id, responseId: final.id, ...(sessionId ? { sessionId } : {}), status,
         requestedModel: model.id, selectedHarnessId: harness.id,
         ...(actualModel ? { actualModel, actualModelStatus: "observed" as const } : actualModelStatus ? { actualModelStatus } : {}),
         ...(cliInvocation ? { cliInvocation } : {}),
         outputText: extractOutputText(responseObject), result: responseObject.error ?? responseObject,
         ...(Object.hasOwn(responseObject, "usage") ? { usage: normalizeUsage(responseObject.usage) } : {}),
+        runtimeMs: Date.now() - startedAt,
       };
       const modelFallback = responseMetadata.model_fallback === true || (!!actualModel && reportedRequestedModel !== undefined && actualModel !== reportedRequestedModel);
       const cliModelUnavailable = !actualModel && actualModelStatus === "unavailable" && !!cliInvocation && reportedRequestedModel === model.id && reportedHarnessId === harness.id && hasExplicitModelArgument(cliInvocation.args, model.id) && (harness.id === "antigravity-cli" || harness.id === "codex-cli");

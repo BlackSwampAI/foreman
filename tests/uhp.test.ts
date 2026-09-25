@@ -91,6 +91,21 @@ describe("UHP adapter", () => {
     expect(result).toMatchObject({ status: "failed", requestedModel: "codex-available", actualModelStatus: "unavailable", selectedHarnessId: "codex-cli", responseId: "resp_fixture" });
     expect(result.actualModel).toBeUndefined();
     expect(result.sessionId).toBeUndefined();
+    expect(result.result).toEqual({ message: "Codex CLI exited before reporting a session id" });
+  });
+
+  it("preserves a failed Orchestrator response when Codex exits before creating a session", async () => {
+    const server = await fixture({ codexCli: true, codexFailure: true });
+    const client = new UhpClient({ baseUrl: server.baseUrl, harnessId: "codex-cli", model: "codex-available" });
+    const result = await client.submit({ submissionId: "orchestrator-failed-sub", assignmentId: "orchestrator-failed-as", runId: "orchestrator-failed-run", roleId: "orchestrator", taskId: "task", projectId: "project", prompt: "Plan a correction", config: {}, idempotencyKey: "orchestrator-failed-key" });
+    expect(result).toMatchObject({ status: "failed", responseId: "resp_fixture", requestedModel: "codex-available", selectedHarnessId: "codex-cli", actualModelStatus: "unavailable", cliInvocation: { executable: "/opt/codex", hostExecutable: "/usr/bin/codex" }, result: { message: "Codex CLI exited before reporting a session id" } });
+    expect(result.sessionId).toBeUndefined();
+  });
+
+  it("keeps completed Orchestrator identity checks strict", async () => {
+    const server = await fixture({ codexCli: true, missingActualModel: true, omitSessionId: true });
+    const client = new UhpClient({ baseUrl: server.baseUrl, harnessId: "codex-cli", model: "codex-available" });
+    await expect(client.submit({ submissionId: "orchestrator-completed-sub", assignmentId: "orchestrator-completed-as", runId: "orchestrator-completed-run", roleId: "orchestrator", taskId: "task", projectId: "project", prompt: "Plan a correction", config: {}, idempotencyKey: "orchestrator-completed-key" })).rejects.toThrow("UHP response did not report its session id");
   });
 
   it("discovers configured harness/model, submits idempotently, streams terminal response and exposes session ID", async () => {

@@ -13,6 +13,7 @@ import { posix } from 'node:path';
 import { TextDecoder } from 'node:util';
 import { createRequire } from 'node:module';
 import { roleSessionBinding, roleStatePath, resolvePreviousRoleSession, withRoleSession } from './role-sessions.mjs';
+import { codexCliArgs } from './cli-args.mjs';
 import { readClaudeControlUsage } from './claude-quota.mjs';
 
 const VERSION = '2026-09-12';
@@ -399,7 +400,7 @@ function cliArgs(kind, model, timeout, maxStep, reviewer = false, sessionId, per
   if (kind === 'claude') return reviewer
     ? ['-p', '--output-format', 'stream-json', '--verbose', '--model', model, '--max-turns', String(Math.min(maxStep, 2)), '--safe-mode', '--restricted', '--strict-mcp-config', '--permission-mode', 'plan', '--tools', '']
     : ['-p', '--output-format', 'stream-json', '--verbose', '--model', model, '--max-turns', String(Math.min(maxStep, 10)), '--restricted', '--strict-mcp-config', '--permission-mode', persistentContext ? 'plan' : 'acceptEdits', '--tools', persistentContext ? 'Read' : 'Read,Edit,Write', ...(sessionId ? ['--resume', sessionId] : [])];
-  return ['--ask-for-approval', 'never', 'exec', ...(sessionId ? ['resume', sessionId] : []), '--json', ...(!persistentContext ? ['--ephemeral'] : []), '--sandbox', reviewer || persistentContext ? 'read-only' : 'workspace-write', '--ignore-user-config', ...(reviewer ? ['--ignore-rules'] : []), '--skip-git-repo-check', '--model', model, '-'];
+  return codexCliArgs(model, { reviewer, sessionId, persistentContext });
 }
 function agyArgs(model, timeout, conversationId, reviewer = false, worker = false) {
   return ['--output-format', 'stream-json', '--model', model, '--print-timeout', `${timeout}s`, `--mode=${reviewer ? 'plan' : 'accept-edits'}`, ...(worker ? ['--add-dir','/workspace','--agent', AGY_WORKER_AGENT, ...(AGY_WORKER_EFFORT ? ['--effort', AGY_WORKER_EFFORT] : [])] : []), ...(conversationId ? ['--conversation', conversationId] : [])];

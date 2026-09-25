@@ -34,6 +34,13 @@ async function setup(adapter: Partial<UhpAdapter> = {}) {
 }
 
 describe('UHP prompt size and stopped-run recovery', () => {
+  it('keeps the bridge diagnostic on a terminal assignment failure', async () => {
+    const { controller, store, run } = await setup({ submit: async () => ({ externalId: 'failed-response', responseId: 'failed-response', status: 'failed', result: { message: 'Codex CLI exited before reporting a session id' } }) });
+    const assignment = await controller.assign(run.id, 'planner', 'Summarize the task.');
+    expect(assignment).toMatchObject({ status: 'failed', error: 'Codex CLI exited before reporting a session id' });
+    expect((await store.load()).projects[0]!.tasks[0]!.runs[0]!.assignments.at(-1)?.result).toEqual({ message: 'Codex CLI exited before reporting a session id' });
+  });
+
   it('rejects correction resume without a recovered stopped run and makes no UHP submission', async () => {
     let calls = 0;
     const { controller, run } = await setup({ submit: async () => { calls++; throw new Error('must not submit'); } });
@@ -104,6 +111,13 @@ describe('UHP prompt size and stopped-run recovery', () => {
     expect(recovered.status).toBe('awaiting_approval');
     expect((await store.load()).events.some(item => item.type === 'reviewer.recommendation_restored' && item.entityId === run.id && item.data.decisionRequired === true)).toBe(true);
 
+    // A later CLI failure during correction is recoverable under the same evidence
+    // binding; the UI must not treat prompt_limit as the only resumable error.
+    await store.mutate(state => {
+      const current = state.projects[0]!.tasks[0]!.runs[0]!;
+      current.assignments.at(-1)!.error = 'Codex CLI exited before reporting a session id';
+      current.controller!.stoppedReason = 'Orchestrator correction turn did not succeed';
+    });
     expect(calls).toBe(0);
     const resumed = await controller.resumeReviewerCorrection(run.id);
     expect(resumed.controller).toMatchObject({ active: true, phase: 'orchestrating' });
