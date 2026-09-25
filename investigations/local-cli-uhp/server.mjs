@@ -13,6 +13,7 @@ import { posix } from 'node:path';
 import { TextDecoder } from 'node:util';
 import { createRequire } from 'node:module';
 import { roleSessionBinding, roleStatePath, resolvePreviousRoleSession, withRoleSession } from './role-sessions.mjs';
+import { readClaudeControlUsage } from './claude-quota.mjs';
 
 const VERSION = '2026-09-12';
 const utf8 = new TextDecoder('utf-8', { fatal: true });
@@ -284,7 +285,8 @@ async function readUsageStatus() {
           return { harnessId: h.id, status: 'ready', windows: agy.windows, groups: agy.groups };
         }
         if (h.id === 'claude-code') {
-          const claude = await readClaudeQuotaUsage();
+          const fromCli = await readClaudeControlUsage(h.bin, h.authDir);
+          const claude = fromCli && (fromCli.fiveHour.status === 'available' || fromCli.weekly.status === 'available') ? fromCli : await readClaudeQuotaUsage();
           return { harnessId: h.id, status: 'ready', windows: claude };
         }
         return { harnessId: h.id, status: 'ready', windows: unavailableUsageWindows() };
