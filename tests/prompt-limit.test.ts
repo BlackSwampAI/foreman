@@ -34,6 +34,27 @@ async function setup(adapter: Partial<UhpAdapter> = {}) {
 }
 
 describe('UHP prompt size and stopped-run recovery', () => {
+  it('stores the complete Reviewer rationale without clipping it', async () => {
+    const { controller, store, run } = await setup();
+    const current = (await store.load()).projects[0]!.tasks[0]!.runs[0]!;
+    const evidence = (controller as any).reviewerEvidencePackage(current);
+    const rationale = `${'Reviewer issue detail. '.repeat(230)} FINAL STORED RATIONALE MARKER.`;
+    await store.mutate(state => {
+      state.projects[0]!.tasks[0]!.runs[0]!.assignments.push({
+        id: 'reviewer-long-rationale', roleId: 'reviewer', status: 'succeeded',
+        requestedConfig: { harnessId: 'fixture', model: 'model-fixture' },
+        actualConfig: { harnessId: 'fixture', model: 'model-fixture' },
+        requestedModel: 'model-fixture', selectedHarnessId: 'fixture', reportedHarnessId: 'fixture',
+        responseId: 'resp-reviewer-long', sessionId: 'session-reviewer-long',
+        result: JSON.stringify({ verdict: 'request_changes', rationale }),
+        reviewerExecution: { mode: 'read_only', mutationAttempted: false, validation: evidence.controllerValidation },
+      } as any);
+    });
+    const recommendation: any = await controller.recordReviewerRecommendation(run.id, 'reviewer-long-rationale');
+    expect(Buffer.byteLength(rationale, 'utf8')).toBeGreaterThan(4_000);
+    expect(recommendation.rationale).toBe(rationale);
+    expect((await store.load()).projects[0]!.tasks[0]!.runs[0]!.reviewerRecommendation?.rationale).toBe(rationale);
+  });
   it('keeps the bridge diagnostic on a terminal assignment failure', async () => {
     const { controller, store, run } = await setup({ submit: async () => ({ externalId: 'failed-response', responseId: 'failed-response', status: 'failed', result: { message: 'Codex CLI exited before reporting a session id' } }) });
     const assignment = await controller.assign(run.id, 'planner', 'Summarize the task.');
@@ -86,7 +107,7 @@ describe('UHP prompt size and stopped-run recovery', () => {
     const before = (await store.load()).projects[0]!.tasks[0]!.runs[0]!;
     const reviewEvidence = (controller as any).reviewerEvidencePackage(before);
     const stamp = new Date().toISOString(), recommendationAt = new Date(Date.now() + 1_000).toISOString(), orchestratorAt = new Date(Date.now() + 2_000).toISOString();
-    const recommendation: any = { id: 'recommendation-fixture', status: 'proposed', provenance: 'uhp_response', reviewerAssignmentId: 'reviewer-fixture', harnessId: 'fixture', model: 'model-fixture', responseId: 'resp-reviewer', sessionId: 'session-reviewer', reviewMode: 'read_only', mutationAttempted: false, verdict: 'request_changes', rationale: `Please make the requested edit. ${'Issue detail needs a concrete fix. '.repeat(70)} Final issue: downgrade every claim without captured evidence.`, createdAt: recommendationAt };
+    const recommendation: any = { id: 'recommendation-fixture', status: 'proposed', provenance: 'uhp_response', reviewerAssignmentId: 'reviewer-fixture', harnessId: 'fixture', model: 'model-fixture', responseId: 'resp-reviewer', sessionId: 'session-reviewer', reviewMode: 'read_only', mutationAttempted: false, verdict: 'request_changes', rationale: `Please make the requested edit. ${'Issue detail needs a concrete fix. '.repeat(130)} Final issue: downgrade every claim without captured evidence. FINAL MARKER beyond 3500 bytes.`, createdAt: recommendationAt };
     await store.mutate(state => {
       const current = state.projects[0]!.tasks[0]!.runs[0]!;
       current.assignments.push({ id: 'reviewer-fixture', roleId: 'reviewer', status: 'succeeded', requestedConfig: { harnessId: 'fixture', model: 'model-fixture' }, actualConfig: { harnessId: 'fixture', model: 'model-fixture' }, requestedModel: 'model-fixture', selectedHarnessId: 'fixture', reportedHarnessId: 'fixture', responseId: 'resp-reviewer', sessionId: 'session-reviewer', reviewerExecution: { mode: 'read_only', mutationAttempted: false, validation: reviewEvidence.controllerValidation }, prompt: 'review', submissionId: 'review-sub', idempotencyKey: 'review-key', createdAt: stamp } as any);
@@ -132,7 +153,9 @@ describe('UHP prompt size and stopped-run recovery', () => {
     expect(resumedPrompts).toHaveLength(1);
     expect(Buffer.byteLength(resumedPrompts[0]!, 'utf8')).toBeLessThanOrEqual(12_000);
     expect(Buffer.byteLength(recommendation.rationale, 'utf8')).toBeGreaterThan(2_000);
+    expect(Buffer.byteLength(recommendation.rationale, 'utf8')).toBeGreaterThan(3_500);
     expect(resumedPrompts[0]).toContain('Final issue: downgrade every claim without captured evidence.');
+    expect(resumedPrompts[0]).toContain('FINAL MARKER beyond 3500 bytes.');
     expect(resumedPrompts[0]).toContain('A URL, placeholder ID, or unsupported example is not proof of an observation.');
     expect(stoppedAgain.controller).toMatchObject({ active: false, phase: 'stopped' });
     expect(stoppedAgain.reviewerRecommendation).toMatchObject({ id: recommendation.id, verdict: 'request_changes' });
@@ -154,27 +177,31 @@ describe('UHP prompt size and stopped-run recovery', () => {
   });
 
   it('resumes a saved valid Reviewer correction plan without another Orchestrator call', async () => {
-    let calls = 0;
-    const { controller, store, run } = await setup({ submit: async () => { calls++; throw new Error('No model call expected'); } });
-    controller.configureVerifiedWorkspace({ repoPath: '/fixture/repo', bridgeBaseUrl: 'http://127.0.0.1:1', allowedScope: ['README.md'], commands: [{ name: 'fixture', command: 'true', args: [] }] });
+    let calls = 0; const resumedPrompts: string[] = [];
+    const { controller, store, run } = await setup({ submit: async input => { calls++; resumedPrompts.push(input.prompt); throw new Error('No model call expected'); } });
+    controller.configureVerifiedWorkspace({ repoPath: '/fixture/repo', bridgeBaseUrl: 'http://127.0.0.1:1', allowedScope: ['docs/api-matrix.md'], commands: [{ name: 'fixture', command: 'true', args: [] }] });
     const before = (await store.load()).projects[0]!.tasks[0]!.runs[0]!;
     const reviewEvidence = (controller as any).reviewerEvidencePackage(before);
     const stamp = new Date().toISOString(), recommendationAt = new Date(Date.now() + 1_000).toISOString(), orchestratorAt = new Date(Date.now() + 2_000).toISOString();
-    const recommendation: any = { id: 'recommendation-saved-plan', status: 'proposed', provenance: 'uhp_response', reviewerAssignmentId: 'reviewer-saved-plan', harnessId: 'fixture', model: 'model-fixture', responseId: 'resp-reviewer', sessionId: 'session-reviewer', reviewMode: 'read_only', mutationAttempted: false, verdict: 'request_changes', rationale: 'Please make the requested edit.', createdAt: recommendationAt };
+    const rationale = `Please make the requested edit. ${'Review issue detail. '.repeat(260)} FINAL ISSUE MARKER beyond prior cutoff.`;
+    const recommendation: any = { id: 'recommendation-saved-plan', status: 'proposed', provenance: 'uhp_response', reviewerAssignmentId: 'reviewer-saved-plan', harnessId: 'fixture', model: 'model-fixture', responseId: 'resp-reviewer', sessionId: 'session-reviewer', reviewMode: 'read_only', mutationAttempted: false, verdict: 'request_changes', rationale, createdAt: recommendationAt };
     await store.mutate(state => {
       const current = state.projects[0]!.tasks[0]!.runs[0]!;
-      current.allowedScope = ['README.md'];
+      current.allowedScope = ['docs/api-matrix.md']; current.workerEvidence!.allowedScope = ['docs/api-matrix.md'];
       current.workerProposal = { id: 'proposal-original', status: 'dispatched', text: 'Original Worker task', orchestratorAssignmentId: 'orchestrator-original', createdAt: stamp, workerAssignmentId: 'worker-fixture' };
       current.assignments.push({ id: 'reviewer-saved-plan', roleId: 'reviewer', status: 'succeeded', requestedConfig: { harnessId: 'fixture', model: 'model-fixture' }, actualConfig: { harnessId: 'fixture', model: 'model-fixture' }, requestedModel: 'model-fixture', selectedHarnessId: 'fixture', reportedHarnessId: 'fixture', responseId: 'resp-reviewer', sessionId: 'session-reviewer', reviewerExecution: { mode: 'read_only', mutationAttempted: false, validation: reviewEvidence.controllerValidation }, prompt: 'review', submissionId: 'review-sub-saved-plan', idempotencyKey: 'review-key-saved-plan', createdAt: stamp } as any);
       current.reviewerRecommendation = recommendation;
       current.reviewerRecommendationHistory = [recommendation];
-      current.assignments.push({ id: 'orchestrator-saved-plan', roleId: 'orchestrator', status: 'succeeded', requestedConfig: { harnessId: 'fixture', model: 'model-fixture' }, prompt: 'bounded correction', submissionId: 'orch-sub-saved-plan', idempotencyKey: 'orch-key-saved-plan', result: JSON.stringify({ workerTask: 'Target file: README.md. Update the coverage table and keep supported/unsupported/unverified classifications.' }), createdAt: orchestratorAt } as any);
-      current.orchestratorInbox!.deliveredInAssignmentId = 'orchestrator-saved-plan';
+      current.assignments.push({ id: 'orchestrator-saved-plan', roleId: 'orchestrator', status: 'succeeded', requestedConfig: { harnessId: 'fixture', model: 'model-fixture' }, prompt: 'bounded correction', submissionId: 'orch-sub-saved-plan', idempotencyKey: 'orch-key-saved-plan', result: JSON.stringify({ workerTask: 'Use the /state/nba sample endpoint as context. Target file: docs/api-matrix.md. Update the coverage table.' }), createdAt: orchestratorAt } as any);
+      current.orchestratorInbox = (controller as any).buildOrchestratorInbox(current.id, current); current.orchestratorInbox!.deliveredInAssignmentId = 'orchestrator-saved-plan';
       current.controller = { startedAt: stamp, active: false, phase: 'stopped', stoppedReason: 'Worker proposal references a path outside the allowed scope: supported/unsupported/unverified', budgets: { roleTurns: { planner: 2, orchestrator: 1, worker: 2, reviewer: 2 }, workerAttempts: 2 } };
       current.status = 'awaiting_approval';
       state.events.push({ id: 'saved-plan-retry-authorized', type: 'reviewer.retry_authorized', entityType: 'run', entityId: run.id, at: stamp, data: { previousRecommendationId: recommendation.id } });
     });
     (controller as any).retryWorkerProposal = async () => { throw new Error('fixture stopped before Worker dispatch'); };
+
+    const validPlanState = await store.load();
+    expect((controller as any).savedReviewerCorrectionPlan(validPlanState.projects[0]!.tasks[0]!.runs[0]!, validPlanState.events)?.id).toBe('orchestrator-saved-plan');
 
     const resumed = await controller.resumeReviewerCorrection(run.id);
     expect(resumed.controller).toMatchObject({ active: true, phase: 'orchestrating' });
@@ -185,10 +212,21 @@ describe('UHP prompt size and stopped-run recovery', () => {
     }
     const saved = (await store.load()).projects[0]!.tasks[0]!.runs[0]!;
     expect(calls).toBe(0);
-    expect(saved.workerProposal?.text).toContain('supported/unsupported/unverified');
+    expect(saved.workerProposal?.text).toContain('/state/nba');
+    expect(saved.workerProposal?.text).toContain('Target file: docs/api-matrix.md');
     expect(saved.workerProposal?.orchestratorAssignmentId).toBe('orchestrator-saved-plan');
     expect(saved.assignments.filter(item => item.roleId === 'orchestrator')).toHaveLength(1);
-    expect(saved.reviewerRecommendation).toMatchObject({ id: recommendation.id, verdict: 'request_changes' });
+    expect(saved.reviewerRecommendation).toMatchObject({ id: recommendation.id, verdict: 'request_changes', rationale });
     expect(saved.controller).toMatchObject({ active: false, phase: 'stopped' });
+
+    await store.mutate(state => {
+      const current = state.projects[0]!.tasks[0]!.runs[0]!;
+      current.assignments.find(item => item.id === 'orchestrator-saved-plan')!.result = JSON.stringify({ workerTask: 'Target file: /state/nba' });
+      current.controller = { ...current.controller!, active: false, phase: 'stopped' };
+      current.status = 'awaiting_approval';
+    });
+    const invalidPlanState = await store.load();
+    expect((controller as any).savedReviewerCorrectionPlan(invalidPlanState.projects[0]!.tasks[0]!.runs[0]!, invalidPlanState.events)).toBeUndefined();
+    await expect(controller.resumeReviewerCorrection(run.id)).rejects.toMatchObject({ statusCode: 409 });
   });
 });
