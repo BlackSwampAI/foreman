@@ -162,6 +162,7 @@ const server=createServer(async(req,res)=>{
     m=path.match(/^\/api\/runs\/([^/]+)\/reviewer$/);if(req.method==='POST'&&m){const b=await body(req);if(b.action==='recommendation')json(res,200,await activeController.recordReviewerRecommendation(decodeURIComponent(m[1]!),String(b.assignmentId??'')));else json(res,201,await activeController.requestReviewer(decodeURIComponent(m[1]!)));return;}
     m=path.match(/^\/api\/runs\/([^/]+)\/reviewer\/retry$/);if(req.method==='POST'&&m){await activeController.retryReviewer(decodeURIComponent(m[1]!));json(res,200,{ok:true});return;}
     m=path.match(/^\/api\/runs\/([^/]+)\/reviewer-correction\/resume$/);if(req.method==='POST'&&m){json(res,202,await activeController.resumeReviewerCorrection(decodeURIComponent(m[1]!)));return;}
+    m=path.match(/^\/api\/runs\/([^/]+)\/initial-proposal\/resume$/);if(req.method==='POST'&&m){json(res,202,await activeController.resumeInitialProposal(decodeURIComponent(m[1]!)));return;}
     m=path.match(/^\/api\/runs\/([^/]+)\/approve$/);if(req.method==='POST'&&m){json(res,200,await activeController.approveRun(decodeURIComponent(m[1]!),await body(req)));return;}
     m=path.match(/^\/api\/runs\/([^/]+)\/abandon-result$/);if(req.method==='POST'&&m){json(res,200,await activeController.abandonApprovedResult(decodeURIComponent(m[1]!),await body(req)));return;}
     m=path.match(/^\/api\/runs\/([^/]+)\/promotion$/);if(req.method==='POST'&&m){json(res,200,await activeController.promoteRun(decodeURIComponent(m[1]!),await body(req)));return;}

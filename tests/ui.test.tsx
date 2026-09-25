@@ -113,6 +113,15 @@ describe('project Planner UI',()=>{
     const correctionFailed=structuredClone(state),correctionFailedRun=correctionFailed.projects[0]!.tasks[0]!.runs![0]!;correctionFailedRun.controller!.stoppedReason='UHP response did not report its session id';correctionFailedRun.assignments![2]!.error='UHP response did not report its session id';
     const correctionFailedHtml=renderToStaticMarkup(createElement(App,{initialState:correctionFailed}));expect(correctionFailedHtml).toContain('Run stopped');expect(correctionFailedHtml).not.toContain('Recovered for human review');expect(correctionFailedHtml).toContain('UHP response did not report its session id');
   });
+  it('offers explicit reuse of a saved initial Worker proposal on a stopped run',()=>{
+    const state:State={projects:[{id:'prj_saved_initial',name:'Saved proposal project',tasks:[{id:'tsk_saved_initial',title:'Map NBA coverage',status:'in progress',runs:[{id:'run_saved_initial',status:'failed',controller:{startedAt:'2026-09-25T12:00:00.000Z',phase:'stopped',active:false,stoppedReason:'Orchestrator did not return a valid bounded Worker proposal',budgets:{roleTurns:{planner:2,orchestrator:1,worker:1,reviewer:1},workerAttempts:1}},assignments:[{id:'asgn_saved_initial',roleId:'orchestrator',status:'succeeded',createdAt:'2026-09-25T12:01:00.000Z',result:JSON.stringify({workerTask:'Target file: docs/api-matrix.md. Inspect nodes/Sleeper/Sleeper.node.ts, SportDescription.ts, and LeagueDescription.ts.'})}]}]}]}],roles:[],events:[{id:'saved_initial_invalid',type:'orchestrator.proposal_invalid',entityType:'run',entityId:'run_saved_initial',at:'2026-09-25T12:02:00.000Z',data:{assignmentId:'asgn_saved_initial',reason:'Worker proposal references a path outside the allowed scope: LeagueDescription.ts'}}]};
+    const html=renderToStaticMarkup(createElement(App,{initialState:state}));
+    expect(html).toContain('>Resume saved Worker proposal</button>');
+    expect(html).toContain('Saved proposal rejection: Worker proposal references a path outside the allowed scope: LeagueDescription.ts');
+    expect(html).toContain('It will not make another Orchestrator call, approve the result, or promote it.');
+    const unrelated=structuredClone(state);unrelated.events![0]!.data.assignmentId='another-assignment';
+    expect(renderToStaticMarkup(createElement(App,{initialState:unrelated}))).not.toContain('>Resume saved Worker proposal</button>');
+  });
   it('keeps project identity and repository switching in the compact header without a duplicate workspace card',()=>{
     const state:State={projects:[{id:'prj_scope',name:'Scope project',repoPath:'/repo/scope-project',tasks:[{id:'tsk_scope',title:'Add endpoint',goal:'Add the requested endpoint.',status:'ready'}]}],roles:[]};
     const workspace={repoPath:'/repo/scope-project',head:'a'.repeat(40),dirty:false,allowedScope:['nodes/','README.md'],validationCommands:[]};
