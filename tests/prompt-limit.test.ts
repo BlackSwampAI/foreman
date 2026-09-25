@@ -149,4 +149,43 @@ describe('UHP prompt size and stopped-run recovery', () => {
     expect(rejectedRepair.reviewerRecommendation).toBeUndefined();
     expect(rejectedRepair.status).toBe('failed');
   });
+
+  it('resumes a saved valid Reviewer correction plan without another Orchestrator call', async () => {
+    let calls = 0;
+    const { controller, store, run } = await setup({ submit: async () => { calls++; throw new Error('No model call expected'); } });
+    controller.configureVerifiedWorkspace({ repoPath: '/fixture/repo', bridgeBaseUrl: 'http://127.0.0.1:1', allowedScope: ['README.md'], commands: [{ name: 'fixture', command: 'true', args: [] }] });
+    const before = (await store.load()).projects[0]!.tasks[0]!.runs[0]!;
+    const reviewEvidence = (controller as any).reviewerEvidencePackage(before);
+    const stamp = new Date().toISOString(), recommendationAt = new Date(Date.now() + 1_000).toISOString(), orchestratorAt = new Date(Date.now() + 2_000).toISOString();
+    const recommendation: any = { id: 'recommendation-saved-plan', status: 'proposed', provenance: 'uhp_response', reviewerAssignmentId: 'reviewer-saved-plan', harnessId: 'fixture', model: 'model-fixture', responseId: 'resp-reviewer', sessionId: 'session-reviewer', reviewMode: 'read_only', mutationAttempted: false, verdict: 'request_changes', rationale: 'Please make the requested edit.', createdAt: recommendationAt };
+    await store.mutate(state => {
+      const current = state.projects[0]!.tasks[0]!.runs[0]!;
+      current.allowedScope = ['README.md'];
+      current.workerProposal = { id: 'proposal-original', status: 'dispatched', text: 'Original Worker task', orchestratorAssignmentId: 'orchestrator-original', createdAt: stamp, workerAssignmentId: 'worker-fixture' };
+      current.assignments.push({ id: 'reviewer-saved-plan', roleId: 'reviewer', status: 'succeeded', requestedConfig: { harnessId: 'fixture', model: 'model-fixture' }, actualConfig: { harnessId: 'fixture', model: 'model-fixture' }, requestedModel: 'model-fixture', selectedHarnessId: 'fixture', reportedHarnessId: 'fixture', responseId: 'resp-reviewer', sessionId: 'session-reviewer', reviewerExecution: { mode: 'read_only', mutationAttempted: false, validation: reviewEvidence.controllerValidation }, prompt: 'review', submissionId: 'review-sub-saved-plan', idempotencyKey: 'review-key-saved-plan', createdAt: stamp } as any);
+      current.reviewerRecommendation = recommendation;
+      current.reviewerRecommendationHistory = [recommendation];
+      current.assignments.push({ id: 'orchestrator-saved-plan', roleId: 'orchestrator', status: 'succeeded', requestedConfig: { harnessId: 'fixture', model: 'model-fixture' }, prompt: 'bounded correction', submissionId: 'orch-sub-saved-plan', idempotencyKey: 'orch-key-saved-plan', result: JSON.stringify({ workerTask: 'Target file: README.md. Update the coverage table and keep supported/unsupported/unverified classifications.' }), createdAt: orchestratorAt } as any);
+      current.orchestratorInbox!.deliveredInAssignmentId = 'orchestrator-saved-plan';
+      current.controller = { startedAt: stamp, active: false, phase: 'stopped', stoppedReason: 'Worker proposal references a path outside the allowed scope: supported/unsupported/unverified', budgets: { roleTurns: { planner: 2, orchestrator: 1, worker: 2, reviewer: 2 }, workerAttempts: 2 } };
+      current.status = 'awaiting_approval';
+      state.events.push({ id: 'saved-plan-retry-authorized', type: 'reviewer.retry_authorized', entityType: 'run', entityId: run.id, at: stamp, data: { previousRecommendationId: recommendation.id } });
+    });
+    (controller as any).retryWorkerProposal = async () => { throw new Error('fixture stopped before Worker dispatch'); };
+
+    const resumed = await controller.resumeReviewerCorrection(run.id);
+    expect(resumed.controller).toMatchObject({ active: true, phase: 'orchestrating' });
+    for (let i = 0; i < 200; i++) {
+      const current = (await store.load()).projects[0]!.tasks[0]!.runs[0]!;
+      if (!current.controller?.active) break;
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    const saved = (await store.load()).projects[0]!.tasks[0]!.runs[0]!;
+    expect(calls).toBe(0);
+    expect(saved.workerProposal?.text).toContain('supported/unsupported/unverified');
+    expect(saved.workerProposal?.orchestratorAssignmentId).toBe('orchestrator-saved-plan');
+    expect(saved.assignments.filter(item => item.roleId === 'orchestrator')).toHaveLength(1);
+    expect(saved.reviewerRecommendation).toMatchObject({ id: recommendation.id, verdict: 'request_changes' });
+    expect(saved.controller).toMatchObject({ active: false, phase: 'stopped' });
+  });
 });
