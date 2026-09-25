@@ -99,6 +99,13 @@ export function App({initialState,initialWorkspaceSetup,initialTaskStartPreview,
   const [githubConfirm,setGithubConfirm]=useState<{action:'push'|'pr'|'review'|'merge'|'enqueue'|'refresh-local';label:string}>();
   const [githubReviewEvent,setGithubReviewEvent]=useState<'APPROVE'|'REQUEST_CHANGES'|'COMMENT'>('COMMENT');
   const [githubReviewBody,setGithubReviewBody]=useState('');
+  const [treeWidth,setTreeWidth]=useState(()=>{
+    if(typeof window==='undefined')return 220;
+    try{const saved=Number(window.localStorage.getItem('foreman.projectTreeWidth'));return Number.isFinite(saved)&&saved>=180&&saved<=360?saved:220;}catch{return 220;}
+  });
+  const [viewportWidth,setViewportWidth]=useState(()=>typeof window==='undefined'?1280:window.innerWidth);
+  const layoutRef=useRef<HTMLDivElement>(null);
+  const treeResizeDrag=useRef<{startX:number;startWidth:number}|undefined>(undefined);
   const [message, setMessage] = useState('');
   const [orchestratorPrompt, setOrchestratorPrompt] = useState('');
   const [budgets, setBudgets] = useState<RunBudgets>({roleTurns:{planner:3,orchestrator:3,worker:2,reviewer:2},workerAttempts:2});
@@ -323,6 +330,14 @@ export function App({initialState,initialWorkspaceSetup,initialTaskStartPreview,
   const roleConfig = (roleId: string, session?: Session) => run?.roleConfigs?.[roleId] ?? session?.config ?? state.roles?.find(r => r.id === roleId)?.config;
   const rolePairsReady = ['orchestrator','worker','reviewer'].every(role=>Boolean(roleConfig(role)?.harnessId&&roleConfig(role)?.model));
   const usageValue = (usage: UsageMetrics|undefined,key: keyof UsageMetrics) => usage?.measured===true&&typeof usage[key] === 'number' ? key==='runtimeMs' ? `${((usage[key] as number)/1000).toFixed(1)}s` : (usage[key] as number).toLocaleString() : 'Unavailable';
+  const usageDockSummary=(usage:UsageMetrics|undefined)=>{
+    if(usage?.measured!==true)return 'No measured usage reported';
+    const parts:string[]=[];
+    if(typeof usage.totalTokens==='number')parts.push(`${usage.totalTokens.toLocaleString()} total tokens`);
+    else for(const [key,name] of [['inputTokens','input'],['outputTokens','output'],['thinkingTokens','thinking']] as const)if(typeof usage[key]==='number')parts.push(`${(usage[key] as number).toLocaleString()} ${name}`);
+    if(typeof usage.runtimeMs==='number')parts.push(`${(usage.runtimeMs/1000).toFixed(1)}s runtime`);
+    return parts.join(' · ')||'No measured totals reported';
+  };
   const roleUsage = (roleId: string) => {const config=roleConfig(roleId,roleId==='planner'?run?.sessions?.planner:roleId==='orchestrator'?run?.sessions?.orchestrator:undefined),pair=config?.harnessId&&config.model?`${config.harnessId}/${config.model}`:'';if(run)return run.usageByRole?.[roleId];return pair?project?.usageByHarnessModel?.[pair]:undefined;};
   const workerAttemptRows = () => {
     const proposals=[...(run?.workerProposalHistory??[]),...(run?.workerProposal?[run.workerProposal]:[])];
@@ -600,6 +615,20 @@ export function App({initialState,initialWorkspaceSetup,initialTaskStartPreview,
     </div>;
     });
   });
+  useEffect(()=>{if(typeof window==='undefined')return;try{window.localStorage.setItem('foreman.projectTreeWidth',String(treeWidth));}catch{/* Local persistence is optional when storage is unavailable. */}},[treeWidth]);
+  const maximumTreeWidth=()=>{
+    if(viewportWidth<901)return 360;
+    const layout=layoutRef.current;
+    if(!layout)return Math.max(180,Math.min(360,viewportWidth-679));
+    const inspector=layout.querySelector<HTMLElement>('.inspector-visible')?.offsetWidth??300;
+    const handle=layout.querySelector<HTMLElement>('.tree-resize-handle')?.offsetWidth??12;
+    const gap=Number.parseFloat(window.getComputedStyle(layout).columnGap)||0;
+    return Math.max(180,Math.min(360,layout.clientWidth-inspector-handle-320-gap*3));
+  };
+  useEffect(()=>{
+    const trackViewport=()=>setViewportWidth(window.innerWidth);
+    trackViewport();window.addEventListener('resize',trackViewport);return()=>window.removeEventListener('resize',trackViewport);
+  },[]);
 
   return <div className="app">
     <header className="topbar">
@@ -614,7 +643,7 @@ export function App({initialState,initialWorkspaceSetup,initialTaskStartPreview,
     <main>
       {!project&&<section className="heading"><div><h1>Your workspace</h1><p>Choose a local Git repository to get started.</p></div></section>}
       {error && <div className="error"><span>Could not complete request: {error}</span><button onClick={()=>setError('')}>Dismiss</button></div>}
-      <div className="layout" data-view={view}>
+      <div className="layout" data-view={view} ref={layoutRef} style={{'--tree-width':`${Math.min(treeWidth,maximumTreeWidth())}px`} as React.CSSProperties}>
         <aside className="tree card">
           <div className="card-title"><div><span className="overline">HIERARCHY</span><h2>Project tree</h2></div></div>
           <div className="tree-content">
@@ -622,12 +651,18 @@ export function App({initialState,initialWorkspaceSetup,initialTaskStartPreview,
           {state.projects.length === 0 ? <div className="empty"><span className="empty-icon"><Icon name="repo"/></span><b>No repository open</b><p>Open a local Git repository to begin.</p><button className="primary small" onClick={openRepoDialog}>Open repository</button></div> : state.projects.map(p=><div key={p.id} className="project-node">
             <div className="tree-node-row"><button className={`node project ${project?.id===p.id?'selected':''}`} onClick={()=>{setSelectedProject(p.id);setSelectedTask('');setSelectedRun('');setView('overview')}}><span className="folder"><Icon name="folder"/></span><b>{p.name}</b><span className="node-count">{p.tasks?.length ?? 0}</span></button><details className="task-actions tree-actions"><summary aria-label={`Actions for project ${p.name}`} title={`Actions for project ${p.name}`}>⋯</summary><div className="settings-actions"><button className="outline small danger-action" type="button" onClick={()=>{setAdminActionError('');setAdminAction({kind:'delete-project',projectId:p.id});}}>Delete project</button></div></details></div>
             {project?.id===p.id && <div className="children">{p.tasks?.map(t=><div key={t.id}>
-              <div className="tree-node-row"><button className={`node task ${task?.id===t.id?'selected':''}`} onClick={()=>{setSelectedTask(t.id);setSelectedRun('');setView('overview')}}><span className="task-icon"><Icon name="task"/></span><span className="truncate task-node-label"><b>{t.title}</b><small>{label(t.id===task?.id?taskDisplayStatus:taskRunDisplayStatus(t))}</small></span><span className="node-count" aria-label={`${t.runs?.length ?? 0} runs`}>{t.runs?.length ?? 0}</span></button><details className="task-actions tree-actions"><summary aria-label={`Actions for task ${t.title}`} title={`Actions for task ${t.title}`}>⋯</summary><div className="settings-actions">{t.planApproval?.status==='approved'&&<button className="outline small" type="button" onClick={()=>{setAdminActionError('');setAdminAction({kind:'reset-plan',projectId:p.id,taskId:t.id});}}>Reset approved plan</button>}<button className="outline small danger-action" type="button" onClick={()=>{setAdminActionError('');setAdminAction({kind:'delete-task',projectId:p.id,taskId:t.id});}}>Delete task</button></div></details></div>
+              <div className="tree-node-row"><button className={`node task ${task?.id===t.id?'selected':''}`} title={t.title} onClick={()=>{setSelectedTask(t.id);setSelectedRun('');setView('overview')}}><span className="task-icon"><Icon name="task"/></span><span className="truncate task-node-label"><b>{t.title}</b><small>{label(t.id===task?.id?taskDisplayStatus:taskRunDisplayStatus(t))}</small></span><span className="node-count" aria-label={`${t.runs?.length ?? 0} runs`}>{t.runs?.length ?? 0}</span></button><details className="task-actions tree-actions"><summary aria-label={`Actions for task ${t.title}`} title={`Actions for task ${t.title}`}>⋯</summary><div className="settings-actions">{t.planApproval?.status==='approved'&&<button className="outline small" type="button" onClick={()=>{setAdminActionError('');setAdminAction({kind:'reset-plan',projectId:p.id,taskId:t.id});}}>Reset approved plan</button>}<button className="outline small danger-action" type="button" onClick={()=>{setAdminActionError('');setAdminAction({kind:'delete-task',projectId:p.id,taskId:t.id});}}>Delete task</button></div></details></div>
               {task?.id===t.id && <div className="runs">{t.runs?.map(r=><button key={r.id} className={`node run ${run?.id===r.id?'selected':''}`} onClick={()=>{setSelectedRun(r.id);setView('run')}}><span className={`status-ring ${r.status==='running'?'busy':''}`} aria-hidden="true"/><span>Run</span><span className={`pill ${r.status==='running'?'live':''}`}>{label(r.status)}</span></button>)}<button className="add-run" onClick={()=>document.querySelector('.task-work')?.scrollIntoView({behavior:'smooth',block:'center'})} disabled={!t.id} aria-label={`Review ${t.title} and start work`}>Review task · Start work below</button></div>}
             </div>)}{addingTask?<form className="add-task-form" onSubmit={submitTask}><input autoFocus aria-label="Task description" placeholder="What should Foreman change?" value={taskTitle} onChange={e=>setTaskTitle(e.target.value)} /><button className="primary small" type="submit" disabled={pending||!taskTitle.trim()}>{pending?'Adding…':'Add task'}</button><button className="outline small" type="button" onClick={()=>setAddingTask(false)}>Cancel</button></form>:<button className="add-task" onClick={addTask}>Add task</button>}</div>}
           </div>)}
           </div>
+          <section className="usage-dock" aria-label="Harness and measured usage" aria-busy={cliUsageIsLoading}>
+            <div className="usage-dock-title"><span className="overline">USAGE</span><span className={`dot ${cliUsageProjectId===project?.id&&cliUsage?.harnesses?.length?'green':'muted'}`} aria-hidden="true"/></div>
+            <div className="usage-dock-measured"><span>Project</span><b>{usageDockSummary(project?.usage)}</b><span>Selected run</span><b>{usageDockSummary(run?.usage)}</b></div>
+            {!project?<p className="usage-dock-empty" role="status">Open a repository to see usage and quotas.</p>:cliUsageIsLoading?<p className="usage-dock-empty usage-loading" role="status"><span className="usage-spinner" aria-hidden="true"/> Loading quota reports…</p>:cliUsageProjectId===project.id&&cliUsage?.harnesses?.length?cliUsageRows():<p className="usage-dock-empty" role="status">{cliUsageError?'Quota reports unavailable':cliUsageProjectId===project.id&&cliUsage?'No quota data reported':'Quota reports unavailable'}</p>}
+          </section>
         </aside>
+        <div className="tree-resize-handle" role="separator" aria-orientation="vertical" aria-label="Resize project tree" aria-valuemin={180} aria-valuemax={maximumTreeWidth()} aria-valuenow={Math.min(treeWidth,maximumTreeWidth())} tabIndex={0} onPointerDown={event=>{event.preventDefault();treeResizeDrag.current={startX:event.clientX,startWidth:Math.min(treeWidth,maximumTreeWidth())};event.currentTarget.setPointerCapture(event.pointerId);}} onPointerMove={event=>{if(event.buttons===1&&treeResizeDrag.current){const drag=treeResizeDrag.current;setTreeWidth(Math.max(180,Math.min(maximumTreeWidth(),Math.round(drag.startWidth+event.clientX-drag.startX))));}}} onPointerUp={()=>{treeResizeDrag.current=undefined;}} onPointerCancel={()=>{treeResizeDrag.current=undefined;}} onKeyDown={event=>{if(event.key==='ArrowLeft'||event.key==='ArrowRight'){event.preventDefault();const delta=event.key==='ArrowLeft'?-12:12;setTreeWidth(current=>Math.max(180,Math.min(maximumTreeWidth(),current+delta)));}else if(event.key==='Home'){event.preventDefault();setTreeWidth(180);}else if(event.key==='End'){event.preventDefault();setTreeWidth(maximumTreeWidth());}}}/>
         <section className="center">
           {view==='usage'&&<section className="card utility-view"><div className="card-title"><div><span className="overline">TRANSPARENCY</span><h2>Measured usage</h2></div><span className="shield"><Icon name="usage"/></span></div><div className="usage-scope"><b>Project · {project?.name??'Unavailable'}</b>{(['inputTokens','outputTokens','totalTokens','thinkingTokens','cachedInputTokens','runtimeMs','requestCount'] as const).map(k=><div key={`project-${k}`}><span>{({inputTokens:'Input tokens',outputTokens:'Output tokens',totalTokens:'Total tokens',thinkingTokens:'Thinking tokens',cachedInputTokens:'Cached input tokens',runtimeMs:'Runtime',requestCount:'Requests'})[k]}</span><code>{usageValue(project?.usage,k)}</code></div>)}</div><div className="usage-scope"><b>Run · {run?.id.slice(0,12)??'Unavailable'}</b>{(['inputTokens','outputTokens','totalTokens','thinkingTokens','cachedInputTokens','runtimeMs','requestCount'] as const).map(k=><div key={`run-${k}`}><span>{({inputTokens:'Input tokens',outputTokens:'Output tokens',totalTokens:'Total tokens',thinkingTokens:'Thinking tokens',cachedInputTokens:'Cached input tokens',runtimeMs:'Runtime',requestCount:'Requests'})[k]}</span><code>{usageValue(run?.usage,k)}</code></div>)}</div>{cliUsageIsLoading?<p className="usage-loading" role="status">Loading harness quota reports…</p>:cliUsageError?<p>Harness quota reports are unavailable.</p>:cliUsageRows()}<p className="usage-disclosure">Usage appears only when a harness reports measured values. No quota or cost estimate is shown.</p></section>}
           {view==='history'&&<section className="card utility-view"><div className="card-title"><div><span className="overline">SELECTED TASK / RUN</span><h2>History</h2></div><span className="count-badge">{historyEvents.length}</span></div><p className="history-context">{task?.title??'Select a task'}{run?` · Run ${run.id.slice(0,10)}`:''}</p>{historyEvents.slice().reverse().map(e=><div className="event-row" key={e.id}><span className="event-dot"/><div><b>{label(e.type)}</b><small>{e.entityType?`${label(e.entityType)} · `:''}{e.entityId??''}</small></div><time>{stamp(e.at)}</time></div>)}{!historyEvents.length&&<div className="aside-empty">No durable events are recorded for this task or run yet.</div>}</section>}
