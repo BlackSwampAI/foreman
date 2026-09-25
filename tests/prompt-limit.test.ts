@@ -86,7 +86,7 @@ describe('UHP prompt size and stopped-run recovery', () => {
     const before = (await store.load()).projects[0]!.tasks[0]!.runs[0]!;
     const reviewEvidence = (controller as any).reviewerEvidencePackage(before);
     const stamp = new Date().toISOString(), recommendationAt = new Date(Date.now() + 1_000).toISOString(), orchestratorAt = new Date(Date.now() + 2_000).toISOString();
-    const recommendation: any = { id: 'recommendation-fixture', status: 'proposed', provenance: 'uhp_response', reviewerAssignmentId: 'reviewer-fixture', harnessId: 'fixture', model: 'model-fixture', responseId: 'resp-reviewer', sessionId: 'session-reviewer', reviewMode: 'read_only', mutationAttempted: false, verdict: 'request_changes', rationale: 'Please make the requested edit.', createdAt: recommendationAt };
+    const recommendation: any = { id: 'recommendation-fixture', status: 'proposed', provenance: 'uhp_response', reviewerAssignmentId: 'reviewer-fixture', harnessId: 'fixture', model: 'model-fixture', responseId: 'resp-reviewer', sessionId: 'session-reviewer', reviewMode: 'read_only', mutationAttempted: false, verdict: 'request_changes', rationale: `Please make the requested edit. ${'Issue detail needs a concrete fix. '.repeat(70)} Final issue: downgrade every claim without captured evidence.`, createdAt: recommendationAt };
     await store.mutate(state => {
       const current = state.projects[0]!.tasks[0]!.runs[0]!;
       current.assignments.push({ id: 'reviewer-fixture', roleId: 'reviewer', status: 'succeeded', requestedConfig: { harnessId: 'fixture', model: 'model-fixture' }, actualConfig: { harnessId: 'fixture', model: 'model-fixture' }, requestedModel: 'model-fixture', selectedHarnessId: 'fixture', reportedHarnessId: 'fixture', responseId: 'resp-reviewer', sessionId: 'session-reviewer', reviewerExecution: { mode: 'read_only', mutationAttempted: false, validation: reviewEvidence.controllerValidation }, prompt: 'review', submissionId: 'review-sub', idempotencyKey: 'review-key', createdAt: stamp } as any);
@@ -131,6 +131,9 @@ describe('UHP prompt size and stopped-run recovery', () => {
     expect(calls).toBe(1);
     expect(resumedPrompts).toHaveLength(1);
     expect(Buffer.byteLength(resumedPrompts[0]!, 'utf8')).toBeLessThanOrEqual(12_000);
+    expect(Buffer.byteLength(recommendation.rationale, 'utf8')).toBeGreaterThan(2_000);
+    expect(resumedPrompts[0]).toContain('Final issue: downgrade every claim without captured evidence.');
+    expect(resumedPrompts[0]).toContain('A URL, placeholder ID, or unsupported example is not proof of an observation.');
     expect(stoppedAgain.controller).toMatchObject({ active: false, phase: 'stopped' });
     expect(stoppedAgain.reviewerRecommendation).toMatchObject({ id: recommendation.id, verdict: 'request_changes' });
 

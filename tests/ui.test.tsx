@@ -122,6 +122,20 @@ describe('project Planner UI',()=>{
     const unrelated=structuredClone(state);unrelated.events![0]!.data.assignmentId='another-assignment';
     expect(renderToStaticMarkup(createElement(App,{initialState:unrelated}))).not.toContain('>Resume saved Worker proposal</button>');
   });
+  it('shows a correction cycle choice after a second Reviewer request for changes exhausts the run budget',()=>{
+    const recommendation={id:'rec_second',status:'proposed' as const,provenance:'uhp_response' as const,reviewerAssignmentId:'reviewer_second',harnessId:'fixture',model:'model-fixture',responseId:'resp_reviewer_second',sessionId:'session_reviewer_second',reviewMode:'read_only' as const,mutationAttempted:false as const,verdict:'request_changes' as const,rationale:'The documentation still needs evidence.',createdAt:'2026-09-25T12:04:00.000Z'};
+    const run:Run={id:'run_second_review',status:'awaiting_approval',controller:{startedAt:'2026-09-25T12:00:00.000Z',phase:'awaiting_approval',active:false,budgets:{roleTurns:{planner:3,orchestrator:3,worker:2,reviewer:2},workerAttempts:2}},assignments:[{id:'orchestrator_first',roleId:'orchestrator',status:'succeeded'},{id:'worker_first',roleId:'worker',status:'succeeded'},{id:'reviewer_first',roleId:'reviewer',status:'succeeded'},{id:'orchestrator_second',roleId:'orchestrator',status:'succeeded'},{id:'worker_second',roleId:'worker',status:'succeeded'},{id:'reviewer_second',roleId:'reviewer',status:'succeeded'}],reviewerRecommendation:recommendation,reviewerRecommendationHistory:[{...recommendation,id:'rec_first',reviewerAssignmentId:'reviewer_first',createdAt:'2026-09-25T12:02:00.000Z'},recommendation],workerEvidence:{workerAssignmentId:'worker_second',responseId:'resp_worker_second',pinnedBaseCommit:'a'.repeat(40),completeSnapshot:{reportedComplete:true,reportedErrors:0,entryCount:1},scopeVerified:true,allowedScope:['docs/'],entries:[],changes:[{path:'docs/api-matrix.md',kind:'modified',summary:'NBA evidence'}],reviewDiff:'verified diff'},validation:{id:'validation_second',status:'passed',passed:true,checks:[],observations:[{name:'Fixture check',command:'true',args:[],exitCode:0,timedOut:false,output:'passed',outputTruncated:false,passed:true}]},orchestratorInbox:{id:'inbox_second',status:'received',runId:'run_second_review',sessionLocalId:'orch_session',workerAssignmentId:'worker_second',workerResponseId:'resp_worker_second',pinnedBaseCommit:'a'.repeat(40),allowedScope:['docs/'],reviewDiff:'verified diff',validation:{passed:true,observations:[]},evidenceDigest:'digest_second',receivedAt:'2026-09-25T12:03:00.000Z'}};
+    const state:State={projects:[{id:'prj_second_review',name:'Second review',tasks:[{id:'tsk_second_review',title:'Map NBA coverage',status:'active',runs:[run]}]}],roles:[]};
+    const html=renderToStaticMarkup(createElement(App,{initialState:state}));
+    expect(html).toContain('Reviewer requested more changes');
+    expect(html).toContain('Automatic correction stopped after 2 of 2 Worker attempts and 2 of 2 Reviewer turns.');
+    expect(html).toContain('>Authorize another correction cycle</button>');
+    expect(html).not.toContain('>Authorize Reviewer retry</button>');
+    expect(html).toContain('>Reject result</button>');
+    expect(html).toContain('>Approve despite requested changes</button>');
+    const decided=structuredClone(state);decided.projects[0]!.tasks[0]!.runs![0]!.approval={id:'approval_second',approved:false,decision:'rejected',createdAt:'2026-09-25T12:05:00.000Z'};
+    expect(renderToStaticMarkup(createElement(App,{initialState:decided}))).not.toContain('>Authorize another correction cycle</button>');
+  });
   it('keeps project identity and repository switching in the compact header without a duplicate workspace card',()=>{
     const state:State={projects:[{id:'prj_scope',name:'Scope project',repoPath:'/repo/scope-project',tasks:[{id:'tsk_scope',title:'Add endpoint',goal:'Add the requested endpoint.',status:'ready'}]}],roles:[]};
     const workspace={repoPath:'/repo/scope-project',head:'a'.repeat(40),dirty:false,allowedScope:['nodes/','README.md'],validationCommands:[]};
