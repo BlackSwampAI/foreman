@@ -87,6 +87,19 @@
 .danger-button { border: 1px solid #b42318; border-radius: 8px; padding: 9px 14px; color: #fff; background: #b42318; font: inherit; font-weight: 650; cursor: pointer; }
 .danger-button:disabled { opacity: .6; cursor: wait; }
 
+/* Row actions in the project tree */
+.tree-node-row { display: flex; align-items: center; gap: 3px; min-width: 0; }
+.tree-node-row > .node { width: auto; min-width: 0; flex: 1; }
+.tree-actions { position: relative; z-index: 2; flex: none; }
+.tree-actions > summary { display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid transparent; border-radius: 5px; color: #8fa7bb; font-size: 17px; line-height: 1; list-style: none; cursor: pointer; }
+.tree-actions > summary::-webkit-details-marker { display: none; }
+.tree-actions > summary:hover, .tree-actions[open] > summary { border-color: #294864; background: #0b1d2e; color: #eaf8ff; }
+.tree-actions > .settings-actions { display: flex; position: absolute; z-index: 5; right: 0; top: calc(100% + 3px); padding: 7px; min-width: 145px; }
+.tree-actions .settings-actions button { width: 100%; text-align: left; }
+.tree-node-row:has(.node.task) { gap: 2px; }
+.children .tree-node-row > .node.task { padding-right: 5px; }
+.tree-actions > summary:focus-visible { outline: 2px solid #42d4e8; outline-offset: 2px; }
+
 /* Three column workspace: the inspector has room for readable activity, while the conversation stays focused. */
 .layout{grid-template-columns:minmax(225px,260px) minmax(380px,1fr) minmax(350px,410px);gap:14px}
 .tree{max-height:calc(100vh - 74px);overflow:auto;scrollbar-color:#27425a transparent}
@@ -106,7 +119,7 @@
 .service-chip .dot{width:6px;height:6px}
 .service-chip small{color:#728ba0;font-size:7px}
 .topbar .system{margin-left:0}
-.tree{display:flex;flex-direction:column;height:calc(100vh - 77px);min-height:320px;overflow:hidden;padding-bottom:14px}
+.tree{position:sticky;top:66px;align-self:start;display:flex;flex-direction:column;height:calc(100vh - 66px);max-height:calc(100vh - 66px);min-height:0;overflow:hidden;padding-bottom:14px}
 .tree-content{flex:1;min-height:0;overflow:auto;scrollbar-color:#27425a transparent}
 .usage-dock{margin-top:auto;padding-top:12px;border-top:1px solid #20384b}
 .usage-dock-title{display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;padding:0 2px}
@@ -133,7 +146,7 @@
 .usage-dock-empty{margin:7px 2px 1px;color:#849bad;font-size:9px;line-height:1.4}
 @media(max-width:1150px){.layout{grid-template-columns:220px minmax(360px,1fr) minmax(300px,340px)}.inspector{grid-column:auto;display:flex}.tree{grid-row:auto}.service-chip small{display:none}}
 @media(max-width:900px){.layout{grid-template-columns:minmax(200px,240px) minmax(0,1fr)}.inspector-visible{grid-column:2}.center{grid-column:2}.service-strip{gap:4px}.service-chip{padding:4px 5px}}
-@media(max-width:760px){.layout{grid-template-columns:minmax(0,1fr)}.tree{height:auto;max-height:none;min-height:0;overflow:visible}.tree-content{flex:none;overflow:visible}.usage-dock{margin-top:12px}.center,.inspector-visible{grid-column:auto}.inspector-visible{grid-row:auto}.service-strip{display:none}.inspector-visible>.inspector-disclosure{padding:10px}}
+@media(max-width:760px){.layout{grid-template-columns:minmax(0,1fr)}.tree{position:static;top:auto;height:auto;max-height:none;min-height:0;overflow:visible}.tree-content{flex:none;overflow:visible}.usage-dock{margin-top:12px}.center,.inspector-visible{grid-column:auto}.inspector-visible{grid-row:auto}.service-strip{display:none}.inspector-visible>.inspector-disclosure{padding:10px}}
 
 /* Role configuration lives in a focused, scrollable workspace settings dialog. */
 .settings-button{flex:none;min-height:32px;padding:6px 11px;font-size:10px}
@@ -150,3 +163,4 @@
 /* Keep quota labels and figures readable in the narrow project tree. */
 .settings-description{margin:0;color:#a9bfd0;font-size:12px;line-height:1.5}
 .settings-dialog :focus-visible{outline:2px solid #42d4e8;outline-offset:2px}
+.usage-loading{display:flex;align-items:center;justify-content:center;gap:7px}.usage-spinner{display:inline-block;width:11px;height:11px;border:1.5px solid #42647c;border-top-color:#47c9e0;border-radius:50%;animation:usage-spin .75s linear infinite}@keyframes usage-spin{to{transform:rotate(360deg)}}
