@@ -169,7 +169,7 @@
 @media(min-width:901px){
   main{height:calc(100vh - 54px);display:flex;flex-direction:column;min-height:0;overflow:hidden;padding-top:9px;padding-bottom:8px}
   main>.heading,main>footer{flex:none}
-  .layout{height:auto;flex:1;min-height:0;align-items:stretch;grid-template-columns:minmax(180px,22vw) minmax(0,1fr) minmax(280px,31vw);overflow:hidden}
+  .layout{height:auto;flex:1;min-height:0;align-items:stretch;grid-template-columns:clamp(190px,15.6vw,225px) minmax(0,1fr) clamp(265px,20.8vw,300px);overflow:hidden}
   .tree{position:sticky;top:0;height:100%;max-height:none;min-height:0}
   .center{height:100%;min-height:0;overflow:auto;overscroll-behavior:contain;padding:0 3px 14px;scrollbar-color:#27425a transparent}
   .inspector-visible{position:sticky;top:0;height:100%;max-height:100%;min-height:0;display:grid;grid-template-rows:minmax(150px,.78fr) minmax(300px,1.22fr);gap:10px;overflow:hidden}
@@ -178,13 +178,13 @@
   .github-card{border-color:#245066;background:linear-gradient(150deg,#0c2030,#091725)}
   .mobile-inspector-tabs{display:none}
   .layout[data-view="usage"] .center>:not(.utility-view),.layout[data-view="history"] .center>:not(.utility-view){display:none}
-  .utility-view{display:block;max-width:100%}
+  .utility-view{display:block;max-width:100%;min-width:0}
 }
 .workspace-nav{display:flex;align-items:center;gap:3px;margin-left:auto;padding:3px;border:1px solid #1b3449;border-radius:7px;background:#091725}
 .workspace-nav button,.mobile-inspector-tabs button{border:0;border-radius:5px;padding:6px 9px;background:transparent;color:#94aabd;font:inherit;font-size:9px;white-space:nowrap}
 .workspace-nav button:hover,.workspace-nav button.active,.mobile-inspector-tabs button[aria-selected="true"]{background:#123247;color:#d8f6ff}
-.github-facts{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px;margin:0 0 9px}
-.github-facts>div{display:flex;flex-direction:column;gap:3px;min-width:0;padding:6px 7px;border:1px solid #19354a;border-radius:5px;background:#081725}
+.github-facts{display:grid;grid-template-columns:minmax(0,1fr);gap:5px;margin:0 0 9px}
+.github-facts>div{display:grid;grid-template-columns:minmax(90px,.42fr) minmax(0,1fr);align-items:center;gap:8px;min-width:0;padding:6px 7px;border:1px solid #19354a;border-radius:5px;background:#081725}
 .github-facts span,.github-muted{color:#8199ac;font-size:8px}
 .github-facts b,.github-facts code{color:#c8dae7;font-size:8px;overflow-wrap:anywhere}
 .github-notice{margin:7px 0;padding:8px;border:1px solid #725c37;border-radius:5px;background:#211f1a;color:#dec98c;font-size:8px;line-height:1.45}
@@ -201,6 +201,7 @@
 .github-human-controls label{display:flex;align-items:center;justify-content:space-between;gap:8px;color:#a7bdcd;font-size:8px}.github-human-controls select,.github-human-controls textarea{width:100%;margin:5px 0;padding:7px;border:1px solid #27445b;border-radius:5px;background:#071522;color:#dbe7f6;font:inherit;font-size:9px}.github-human-controls textarea{min-height:54px;resize:vertical}.github-human-controls button{margin:3px 5px 3px 0}
 .github-merged{margin:9px 0;padding:9px;border:1px solid #23624f;border-radius:6px;background:#0c2723}.github-merged b{color:#a8e7d0;font-size:9px}.github-merged p,.github-merged small{display:block;margin:5px 0;color:#9fc8b8;font-size:8px;line-height:1.45}
 .history-context{color:#94aabd;font-size:10px}
+.github-actions button,.github-human-controls button{display:block;width:100%;margin:5px 0}
 @media(max-width:900px){
   main{height:auto;min-height:calc(100vh - 54px);overflow:visible}
   .workspace-nav{margin-left:auto}
@@ -230,7 +231,11 @@
   .inspector-visible>.inspector-card{display:none;max-height:56vh;min-height:260px}
   .inspector-visible>.inspector-card.mobile-active{display:flex;flex-direction:column}
   .inspector-scroll,.github-scroll{max-height:calc(56vh - 58px)}
-  .github-facts{grid-template-columns:1fr 1fr}
+  .github-facts{grid-template-columns:minmax(0,1fr)}
   .layout[data-view="usage"] .center>:not(.utility-view),.layout[data-view="history"] .center>:not(.utility-view){display:none}
   .utility-view{display:block}
 }
+.utility-view{padding:12px;border:1px solid #1b344b;border-radius:9px;background:linear-gradient(180deg,#0c1b2b,#0a1928);box-shadow:0 8px 30px #020a1270}
+.utility-view>.card-title{margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid #1a344b}
+.utility-view .usage-scope{margin:9px 0;padding:9px 11px;border:1px solid #193248;border-radius:6px;background:#091a29}
+.utility-view .history-context{margin:3px 0 10px;padding:8px 10px;border:1px solid #193248;border-radius:6px;background:#091a29}
