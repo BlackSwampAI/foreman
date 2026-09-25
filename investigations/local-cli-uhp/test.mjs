@@ -38,7 +38,7 @@ async function setup(t, options = {}) {
   await mkdir(join(dir,'claude-auth'));
   if (!options.claudeAuthRoleDirsAbsent) for (const name of ['projects','session-env','file-history','todos','plans','tasks']) await mkdir(join(dir,'claude-auth',name));
   await mkdir(join(dir,'codex-auth')); await writeFile(join(dir,'codex-auth','auth.json'),'{"fixture":true}',{mode:0o600});
-  const env = { ...process.env, ANTHROPIC_API_KEY:'fixture-only-do-not-forward', OPENAI_API_KEY:'fixture-only-do-not-forward', AWS_ACCESS_KEY_ID:'fixture-only-do-not-forward', GOOGLE_API_KEY:'fixture-only-do-not-forward', CLAUDE_CODE_USE_BEDROCK:'1', CLAUDE_CODE_USE_VERTEX:'1', CLAUDE_CODE_USE_FOUNDRY:'1', CODEX_API_KEY:'fixture-only-do-not-forward', ...(options.claudeNetworkRequirements ? {HTTP_PROXY:'http://fixture-proxy.invalid:8080'} : {}), ...(Number.isFinite(options.keepaliveMs) ? {LOCAL_CLI_UHP_KEEPALIVE_MS:String(options.keepaliveMs)} : {}), ...(options.agyWorkerEffort ? {AGY_WORKER_EFFORT:options.agyWorkerEffort} : {}), LOCAL_CLI_UHP_PORT: String(port), LOCAL_CLI_UHP_STATE: join(dir, 'state.json'), LOCAL_CLI_UHP_WORK: join(dir, 'work'), FOREMAN_CLAUDE_USAGE_CACHE: join(dir,'claude-usage-cache.json'), CLAUDE_CONFIG_DIR: join(dir, 'claude-auth'), CODEX_HOME: join(dir, 'codex-auth'), CLAUDE_MODEL: options.noClaudeModel ? '' : 'claude-requested', CODEX_MODEL: 'codex-requested', CLAUDE_BIN: options.claudeBin ?? (options.spawnError ? join(dir,'missing-cli') : claude), CODEX_BIN: codex, AGY_BIN:join(dir,'missing-agy'), ...(options.agyEnabled ? { AGY_CONFIG_DIR: join(dir,'agy-auth'), ...(options.noAgyModel ? {} : {AGY_MODEL:options.agyModel ?? 'gemini-3.8-flash-medium'}), AGY_BIN:agy } : {}), ...agyDiscoveryEnv, LOCAL_CLI_UHP_SOURCE_REPO: options.sourceRepo ?? fixture.repo, LOCAL_CLI_UHP_BWRAP: options.bwrapBin ?? 'bwrap' };
+  const env = { ...process.env, ANTHROPIC_API_KEY:'fixture-only-do-not-forward', OPENAI_API_KEY:'fixture-only-do-not-forward', AWS_ACCESS_KEY_ID:'fixture-only-do-not-forward', GOOGLE_API_KEY:'fixture-only-do-not-forward', CLAUDE_CODE_USE_BEDROCK:'1', CLAUDE_CODE_USE_VERTEX:'1', CLAUDE_CODE_USE_FOUNDRY:'1', CODEX_API_KEY:'fixture-only-do-not-forward', ...(options.claudeNetworkRequirements ? {HTTP_PROXY:'http://fixture-proxy.invalid:8080'} : {}), ...(Number.isFinite(options.keepaliveMs) ? {LOCAL_CLI_UHP_KEEPALIVE_MS:String(options.keepaliveMs)} : {}), ...(options.agyWorkerEffort ? {AGY_WORKER_EFFORT:options.agyWorkerEffort} : {}), LOCAL_CLI_UHP_PORT: String(port), LOCAL_CLI_UHP_STATE: join(dir, 'state.json'), LOCAL_CLI_UHP_WORK: join(dir, 'work'), FOREMAN_CLAUDE_USAGE_CACHE: join(dir,'claude-usage-cache.json'), CLAUDE_CONFIG_DIR: join(dir, 'claude-auth'), CODEX_HOME: join(dir, 'codex-auth'), CLAUDE_MODEL: options.noClaudeModel ? '' : options.claudeModel ?? 'claude-requested', CODEX_MODEL: 'codex-requested', CLAUDE_BIN: options.claudeBin ?? (options.spawnError ? join(dir,'missing-cli') : claude), CODEX_BIN: codex, AGY_BIN:join(dir,'missing-agy'), ...(options.agyEnabled ? { AGY_CONFIG_DIR: join(dir,'agy-auth'), ...(options.noAgyModel ? {} : {AGY_MODEL:options.agyModel ?? 'gemini-3.8-flash-medium'}), AGY_BIN:agy } : {}), ...agyDiscoveryEnv, LOCAL_CLI_UHP_SOURCE_REPO: options.sourceRepo ?? fixture.repo, LOCAL_CLI_UHP_BWRAP: options.bwrapBin ?? 'bwrap' };
   if (options.noAgyModel) delete env.AGY_MODEL;
   if (!options.agyWorkerEffort) delete env.AGY_WORKER_EFFORT;
   if (options.agyEnabled) Object.assign(env,{AGY_CONFIG_DIR:join(dir,'agy-auth'),...(options.noAgyModel?{}:{AGY_MODEL:options.agyModel ?? 'gemini-3.8-flash-medium'}),AGY_BIN:agy});
@@ -72,6 +72,16 @@ test('discovery advertises configured CLIs and Claude submit/replay retains idem
   const afterRestart=await submit(base,'claude-code','claude-requested','same-key',baseCommit,workspaceId); assert.equal(terminalEvent(afterRestart).response.id,r.id);
   assert.equal((await readFile(countFor(workspaceId),'utf8')).trim(),'c:provider-env-absent:model=claude-requested');
   const retrieved=await (await fetch(`${base}/v1/responses/${r.id}`,{headers:{'UHP-Version':'2026-09-12'}})).json(); assert.equal(retrieved.id,r.id);
+});
+test('Claude discovery offers Opus and Sonnet and dispatches the selected model', async t => {
+  const {base,baseCommit,countFor}=await setup(t,{claudeModel:'opus'});
+  const models=await (await fetch(`${base}/v1/harnesses/claude-code/models`)).json();
+  assert.deepEqual(models.models.map(model=>model.id),['opus','sonnet']);
+  const events=await submit(base,'claude-code','sonnet','claude-sonnet-selection',baseCommit);
+  const response=terminalEvent(events).response;
+  assert.equal(response.status,'completed');
+  assert.equal(response.requested_model,'sonnet');
+  assert.equal((await readFile(countFor(response.metadata.workspace_id),'utf8')).trim(),'c:provider-env-absent:model=sonnet');
 });
 test('discovery omits configured provider auth when its CLI executable is missing', async t => {
   const dir=await mkdtemp(join(tmpdir(),'local-cli-missing-binary-')); dirs.push(dir);

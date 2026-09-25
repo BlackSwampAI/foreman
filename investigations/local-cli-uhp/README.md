@@ -12,6 +12,9 @@ uses its configured auth directory mounted read-only. For Codex Worker tasks,
 the bridge creates a writable ephemeral `CODEX_HOME` for each response and
 mounts the host `auth.json` into it read-only; it does not copy credentials.
 Harness discovery advertises only configured directories.
+Claude Code advertises `opus` and `sonnet` when its configured default is one
+of those aliases; the Foreman local bridge defaults to `opus`. The selected
+alias is passed explicitly to Claude Code for each response.
 
 Antigravity CLI (`agy`) uses the existing host sign-in under
 `AGY_CONFIG_DIR` (default: `~/.gemini/antigravity-cli`) mounted read-only.

@@ -96,7 +96,7 @@ export class LocalBridge {
     env.LOCAL_CLI_UHP_WORK = workPath;
     env.LOCAL_CLI_UHP_SOURCE_REPO = repo;
     env.CLAUDE_CONFIG_DIR = join(this.options.homeDir, '.claude');
-    env.CLAUDE_MODEL = 'sonnet';
+    env.CLAUDE_MODEL = 'opus';
     env.CODEX_HOME = join(this.options.homeDir, '.codex');
     env.CODEX_MODEL = 'gpt-6-sol';
     env.AGY_CONFIG_DIR = join(this.options.homeDir, '.gemini', 'antigravity-cli');
