@@ -43,7 +43,7 @@ async function seedAwaitingCorrection(controller:Controller,store:JsonStore,runI
     run.assignments.push(reviewer);const recommendation={id:'correction-recommendation',status:'proposed',provenance:'uhp_response',reviewerAssignmentId:reviewer.id,harnessId:'fixture',model:'model-fixture',responseId:reviewer.responseId,sessionId:reviewer.sessionId,reviewMode:'read_only',mutationAttempted:false,verdict:'request_changes',rationale:'Address one documented issue.',createdAt:stamp};run.reviewerRecommendation=recommendation as any;run.reviewerRecommendationHistory=[structuredClone(recommendation)] as any;run.status='awaiting_approval';
   });
 }
-afterEach(async()=>{workspaceMocks.verify.mockReset();workspaceMocks.validate.mockReset();workspaceMocks.useVerify=false;workspaceMocks.useValidate=false;await Promise.all([...fixtures.splice(0).map(f=>f.close()),...bridgeServers.splice(0).map(s=>new Promise<void>(resolve=>s.close(()=>resolve()))),...dirs.splice(0).map(d=>rm(d,{recursive:true,force:true}))]);});
+afterEach(async()=>{workspaceMocks.verify.mockReset();workspaceMocks.validate.mockReset();workspaceMocks.useVerify=false;workspaceMocks.useValidate=false;await Promise.all([...fixtures.splice(0).map(f=>f.close()),...bridgeServers.splice(0).map(s=>new Promise<void>(resolve=>s.close(()=>resolve()))),...dirs.splice(0).map(d=>rm(d,{recursive:true,force:true,maxRetries:5,retryDelay:50}))]);});
 
 describe('controller persistence and state transitions',()=>{
   it('keeps a repository-scoped controller within its project',async()=>{
@@ -594,6 +594,7 @@ describe('validation correction',()=>{
     const resumed=await controller.requestValidationCorrection(run.id);
     expect(resumed.controller?.active).toBe(true);expect(resumed.controller?.phase).toBe('orchestrating');
     const completed=await waitForController(store,run.id);
+    await store.flush();
     expect(turns).toContain('orchestrator');expect(turns).toContain('worker');expect(turns).toContain('reviewer');
     expect(completed.controller).toMatchObject({active:false,phase:'awaiting_approval'});
     expect(completed.reviewerRecommendation?.verdict).toBe('recommend');
@@ -640,6 +641,7 @@ describe('validation correction',()=>{
     (controller as any).verifyWorkerOutput=async(runId:string,workerId:string)=>{await store.mutate(s=>{const r=s.projects[0]!.tasks[0]!.runs.find(x=>x.id===runId)!,w=r.assignments.find(a=>a.id===workerId)!;const base='e'.repeat(40);r.workerEvidence={provenance:'bridge_snapshot',workerAssignmentId:w.id,responseId:w.responseId??'excerpt-verify-resp',pinnedBaseCommit:base,completeSnapshot:{reportedComplete:true,reportedErrors:0,entryCount:1},scopeVerified:true,allowedScope:['README.md'],entries:[],changes:[{path:'README.md',kind:'modify'}],reviewDiff:'diff',acceptance:'not_decided'};r.validation={id:'excerpt-val',status:'passed',passed:true,reportedPassed:true,checks:[],observations:[{name:'fixture validation',command:'pnpm',args:['test'],exitCode:0,timedOut:false,output:'passed',outputTruncated:false,passed:true}],policy:{requireAllChecksPass:true,configuredCheckCount:1},gitEvidence:{status:'verified',commit:base,changedPaths:[],submittedAt:new Date().toISOString()},createdAt:new Date().toISOString()} as any;r.sessions.orchestrator.uhpSessionId=r.assignments.filter(a=>a.roleId==='orchestrator').at(-1)?.sessionId;r.orchestratorInbox=(controllerRef as any).buildOrchestratorInbox(runId,r);});return {};};
     await controller.requestValidationCorrection(run.id);
     await waitForController(store,run.id);
+    await store.flush();
     const orchPrompt=orchestratorPrompts.find(p=>p.includes('Foreman validation failed'));
     expect(orchPrompt).toBeDefined();
     expect(orchPrompt).toContain('AssertionError: expected false to be true');
