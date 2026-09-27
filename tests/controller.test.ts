@@ -51,7 +51,7 @@ describe('controller persistence and state transitions',()=>{
     const first=await controller.createProject('First') as {id:string};
     const second=await controller.createProject('Second') as {id:string};
     const secondTask=await controller.createTask(second.id,'Second task') as {id:string};
-    const scoped=new Controller(store,uhp,false,false,undefined,undefined,120,first.id);
+    const scoped=new Controller(store,uhp,false,false,undefined,undefined,120,600,300,first.id);
     await expect(scoped.createTask(second.id,'Wrong project')).rejects.toThrow('Project not found');
     await expect(scoped.createRun(secondTask.id)).rejects.toThrow('Task not found');
     await expect(scoped.selectRoleConfig('worker',{harnessId:'fixture',model:'model-fixture'},second.id)).rejects.toThrow('Project not found');
@@ -66,6 +66,37 @@ describe('controller persistence and state transitions',()=>{
   });
   it('removes saved repository ownership so the same checkout can be reopened',async()=>{
     const {controller,dir,store}=await setup();const project:any=await controller.createProject('Repository project'),dataDir=join(dir,'repository-data'),setupDir=join(dataDir,'workspaces'),setupPath=join(setupDir,`${project.id}.json`);await mkdir(setupDir,{recursive:true});await writeFile(setupPath,'{}');await controller.deleteProject(project.id);await deleteWorkspaceSetup(dataDir,project.id);await expect(readFile(setupPath,'utf8')).rejects.toMatchObject({code:'ENOENT'});expect(await findSavedProjectForRepository(dataDir,(await store.load()).projects,'/tmp/repository')).toBeUndefined();
+  });
+  it('deleteProject removes only events belonging to the deleted project and keeps others',async()=>{
+    const {controller,store}=await setup();
+    const projectA:any=await controller.createProject('Project A');
+    const taskA:any=await controller.createTask(projectA.id,'Task A');
+    const runA:any=await controller.createRun(taskA.id);
+    const projectB:any=await controller.createProject('Project B');
+    const taskB:any=await controller.createTask(projectB.id,'Task B');
+    // Inject legacy events: one with data.projectId, one with data.taskId, one with data.runId.
+    await store.mutate(s=>{
+      s.events.push({id:'evt_legacy_proj',type:'legacy.project_event',entityType:'run',entityId:runA.id,at:new Date().toISOString(),data:{projectId:projectA.id,extra:'x'}});
+      s.events.push({id:'evt_legacy_task',type:'legacy.task_event',entityType:'other',entityId:'other_entity',at:new Date().toISOString(),data:{taskId:taskA.id}});
+      s.events.push({id:'evt_legacy_run',type:'legacy.run_event',entityType:'other',entityId:'other_entity2',at:new Date().toISOString(),data:{runId:runA.id}});
+      s.events.push({id:'evt_service',type:'uhp.discovery_updated',entityType:'service',entityId:'uhp',at:new Date().toISOString(),data:{version:'1'}});
+      s.events.push({id:'evt_proj_b',type:'task.created',entityType:'task',entityId:taskB.id,at:new Date().toISOString(),data:{projectId:projectB.id,title:'Task B'}});
+    });
+    const beforeCount=(await store.load()).events.length;
+    expect(beforeCount).toBeGreaterThan(5);
+    await controller.deleteProject(projectA.id);
+    const after=await store.load();
+    // Project A's events are gone (created+task.created+run.created+legacy events).
+    const remainingIds=new Set(after.events.map(e=>e.id));
+    expect(remainingIds.has('evt_legacy_proj')).toBe(false);
+    expect(remainingIds.has('evt_legacy_task')).toBe(false);
+    expect(remainingIds.has('evt_legacy_run')).toBe(false);
+    // Service events kept.
+    expect(remainingIds.has('evt_service')).toBe(true);
+    // Project B events kept.
+    expect(remainingIds.has('evt_proj_b')).toBe(true);
+    // project.deleted event is added.
+    expect(after.events.some(e=>e.type==='project.deleted'&&e.entityId===projectA.id)).toBe(true);
   });
   it('blocks deleting active work and tasks still referenced by another task',async()=>{
     const {controller,store}=await setup();const project:any=await controller.createProject('Delete guards'),base:any=await controller.createTask(project.id,'Base task'),dependent:any=await controller.createTask(project.id,{title:'Dependent',goal:'Work',suggestedAllowedPaths:[],validationCriteria:[],dependsOn:[base.id]});
@@ -96,7 +127,7 @@ describe('controller persistence and state transitions',()=>{
     await controller.selectRoleConfig('planner',{harnessId:'codex-cli',model:'gpt-6-sol'});await controller.refreshDiscovery();state=await store.load();
     expect(state.roles.find(r=>r.id==='planner')?.config).toEqual({harnessId:'codex-cli',model:'gpt-6-sol'});
   });
-  it('defaults Claude to Opus and migrates the former Sonnet-only defaults without rewriting runs',async()=>{
+  it('does not overwrite an already-configured global role choice when discovery adds a new model',async()=>{
     const dir=await mkdtemp(join(tmpdir(),'foreman-'));dirs.push(dir);const store=new JsonStore(join(dir,'state.json'));
     const models=[{id:'sonnet',available:true}];
     const controller=new Controller(store,{discover:async()=>({version:'fixture',capabilities:{},harnesses:[{id:'claude-code',models}]}),submit:async()=>({externalId:'unused'}),cancel:async()=>({status:'cancelled'})},false,true);
@@ -104,9 +135,12 @@ describe('controller persistence and state transitions',()=>{
     expect((await store.load()).roles.find(r=>r.id==='reviewer')?.config.model).toBe('sonnet');
     models.unshift({id:'opus',available:true});await controller.refreshDiscovery();let state=await store.load();
     expect(state.roles.find(r=>r.id==='reviewer')?.availableConfigs.filter(c=>c.harnessId==='claude-code').map(c=>c.model)).toEqual(['opus','sonnet']);
-    expect(state.roles.find(r=>r.id==='reviewer')?.config.model).toBe('opus');
-    expect(state.projects[0]?.defaultRoleConfigs.reviewer?.model).toBe('opus');
-    expect(state.projects[0]?.tasks[0]?.runs.find(r=>r.id===run.id)?.roleConfigs.reviewer?.model).toBe('sonnet');
+    // discovery must NOT overwrite a user choice that is still valid
+    expect(state.roles.find(r=>r.id==='reviewer')?.config.model).toBe('sonnet');
+    // createProject starts with empty overrides; no project-level entry was set
+    expect(state.projects[0]?.defaultRoleConfigs.reviewer).toBeUndefined();
+    // createRun starts with empty roleConfigs (only explicit overrides)
+    expect(state.projects[0]?.tasks[0]?.runs.find(r=>r.id===run.id)?.roleConfigs.reviewer).toBeUndefined();
     await controller.selectRoleConfig('reviewer',{harnessId:'claude-code',model:'sonnet'},project.id);await controller.refreshDiscovery();state=await store.load();
     expect(state.projects[0]?.defaultRoleConfigs.reviewer?.model).toBe('sonnet');
   });
@@ -158,7 +192,7 @@ describe('controller persistence and state transitions',()=>{
     await store.mutate(s=>{const current=s.projects[0]!.tasks[0]!.runs[0]!;current.pinnedBaseCommit=base;current.workspaceId='initial-followup-workspace';});await controller.addGuidance(run.id,'Make the requested bounded README change.');
     (controller as any).verifyWorkerOutput=async(runId:string,workerId:string)=>{let result:any;await store.mutate(s=>{const current=s.projects[0]!.tasks[0]!.runs.find(r=>r.id===runId)!,worker=current.assignments.find(a=>a.id===workerId)!;const attempt=workerCount;const evidence={provenance:'bridge_snapshot',workerAssignmentId:worker.id,responseId:worker.responseId,usage:structuredClone(worker.usage),pinnedBaseCommit:current.pinnedBaseCommit,completeSnapshot:{reportedComplete:true,reportedErrors:0,entryCount:1},scopeVerified:true,allowedScope:['README.md'],entries:[],changes:attempt===1?[]:[{path:'README.md',kind:'modified',summary:'Applied the Orchestrator follow-up'}],reviewDiff:attempt===1?'': 'diff --git a/README.md b/README.md\n+follow-up edit',acceptance:'not_decided'};const passed=attempt>1;const validation={id:`followup-validation-${attempt}`,status:passed?'passed':'failed',passed,reportedPassed:passed,checks:[{name:'fixture validation',passed,details:passed?'second attempt passed':'first attempt failed'}],observations:[{name:'fixture validation',command:'true',args:[],exitCode:passed?0:1,timedOut:false,output:passed?'passed':'failed',outputTruncated:false,passed}],policy:{requireAllChecksPass:true,configuredCheckCount:1},gitEvidence:{status:'verified',commit:current.pinnedBaseCommit,changedPaths:evidence.changes.map(c=>c.path),submittedAt:new Date().toISOString()},createdAt:new Date().toISOString()};current.workerEvidence=evidence as any;current.validation=validation as any;current.sessions.orchestrator.uhpSessionId=current.assignments.filter(a=>a.roleId==='orchestrator').at(-1)?.sessionId;current.orchestratorInbox=(controller as any).buildOrchestratorInbox(runId,current);result={workerEvidence:current.workerEvidence,validation:current.validation};});return result;};
     const started=await controller.startWork(run.id,{budgets:{roleTurns:{planner:1,orchestrator:2,worker:2,reviewer:1},workerAttempts:2}});const completed=await waitForController(store,run.id);
-    expect(started.controller?.active).toBe(true);expect(turns).toEqual(['planner','orchestrator','worker','orchestrator','worker','reviewer']);expect(seededBases).toEqual([base]);expect(completed.controller).toMatchObject({active:false,phase:'awaiting_approval'});expect(completed.approval).toBeUndefined();expect(completed.promotion).toBeUndefined();expect(completed.assignments.filter(a=>a.roleId==='worker')).toHaveLength(2);expect(completed.assignments.filter(a=>a.roleId==='orchestrator')).toHaveLength(2);expect(completed.workerEvidenceHistory).toHaveLength(1);expect(completed.workerEvidenceHistory?.[0]).toMatchObject({workerAssignmentId:completed.assignments.find(a=>a.roleId==='worker')?.id,pinnedBaseCommit:base,changes:[],reviewDiff:'',usage:{inputTokens:30,outputTokens:2}});expect(completed.validationHistory).toHaveLength(1);expect(completed.validationHistory?.[0]).toMatchObject({id:'followup-validation-1',status:'failed',passed:false});expect(completed.workerProposalHistory).toHaveLength(1);expect(completed.workerProposalHistory?.[0]).toMatchObject({text:'Make a bounded change to README.md.',workspaceId:'initial-followup-workspace',pinnedBaseCommit:base});expect(completed.workerProposal).toMatchObject({status:'dispatched',text:'Apply one correction in README.md.',workspaceId:'followup-workspace-1',pinnedBaseCommit:base,workerAssignmentHistoryIds:[completed.assignments.find(a=>a.roleId==='worker')?.id,completed.assignments.filter(a=>a.roleId==='worker')[1]?.id]});expect(completed.workerEvidence).toMatchObject({changes:[{path:'README.md'}],reviewDiff:'diff --git a/README.md b/README.md\n+follow-up edit'});expect(completed.validation).toMatchObject({id:'followup-validation-2',status:'passed',passed:true});expect(reviewerEvidence).toMatchObject({reviewDiff:completed.workerEvidence?.reviewDiff,baseCommit:base,orchestratorInboxId:completed.orchestratorInbox?.id,orchestratorEvidenceDigest:completed.orchestratorInbox?.evidenceDigest});
+    expect(started.controller?.active).toBe(true);expect(turns).toEqual(['planner','orchestrator','worker','orchestrator','worker','reviewer']);expect(seededBases).toEqual([base,base]);expect(completed.controller).toMatchObject({active:false,phase:'awaiting_approval'});expect(completed.approval).toBeUndefined();expect(completed.promotion).toBeUndefined();expect(completed.assignments.filter(a=>a.roleId==='worker')).toHaveLength(2);expect(completed.assignments.filter(a=>a.roleId==='orchestrator')).toHaveLength(2);expect(completed.workerEvidenceHistory).toHaveLength(1);expect(completed.workerEvidenceHistory?.[0]).toMatchObject({workerAssignmentId:completed.assignments.find(a=>a.roleId==='worker')?.id,pinnedBaseCommit:base,changes:[],reviewDiff:'',usage:{inputTokens:30,outputTokens:2}});expect(completed.validationHistory).toHaveLength(1);expect(completed.validationHistory?.[0]).toMatchObject({id:'followup-validation-1',status:'failed',passed:false});expect(completed.workerProposalHistory).toHaveLength(1);expect(completed.workerProposalHistory?.[0]).toMatchObject({text:'Make a bounded change to README.md.',workspaceId:'initial-followup-workspace',pinnedBaseCommit:base});expect(completed.workerProposal).toMatchObject({status:'dispatched',text:'Apply one correction in README.md.',workspaceId:'followup-workspace-2',pinnedBaseCommit:base,workerAssignmentHistoryIds:[completed.assignments.find(a=>a.roleId==='worker')?.id,completed.assignments.filter(a=>a.roleId==='worker')[1]?.id]});expect(completed.workerEvidence).toMatchObject({changes:[{path:'README.md'}],reviewDiff:'diff --git a/README.md b/README.md\n+follow-up edit'});expect(completed.validation).toMatchObject({id:'followup-validation-2',status:'passed',passed:true});expect(reviewerEvidence).toMatchObject({reviewDiff:completed.workerEvidence?.reviewDiff,baseCommit:base,orchestratorInboxId:completed.orchestratorInbox?.id,orchestratorEvidenceDigest:completed.orchestratorInbox?.evidenceDigest});
     await expect(controller.startWork(run.id)).rejects.toThrow('already been started');expect(turns.filter(role=>role==='worker')).toHaveLength(2);
   });
   it('automatically revises a rejected Reviewer result and obtains a fresh review',async()=>{
@@ -172,58 +206,59 @@ describe('controller persistence and state transitions',()=>{
     (controller as any).verifyWorkerOutput=async(runId:string,workerId:string)=>{let result:any;await store.mutate(s=>{const current=s.projects[0]!.tasks[0]!.runs.find(r=>r.id===runId)!,worker=current.assignments.find(a=>a.id===workerId)!;completeAutomaticEvidence(current,worker);current.workerEvidence!.reviewDiff=`diff --git a/README.md b/README.md\n+reviewer attempt ${current.assignments.filter(a=>a.roleId==='worker').length}`;current.sessions.orchestrator.uhpSessionId=current.assignments.filter(a=>a.roleId==='orchestrator').at(-1)?.sessionId;current.orchestratorInbox=(controller as any).buildOrchestratorInbox(runId,current);result={workerEvidence:current.workerEvidence,validation:current.validation};});return result;};
     await controller.startWork(run.id,{budgets:{roleTurns:{planner:1,orchestrator:2,worker:2,reviewer:2},workerAttempts:2}});const completed=await waitForController(store,run.id);
     expect(completed.controller?.stoppedReason,JSON.stringify((await store.load()).events.filter(e=>e.type==='controller.stopped').map(e=>e.data))).toBeUndefined();
-    expect(turns).toEqual(['planner','orchestrator','worker','reviewer','orchestrator','worker','reviewer']);expect(seededBases).toEqual([base]);
+    expect(turns).toEqual(['planner','orchestrator','worker','reviewer','orchestrator','worker','reviewer']);expect(seededBases).toEqual([base,base]);
     expect(completed.controller).toMatchObject({active:false,phase:'awaiting_approval'});expect(completed.reviewerRecommendationHistory?.map(r=>r.verdict)).toEqual(['reject','recommend']);expect(completed.reviewerRecommendation?.verdict).toBe('recommend');
     expect(completed.workerEvidenceHistory).toHaveLength(1);expect(completed.validationHistory).toHaveLength(1);expect(completed.orchestratorInboxHistory).toHaveLength(1);expect(completed.workerProposalHistory).toHaveLength(1);
-    expect(completed.workerEvidence?.workerAssignmentId).toBe(completed.assignments.filter(a=>a.roleId==='worker')[1]?.id);expect(completed.workerProposal?.workspaceId).toBe('reviewer-retry-workspace-1');expect(completed.approval).toBeUndefined();
+    expect(completed.workerEvidence?.workerAssignmentId).toBe(completed.assignments.filter(a=>a.roleId==='worker')[1]?.id);expect(completed.workerProposal?.workspaceId).toBe('reviewer-retry-workspace-2');expect(completed.approval).toBeUndefined();
   });
   it('enforces run budgets on manual turns and stops failed or out-of-scope Worker results without retry',async()=>{
     for(const failure of ['transport','out-of-scope'] as const){const turns:string[]=[];const {controller,store}=await setup({submit:async input=>{turns.push(input.roleId);const output=input.roleId==='planner'?'Planner response':input.roleId==='orchestrator'?JSON.stringify({workerTask:'Make one bounded README.md note.'}):'Worker response';return {externalId:`${failure}-${input.roleId}-${turns.length}`,responseId:`${failure}-response-${input.roleId}-${turns.length}`,sessionId:`${failure}-session-${input.roleId}`,status:input.roleId==='worker'&&failure==='transport'?'failed':'completed',outputText:output,actualModel:'model-fixture',requestedModel:'model-fixture',selectedHarnessId:'fixture'};}});const run=await prepareAutomaticRun(controller,store);if(failure==='out-of-scope')(controller as any).verifyWorkerOutputUnchecked=async()=>{throw new Error('Worker result contains out-of-scope path private.txt');};const started=await controller.startWork(run.id,{budgets:{roleTurns:{planner:1,orchestrator:1,worker:1,reviewer:1},workerAttempts:1}});await expect(controller.assign(run.id,'planner','A manual extra Planner turn')).rejects.toThrow('controlled by the active run');const stopped=await waitForController(store,run.id);await expect(controller.assign(run.id,'planner','A manual extra Planner turn')).rejects.toThrow('planner role-turn budget exhausted');expect(started.controller?.active).toBe(true);expect(stopped.controller).toMatchObject({active:false,phase:'stopped'});expect(stopped.controller?.stoppedReason).toContain(failure==='transport'?'did not succeed':'out-of-scope');expect(stopped.assignments.filter(a=>a.roleId==='worker')).toHaveLength(1);expect(stopped.rejectedWorkerAttempts).toHaveLength(1);expect(stopped.rejectedWorkerAttempts?.[0]).toMatchObject({workerAssignmentId:stopped.assignments.find(a=>a.roleId==='worker')?.id,pinnedBaseCommit:stopped.pinnedBaseCommit,evidenceStatus:'rejected_untrusted'});expect(stopped.assignments.some(a=>a.roleId==='reviewer')).toBe(false);expect(turns.filter(role=>role==='worker')).toHaveLength(1);const state=await store.load();expect(state.events.some(e=>e.type==='controller.stopped'&&e.entityId===run.id&&String(e.data.reason).includes(failure==='transport'?'did not succeed':'out-of-scope'))).toBe(true);}
   });
   it('stops on a strict Orchestrator proposal that names an out-of-scope path before Worker submission',async()=>{
-    const turns:string[]=[];const {controller,store}=await setup({submit:async input=>{turns.push(input.roleId);return {externalId:`scope-${input.roleId}`,responseId:`scope-response-${input.roleId}`,sessionId:`scope-session-${input.roleId}`,status:'completed',outputText:input.roleId==='planner'?'Planner response':JSON.stringify({workerTask:'Update README.md and private.txt with the requested change.'}),actualModel:'model-fixture',requestedModel:'model-fixture',selectedHarnessId:'fixture'};}});
+    const turns:string[]=[];const {controller,store}=await setup({submit:async input=>{turns.push(input.roleId);return {externalId:`scope-${input.roleId}`,responseId:`scope-response-${input.roleId}`,sessionId:`scope-session-${input.roleId}`,status:'completed',outputText:input.roleId==='planner'?'Planner response':JSON.stringify({workerTask:'Update README.md and private.txt with the requested change.',targetFiles:['README.md','private.txt']}),actualModel:'model-fixture',requestedModel:'model-fixture',selectedHarnessId:'fixture'};}});
     const run=await prepareAutomaticRun(controller,store);await controller.startWork(run.id,{budgets:{roleTurns:{planner:1,orchestrator:1,worker:1,reviewer:1},workerAttempts:1}});const stopped=await waitForController(store,run.id),state=await store.load();
     expect(turns).toEqual(['planner','orchestrator']);expect(stopped.controller).toMatchObject({active:false,phase:'stopped'});expect(stopped.controller?.stoppedReason).toContain('valid bounded Worker proposal');expect(stopped.assignments.filter(a=>a.roleId==='worker')).toHaveLength(0);expect(stopped.workerProposal).toBeUndefined();expect(stopped.approval).toBeUndefined();expect(stopped.promotion).toBeUndefined();expect(state.events.some(e=>e.type==='orchestrator.proposal_invalid'&&e.entityId===run.id&&String(e.data.reason).includes('private.txt'))).toBe(true);expect(state.events.some(e=>e.type==='controller.stopped'&&e.entityId===run.id)).toBe(true);
   });
-  it('resolves comma-listed bare filenames against unique in-scope base paths',async()=>{
+  it('accepts a proposal with targetFiles all inside the allowed scope and dispatches the Worker',async()=>{
     const turns:string[]=[],workerTask='Inspect nodes/Sleeper/descriptions/SportDescription.ts, LeagueDescription.ts, DraftDescription.ts, and nodes/Sleeper/transport/sleeperApiRequest.ts; document findings in docs/api-matrix.md.';
-    const {controller,store}=await setup({submit:async input=>{turns.push(input.roleId);return {externalId:`listed-${input.roleId}`,responseId:`listed-response-${input.roleId}`,sessionId:`listed-session-${input.roleId}`,status:input.roleId==='worker'?'failed':'completed',outputText:input.roleId==='planner'?'Planner response':input.roleId==='orchestrator'?JSON.stringify({workerTask}):'Worker failed',actualModel:'model-fixture',requestedModel:'model-fixture',selectedHarnessId:'fixture'};}});
+    const {controller,store}=await setup({submit:async input=>{turns.push(input.roleId);return {externalId:`listed-${input.roleId}`,responseId:`listed-response-${input.roleId}`,sessionId:`listed-session-${input.roleId}`,status:input.roleId==='worker'?'failed':'completed',outputText:input.roleId==='planner'?'Planner response':input.roleId==='orchestrator'?JSON.stringify({workerTask,targetFiles:['nodes/Sleeper/descriptions/SportDescription.ts','nodes/Sleeper/descriptions/LeagueDescription.ts','nodes/Sleeper/descriptions/DraftDescription.ts','nodes/Sleeper/transport/sleeperApiRequest.ts','docs/api-matrix.md']}):'Worker failed',actualModel:'model-fixture',requestedModel:'model-fixture',selectedHarnessId:'fixture'};}});
     controller.configureVerifiedWorkspace({repoPath:'/fixture/repo',bridgeBaseUrl:'http://127.0.0.1:1',allowedScope:['nodes/','docs/'],commands:[{name:'fixture check',command:'true',args:[]}]});
     const project:any=await controller.createProject('Listed files'),task:any=await controller.createTask(project.id,'Map API support'),run:any=await controller.createRun(task.id);
     await store.mutate(s=>{const current=s.projects[0]!.tasks[0]!.runs[0]!;current.pinnedBaseCommit='b'.repeat(40);current.workspaceId='listed-files-workspace';current.baseFilePaths=['nodes/Sleeper/descriptions/SportDescription.ts','nodes/Sleeper/descriptions/LeagueDescription.ts','nodes/Sleeper/descriptions/DraftDescription.ts','nodes/Sleeper/transport/sleeperApiRequest.ts','docs/api-matrix.md'];});
     await controller.addGuidance(run.id,'Map NBA support.');await controller.startWork(run.id,{budgets:{roleTurns:{planner:1,orchestrator:1,worker:1,reviewer:1},workerAttempts:1}});const stopped=await waitForController(store,run.id),state=await store.load();
     expect(turns).toEqual(['planner','orchestrator','worker']);expect(stopped.assignments.find(a=>a.roleId==='worker')?.prompt).toBe(workerTask);expect(state.events.some(e=>e.type==='orchestrator.proposal_invalid'&&e.entityId===run.id)).toBe(false);
   });
-  it('rejects a bare filename when its in-scope base path is ambiguous',async()=>{
-    const turns:string[]=[],workerTask='Inspect nodes/Sleeper/descriptions/SportDescription.ts, LeagueDescription.ts and update docs/api-matrix.md.';
-    const {controller,store}=await setup({submit:async input=>{turns.push(input.roleId);return {externalId:`ambiguous-${input.roleId}`,responseId:`ambiguous-response-${input.roleId}`,sessionId:`ambiguous-session-${input.roleId}`,status:'completed',outputText:input.roleId==='planner'?'Planner response':input.roleId==='orchestrator'?JSON.stringify({workerTask}):'Worker response',actualModel:'model-fixture',requestedModel:'model-fixture',selectedHarnessId:'fixture'};}});
+  it('rejects a proposal whose targetFiles list contains an out-of-scope path',async()=>{
+    const turns:string[]=[],workerTask='Inspect nodes/Sleeper/descriptions/SportDescription.ts and update docs/api-matrix.md.';
+    const {controller,store}=await setup({submit:async input=>{turns.push(input.roleId);return {externalId:`ooscope-${input.roleId}`,responseId:`ooscope-response-${input.roleId}`,sessionId:`ooscope-session-${input.roleId}`,status:'completed',outputText:input.roleId==='planner'?'Planner response':input.roleId==='orchestrator'?JSON.stringify({workerTask,targetFiles:['nodes/Sleeper/descriptions/SportDescription.ts','private/secret.ts','docs/api-matrix.md']}):'Worker response',actualModel:'model-fixture',requestedModel:'model-fixture',selectedHarnessId:'fixture'};}});
     controller.configureVerifiedWorkspace({repoPath:'/fixture/repo',bridgeBaseUrl:'http://127.0.0.1:1',allowedScope:['nodes/','docs/'],commands:[{name:'fixture check',command:'true',args:[]}]});
-    const project:any=await controller.createProject('Ambiguous files'),task:any=await controller.createTask(project.id,'Map API support'),run:any=await controller.createRun(task.id);
-    await store.mutate(s=>{const current=s.projects[0]!.tasks[0]!.runs[0]!;current.pinnedBaseCommit='c'.repeat(40);current.workspaceId='ambiguous-files-workspace';current.baseFilePaths=['nodes/Sleeper/descriptions/SportDescription.ts','nodes/Sleeper/descriptions/LeagueDescription.ts','nodes/Other/descriptions/LeagueDescription.ts','docs/api-matrix.md'];});
+    const project:any=await controller.createProject('Out-of-scope targetFile'),task:any=await controller.createTask(project.id,'Map API support'),run:any=await controller.createRun(task.id);
+    await store.mutate(s=>{const current=s.projects[0]!.tasks[0]!.runs[0]!;current.pinnedBaseCommit='c'.repeat(40);current.workspaceId='ooscope-workspace';});
     await controller.addGuidance(run.id,'Map NBA support.');await controller.startWork(run.id,{budgets:{roleTurns:{planner:1,orchestrator:1,worker:1,reviewer:1},workerAttempts:1}});const stopped=await waitForController(store,run.id),state=await store.load();
-    expect(turns).toEqual(['planner','orchestrator']);expect(stopped.assignments.filter(a=>a.roleId==='worker')).toHaveLength(0);expect(state.events.some(e=>e.type==='orchestrator.proposal_invalid'&&e.entityId===run.id&&String(e.data.reason).includes('ambiguous in-scope filename'))).toBe(true);
+    expect(turns).toEqual(['planner','orchestrator']);expect(stopped.assignments.filter(a=>a.roleId==='worker')).toHaveLength(0);expect(state.events.some(e=>e.type==='orchestrator.proposal_invalid'&&e.entityId===run.id&&String(e.data.reason).includes('private/secret.ts'))).toBe(true);
   });
   it('resumes an initially rejected saved proposal without another Orchestrator call',async()=>{
-    const turns:string[]=[],workerTask='Inspect nodes/Sleeper/descriptions/SportDescription.ts, LeagueDescription.ts and document the result in docs/api-matrix.md.';
-    const {controller,store}=await setup({submit:async input=>{turns.push(input.roleId);return {externalId:`saved-${input.roleId}-${turns.length}`,responseId:`saved-response-${input.roleId}-${turns.length}`,sessionId:`saved-session-${input.roleId}`,status:'completed',outputText:input.roleId==='planner'?'Planner response':input.roleId==='orchestrator'?JSON.stringify({workerTask}):'Worker response',actualModel:'model-fixture',requestedModel:'model-fixture',selectedHarnessId:'fixture'};}});
+    const turns:string[]=[],workerTask='Inspect nodes/Sleeper/descriptions/SportDescription.ts and document the result in docs/api-matrix.md.';
+    const {controller,store}=await setup({submit:async input=>{turns.push(input.roleId);return {externalId:`saved-${input.roleId}-${turns.length}`,responseId:`saved-response-${input.roleId}-${turns.length}`,sessionId:`saved-session-${input.roleId}`,status:'completed',outputText:input.roleId==='planner'?'Planner response':input.roleId==='orchestrator'?JSON.stringify({workerTask,targetFiles:['nodes/Sleeper/descriptions/SportDescription.ts','other/extra.ts','docs/api-matrix.md']}):'Worker response',actualModel:'model-fixture',requestedModel:'model-fixture',selectedHarnessId:'fixture'};}});
     controller.configureVerifiedWorkspace({repoPath:'/fixture/repo',bridgeBaseUrl:'http://127.0.0.1:1',allowedScope:['nodes/','docs/'],commands:[{name:'fixture check',command:'true',args:[]}]});
     const project:any=await controller.createProject('Recover saved proposal'),task:any=await controller.createTask(project.id,'Map NBA support'),run:any=await controller.createRun(task.id);
     await store.mutate(s=>{const current=s.projects[0]!.tasks[0]!.runs[0]!;current.pinnedBaseCommit='d'.repeat(40);current.workspaceId='saved-proposal-workspace';});
     await controller.addGuidance(run.id,'Map NBA support.');await controller.startWork(run.id,{budgets:{roleTurns:{planner:1,orchestrator:1,worker:1,reviewer:1},workerAttempts:1}});const stopped=await waitForController(store,run.id),stoppedState=await store.load(),orchestratorCalls=turns.filter(role=>role==='orchestrator').length;
-    expect(stopped.controller).toMatchObject({active:false,phase:'stopped'});expect(stoppedState.events.some(e=>e.type==='orchestrator.proposal_invalid'&&e.entityId===run.id&&String(e.data.reason).includes('LeagueDescription.ts'))).toBe(true);expect(stopped.workerProposal).toBeUndefined();
-    await store.mutate(s=>{const current=s.projects[0]!.tasks[0]!.runs[0]!;current.baseFilePaths=['nodes/Sleeper/descriptions/SportDescription.ts','nodes/Sleeper/descriptions/LeagueDescription.ts','docs/api-matrix.md'];});
+    expect(stopped.controller).toMatchObject({active:false,phase:'stopped'});expect(stoppedState.events.some(e=>e.type==='orchestrator.proposal_invalid'&&e.entityId===run.id&&String(e.data.reason).includes('other/extra.ts'))).toBe(true);expect(stopped.workerProposal).toBeUndefined();
+    // Expand scope to include the previously rejected path so savedInitialProposal passes
+    await store.mutate(s=>{const current=s.projects[0]!.tasks[0]!.runs[0]!;current.allowedScope=['nodes/','docs/','other/'];});
     (controller as any).dispatchWorkerProposal=async()=>{throw new Error('fixture stopped before Worker submission');};
     await controller.resumeInitialProposal(run.id);const afterResume=await waitForController(store,run.id),resumedState=await store.load();
     expect(turns.filter(role=>role==='orchestrator')).toHaveLength(orchestratorCalls);expect(afterResume.workerProposal).toMatchObject({text:workerTask,orchestratorAssignmentId:stopped.assignments.find(a=>a.roleId==='orchestrator')?.id});expect(resumedState.events.some(e=>e.type==='orchestrator.worker_proposed'&&e.entityId===run.id&&e.data.recovered===true)).toBe(true);expect(afterResume.controller?.stoppedReason).toContain('fixture stopped before Worker submission');
   });
-  it('continues to reject an unknown bare filename under directory scope',async()=>{
-    const turns:string[]=[],workerTask='Inspect nodes/Sleeper/descriptions/SportDescription.ts, UnknownDescription.ts and update docs/api-matrix.md.';
-    const {controller,store}=await setup({submit:async input=>{turns.push(input.roleId);return {externalId:`unknown-${input.roleId}`,responseId:`unknown-response-${input.roleId}`,sessionId:`unknown-session-${input.roleId}`,status:'completed',outputText:input.roleId==='planner'?'Planner response':input.roleId==='orchestrator'?JSON.stringify({workerTask}):'Worker response',actualModel:'model-fixture',requestedModel:'model-fixture',selectedHarnessId:'fixture'};}});
+  it('continues to reject a proposal that names an out-of-scope path in targetFiles',async()=>{
+    const turns:string[]=[],workerTask='Inspect nodes/Sleeper/descriptions/SportDescription.ts and update docs/api-matrix.md.';
+    const {controller,store}=await setup({submit:async input=>{turns.push(input.roleId);return {externalId:`unknown-${input.roleId}`,responseId:`unknown-response-${input.roleId}`,sessionId:`unknown-session-${input.roleId}`,status:'completed',outputText:input.roleId==='planner'?'Planner response':input.roleId==='orchestrator'?JSON.stringify({workerTask,targetFiles:['nodes/Sleeper/descriptions/SportDescription.ts','unknown/nowhere.ts','docs/api-matrix.md']}):'Worker response',actualModel:'model-fixture',requestedModel:'model-fixture',selectedHarnessId:'fixture'};}});
     controller.configureVerifiedWorkspace({repoPath:'/fixture/repo',bridgeBaseUrl:'http://127.0.0.1:1',allowedScope:['nodes/','docs/'],commands:[{name:'fixture check',command:'true',args:[]}]});
     const project:any=await controller.createProject('Unknown file'),task:any=await controller.createTask(project.id,'Map API support'),run:any=await controller.createRun(task.id);
     await store.mutate(s=>{const current=s.projects[0]!.tasks[0]!.runs[0]!;current.pinnedBaseCommit='e'.repeat(40);current.workspaceId='unknown-file-workspace';current.baseFilePaths=['nodes/Sleeper/descriptions/SportDescription.ts','docs/api-matrix.md'];});
     await controller.addGuidance(run.id,'Map NBA support.');await controller.startWork(run.id,{budgets:{roleTurns:{planner:1,orchestrator:1,worker:1,reviewer:1},workerAttempts:1}});const stopped=await waitForController(store,run.id),state=await store.load();
-    expect(turns).toEqual(['planner','orchestrator']);expect(stopped.assignments.filter(a=>a.roleId==='worker')).toHaveLength(0);expect(state.events.some(e=>e.type==='orchestrator.proposal_invalid'&&e.entityId===run.id&&String(e.data.reason).includes('UnknownDescription.ts'))).toBe(true);
+    expect(turns).toEqual(['planner','orchestrator']);expect(stopped.assignments.filter(a=>a.roleId==='worker')).toHaveLength(0);expect(state.events.some(e=>e.type==='orchestrator.proposal_invalid'&&e.entityId===run.id&&String(e.data.reason).includes('unknown/nowhere.ts'))).toBe(true);
   });
   it('accepts a prose preamble before one bounded JSON Worker proposal and dispatches its in-scope docs task',async()=>{
     const turns:string[]=[];const workerTask='Within docs/ and nodes/, make the requested documentation update. Use https://docs.sleeper.com/ as evidence.';
@@ -236,8 +271,8 @@ describe('controller persistence and state transitions',()=>{
   it.each([
     ['multiple JSON workerTask objects','{"workerTask":"Update docs/guide.md."}\n{"workerTask":"Update docs/other.md."}'],
     ['an extra key','{"workerTask":"Update docs/guide.md.","note":"also do this"}'],
-    ['an out-of-scope local file reference','{"workerTask":"Update docs/guide.md and private.txt."}'],
-    ['a URL path that only looks in-scope','{"workerTask":"Use https://example.com/docs/ as reference material."}'],
+    ['an out-of-scope targetFile','{"workerTask":"Update docs/guide.md.","targetFiles":["docs/guide.md","private.txt"]}'],
+    ['a targetFile with an absolute path','{"workerTask":"Update docs/guide.md.","targetFiles":["/etc/docs/guide.md"]}'],
   ])('rejects an ambiguous or unsafe Orchestrator reply (%s) before Worker submission',async(_label,orchestratorReply)=>{
     const turns:string[]=[];const {controller,store}=await setup({submit:async input=>{turns.push(input.roleId);return {externalId:`invalid-${input.roleId}`,responseId:`invalid-response-${input.roleId}`,sessionId:`invalid-session-${input.roleId}`,status:'completed',outputText:input.roleId==='planner'?'Planner response':input.roleId==='orchestrator'?orchestratorReply:'Worker response',actualModel:'model-fixture',requestedModel:'model-fixture',selectedHarnessId:'fixture'};}});
     controller.configureVerifiedWorkspace({repoPath:'/fixture/repo',bridgeBaseUrl:'http://127.0.0.1:1',allowedScope:['docs/','nodes/'],commands:[{name:'fixture check',command:'true',args:[]}]});
@@ -247,7 +282,7 @@ describe('controller persistence and state transitions',()=>{
   });
   it('retries a failed Worker on the same proposal with a fresh pinned workspace and current config',async()=>{
     const seededBases:string[]=[],submissions:any[]=[];let workerCount=0,storeRef:JsonStore|undefined;
-    const bridge=createServer((req,res)=>{let body='';req.on('data',part=>body+=part);req.on('end',async()=>{res.setHeader('content-type','application/json');if(req.method==='GET'&&req.url==='/v1/uhp'){res.end(JSON.stringify({capabilities:{extensions:{foreman_workspace_bridge_v1:{version:1,seed:true,complete_snapshot:true,execution_boundary:'bubblewrap'}}}}));return;}if(req.method==='POST'&&req.url==='/extensions/foreman-workspace/v1/workspaces'){const parsed=JSON.parse(body);seededBases.push(parsed.base_commit);if(seededBases.length===1&&storeRef)await storeRef.mutate(s=>{s.roles.find(x=>x.id==='worker')!.availableConfigs=s.roles.find(x=>x.id==='worker')!.availableConfigs.filter(c=>c.model!=='model-retry');});res.end(JSON.stringify({workspace_id:`fresh-workspace-${seededBases.length}`,base_commit:parsed.base_commit}));return;}res.statusCode=404;res.end('{}');});});
+    const bridge=createServer((req,res)=>{let body='';req.on('data',part=>body+=part);req.on('end',async()=>{res.setHeader('content-type','application/json');if(req.method==='GET'&&req.url==='/v1/uhp'){res.end(JSON.stringify({capabilities:{extensions:{foreman_workspace_bridge_v1:{version:1,seed:true,complete_snapshot:true,execution_boundary:'bubblewrap'}}}}));return;}if(req.method==='POST'&&req.url==='/extensions/foreman-workspace/v1/workspaces'){const parsed=JSON.parse(body);seededBases.push(parsed.base_commit);if(seededBases.length===2&&storeRef)await storeRef.mutate(s=>{s.roles.find(x=>x.id==='worker')!.availableConfigs=s.roles.find(x=>x.id==='worker')!.availableConfigs.filter(c=>c.model!=='model-retry');});res.end(JSON.stringify({workspace_id:`fresh-workspace-${seededBases.length}`,base_commit:parsed.base_commit}));return;}res.statusCode=404;res.end('{}');});});
     bridge.listen(0,'127.0.0.1');await once(bridge,'listening');bridgeServers.push(bridge);const address=bridge.address() as import('node:net').AddressInfo,bridgeBaseUrl=`http://127.0.0.1:${address.port}`;
     const {controller,store}=await setup({submit:async input=>{submissions.push(input);if(input.roleId==='worker'){workerCount++;return {externalId:`worker-response-${workerCount}`,responseId:`worker-response-${workerCount}`,sessionId:`worker-session-${workerCount}`,status:workerCount===1?'failed':'completed',actualModel:String(input.config.model),requestedModel:String(input.config.model),selectedHarnessId:String(input.config.harnessId),outputText:workerCount===1?'first Worker transport failed':'retry Worker turn completed'};}return {externalId:`${input.roleId}-response`,responseId:`${input.roleId}-response`,sessionId:`${input.roleId}-session`,status:'completed',actualModel:'model-fixture',requestedModel:'model-fixture',selectedHarnessId:'fixture',outputText:input.roleId==='planner'?'Planner prepared the request.':JSON.stringify({workerTask:'Update README.md with the requested short note.'})};}});
     storeRef=store;controller.configureVerifiedWorkspace({repoPath:'/fixture/repo',bridgeBaseUrl,allowedScope:['README.md'],commands:[{name:'ok',command:'true',args:[]}]});
@@ -260,13 +295,13 @@ describe('controller persistence and state transitions',()=>{
     await expect(controller.retryWorkerProposal(run.id,orch.proposal!.id)).rejects.toThrow('Unsupported');let afterFailedRetry=(await store.load()).projects[0]!.tasks[0]!.runs[0]!;expect(afterFailedRetry.workerProposal).toMatchObject({status:'dispatched',workerAssignmentId:failed.id,workerAssignmentHistoryIds:[failed.id]});expect(afterFailedRetry.assignments.filter(a=>a.roleId==='worker')).toHaveLength(1);
     await store.mutate(s=>{s.roles.find(x=>x.id==='worker')!.availableConfigs.push({harnessId:'fixture',model:'model-retry'});});
     const succeeded=await controller.retryWorkerProposal(run.id,orch.proposal!.id);const postRetry=await store.load(),retried=postRetry.projects[0]!.tasks[0]!.runs[0]!;
-    expect(seededBases).toEqual([base,base]);expect(retried.workspaceId).toBe('fresh-workspace-2');expect(retried.workerProposal).toMatchObject({id:orch.proposal!.id,status:'dispatched',orchestratorAssignmentId:orch.assignment.id,workerAssignmentId:succeeded.id,workerAssignmentHistoryIds:[failed.id,succeeded.id]});
+    expect(seededBases).toEqual([base,base,base]);expect(retried.workspaceId).toBe('fresh-workspace-3');expect(retried.workerProposal).toMatchObject({id:orch.proposal!.id,status:'dispatched',orchestratorAssignmentId:orch.assignment.id,workerAssignmentId:succeeded.id,workerAssignmentHistoryIds:[failed.id,succeeded.id]});
     expect(succeeded).toMatchObject({status:'succeeded',prompt:orch.proposal!.text,requestedConfig:{harnessId:'fixture',model:'model-retry'}});expect(retried.assignments.filter(a=>a.roleId==='worker')).toHaveLength(2);expect(retried.assignments.filter(a=>a.roleId==='worker'&&a.status==='succeeded')).toHaveLength(1);expect(submissions.filter(x=>x.roleId==='planner')).toHaveLength(1);expect(submissions.filter(x=>x.roleId==='orchestrator')).toHaveLength(1);expect(submissions.filter(x=>x.roleId==='worker').map(x=>x.prompt)).toEqual([orch.proposal!.text,orch.proposal!.text]);
-    await expect(controller.retryWorkerProposal(run.id,orch.proposal!.id)).rejects.toThrow('failed Foreman validation');expect(seededBases).toHaveLength(2);expect(postRetry.events.filter(e=>e.type==='orchestrator.worker_retry_authorized')).toHaveLength(2);
+    await expect(controller.retryWorkerProposal(run.id,orch.proposal!.id)).rejects.toThrow('failed Foreman validation');expect(seededBases).toHaveLength(3);expect(postRetry.events.filter(e=>e.type==='orchestrator.worker_retry_authorized')).toHaveLength(2);
   });
   it('retries a succeeded no-edit Worker after failed Foreman validation and archives its evidence only with the new intent',async()=>{
     const seededBases:string[]=[],submissions:any[]=[];let workerCount=0,storeRef:JsonStore|undefined;
-    const bridge=createServer((req,res)=>{let body='';req.on('data',part=>body+=part);req.on('end',async()=>{res.setHeader('content-type','application/json');if(req.method==='GET'&&req.url==='/v1/uhp'){res.end(JSON.stringify({capabilities:{extensions:{foreman_workspace_bridge_v1:{version:1,seed:true,complete_snapshot:true,execution_boundary:'bubblewrap'}}}}));return;}if(req.method==='POST'&&req.url==='/extensions/foreman-workspace/v1/workspaces'){const parsed=JSON.parse(body);seededBases.push(parsed.base_commit);if(seededBases.length===1&&storeRef)await storeRef.mutate(s=>{s.roles.find(x=>x.id==='worker')!.availableConfigs=s.roles.find(x=>x.id==='worker')!.availableConfigs.filter(c=>c.model!=='model-retry');});res.end(JSON.stringify({workspace_id:`noedit-retry-workspace-${seededBases.length}`,base_commit:parsed.base_commit}));return;}res.statusCode=404;res.end('{}');});});
+    const bridge=createServer((req,res)=>{let body='';req.on('data',part=>body+=part);req.on('end',async()=>{res.setHeader('content-type','application/json');if(req.method==='GET'&&req.url==='/v1/uhp'){res.end(JSON.stringify({capabilities:{extensions:{foreman_workspace_bridge_v1:{version:1,seed:true,complete_snapshot:true,execution_boundary:'bubblewrap'}}}}));return;}if(req.method==='POST'&&req.url==='/extensions/foreman-workspace/v1/workspaces'){const parsed=JSON.parse(body);seededBases.push(parsed.base_commit);if(seededBases.length===2&&storeRef)await storeRef.mutate(s=>{s.roles.find(x=>x.id==='worker')!.availableConfigs=s.roles.find(x=>x.id==='worker')!.availableConfigs.filter(c=>c.model!=='model-retry');});res.end(JSON.stringify({workspace_id:`noedit-retry-workspace-${seededBases.length}`,base_commit:parsed.base_commit}));return;}res.statusCode=404;res.end('{}');});});
     bridge.listen(0,'127.0.0.1');await once(bridge,'listening');bridgeServers.push(bridge);const address=bridge.address() as import('node:net').AddressInfo,bridgeBaseUrl=`http://127.0.0.1:${address.port}`;
     const {controller,store,dir}=await setup({submit:async input=>{submissions.push(input);if(input.roleId==='worker'){workerCount++;return {externalId:`noedit-worker-${workerCount}`,responseId:`noedit-worker-${workerCount}`,sessionId:`noedit-session-${workerCount}`,status:'completed',actualModel:String(input.config.model),requestedModel:String(input.config.model),selectedHarnessId:String(input.config.harnessId),outputText:'CLI turn completed'};}return {externalId:`${input.roleId}-response`,responseId:`${input.roleId}-response`,sessionId:`${input.roleId}-session`,status:'completed',actualModel:'model-fixture',requestedModel:'model-fixture',selectedHarnessId:'fixture',outputText:input.roleId==='planner'?'Planner prepared the request.':JSON.stringify({workerTask:'Make the requested edit in README.md.'})};}});
     const repoPath=join(dir,'repo');execFileSync('git',['clone','--quiet',resolve('tests/fixtures/recorded-worker-base.bundle'),repoPath],{stdio:'pipe'});const recorded:any=JSON.parse(await readFile(resolve('investigations/local-cli-uhp/evidence/actual-workspace-smoke.json'),'utf8'));const base=recorded.baseCommit;
@@ -282,7 +317,7 @@ describe('controller persistence and state transitions',()=>{
     expect(afterFailedIntent.workerEvidence).toEqual(evidence);expect(afterFailedIntent.validation).toEqual(validation);expect(afterFailedIntent.workerEvidenceHistory).toBeUndefined();expect(afterFailedIntent.workerProposal).toMatchObject({status:'dispatched',workerAssignmentId:first.id});expect(afterFailedIntent.assignments.filter(a=>a.roleId==='worker')).toHaveLength(1);
     await store.mutate(s=>{s.roles.find(x=>x.id==='worker')!.availableConfigs.push({harnessId:'fixture',model:'model-retry'});});
     const second=await controller.retryWorkerProposal(run.id,orch.proposal!.id);const replacementEnvelope={...structuredClone(recorded),responseId:second.responseId,sessionId:second.sessionId,actualModel:'model-retry'};delete replacementEnvelope.usage;const verified:any=await controller.replayRecordedWorkerOutput(run.id,second.id,replacementEnvelope);const afterRetryState=await store.load(),afterRetry=afterRetryState.projects[0]!.tasks[0]!.runs[0]!;
-    expect(seededBases).toEqual([base,base]);expect(afterRetry.workspaceId).toBe('noedit-retry-workspace-2');expect(afterRetry.workerProposal).toMatchObject({id:orch.proposal!.id,orchestratorAssignmentId:orch.assignment.id,workerAssignmentId:second.id,workerAssignmentHistoryIds:[first.id,second.id]});
+    expect(seededBases).toEqual([base,base,base]);expect(afterRetry.workspaceId).toBe('noedit-retry-workspace-3');expect(afterRetry.workerProposal).toMatchObject({id:orch.proposal!.id,orchestratorAssignmentId:orch.assignment.id,workerAssignmentId:second.id,workerAssignmentHistoryIds:[first.id,second.id]});
     expect(verified.workerEvidence).toMatchObject({workerAssignmentId:second.id,changes:expect.any(Array)});expect(verified.workerEvidence.changes.length).toBeGreaterThan(0);expect(verified.validation).toMatchObject({status:'passed',passed:true});expect(afterRetry.workerEvidence).toMatchObject({workerAssignmentId:second.id});expect(afterRetry.validation).toMatchObject({status:'passed'});expect(afterRetry.workerEvidenceHistory).toEqual([evidence]);expect(afterRetry.validationHistory).toEqual([validation]);expect(afterRetry.assignments.find(a=>a.id===first.id)?.status).toBe('succeeded');expect(second).toMatchObject({status:'succeeded',prompt:orch.proposal!.text,requestedConfig:{harnessId:'fixture',model:'model-retry'}});
     expect(submissions.filter(x=>x.roleId==='planner')).toHaveLength(1);expect(submissions.filter(x=>x.roleId==='orchestrator')).toHaveLength(1);expect(submissions.filter(x=>x.roleId==='worker').map(x=>x.prompt)).toEqual([orch.proposal!.text,orch.proposal!.text]);expect(afterRetryState.events.some(e=>e.type==='worker.retry_evidence_archived')).toBe(true);
   });
@@ -442,4 +477,456 @@ describe('controller persistence and state transitions',()=>{
   it('returns after durable approval while accepted-outcome retention remains pending',async()=>{const {controller,store,uhp}=await setup();const p:any=await controller.createProject('Async retention'),t:any=await controller.createTask(p.id,'Approved result'),r:any=await controller.createRun(t.id),worker:any=await controller.assign(r.id,'worker','implement');await store.mutate(s=>{const run=s.projects[0]!.tasks[0]!.runs[0]!;run.reviews.push({id:'review_verified',status:'verified',reviewerAssignmentId:'reviewer-proof',implementationAssignmentIds:[worker.id],verdict:'clear',scope:['all changes'],summary:'independently reviewed',createdAt:new Date().toISOString()});run.validation={id:'validation_verified',status:'passed',passed:true,reportedPassed:true,checks:[{name:'controller tests',passed:true}],gitEvidence:{status:'verified',commit:'abc123',submittedAt:new Date().toISOString()},createdAt:new Date().toISOString()};run.pinnedBaseCommit='a'.repeat(40);const storedWorker=run.assignments.find(a=>a.id===worker.id)!;storedWorker.responseId='resp_worker';run.workerEvidence={provenance:'recorded_replay',workerAssignmentId:worker.id,responseId:storedWorker.responseId,pinnedBaseCommit:run.pinnedBaseCommit,completeSnapshot:{reportedComplete:true,reportedErrors:0,entryCount:0},scopeVerified:true,allowedScope:['README.md'],entries:[],changes:[{kind:'modify',path:'README.md'}],reviewDiff:'fixture diff',acceptance:'not_decided'};run.validation.observations=[{name:'fixture check',command:'true',args:[],exitCode:0,timedOut:false,output:'passed',outputTruncated:false,startedAt:new Date().toISOString(),finishedAt:new Date().toISOString(),passed:true}];const validationEvidence={passed:true,policy:run.validation.policy,observations:run.validation.observations};run.assignments.push({id:'reviewer-proof',roleId:'reviewer',status:'succeeded',requestedConfig:{harnessId:'fixture',model:'simulated'},requestedModel:'simulated',selectedHarnessId:'fixture',reportedHarnessId:'fixture',actualModelStatus:'observed',actualConfig:{harnessId:'fixture',model:'simulated'},responseId:'resp_reviewer',sessionId:'session_reviewer',reviewerExecution:{mode:'read_only',mutationAttempted:false,validation:validationEvidence}} as any);run.reviewerRecommendation={id:'recommendation_fixture',status:'proposed',provenance:'simulated_fixture',reviewerAssignmentId:'reviewer-proof',harnessId:'fixture',model:'simulated',actualModel:'simulated',responseId:'resp_reviewer',sessionId:'session_reviewer',reviewMode:'read_only',mutationAttempted:false,verdict:'recommend',rationale:'Simulated test recommendation',createdAt:new Date().toISOString()};});let retainCalls=0;const hindsight={recall:async()=>({status:'ready' as const,bankId:'bank',memories:[]}),retainOutcome:()=>{retainCalls++;return new Promise<never>(()=>{});}};const approvedController=new Controller(store,uhp,false,false,undefined,hindsight);const approval=await Promise.race([approvedController.approveRun(r.id,{approved:true,evidenceCommit:'a'.repeat(40)}),new Promise((_,reject)=>setTimeout(()=>reject(new Error('approval waited on retention')),100))]);expect(approval).toMatchObject({approved:true,evidenceCommit:'a'.repeat(40)});const snapshot=await store.load();const intent=snapshot.events.find(e=>e.type==='memory.retention_intent');expect(intent?.data).toMatchObject({retentionId:worker.submissionId,idempotencyReference:`foreman-submission-${worker.submissionId}`,status:'pending'});await new Promise(resolve=>setTimeout(resolve,0));expect(retainCalls).toBe(1);await expect(approvedController.approveRun(r.id,{approved:true,evidenceCommit:'a'.repeat(40)})).rejects.toThrow('human decision is final');expect(retainCalls).toBe(1);});
   it('retries degraded retained outcomes after restart using the same idempotency reference',async()=>{const {controller,store,uhp}=await setup();const p:any=await controller.createProject('Retention retry'),t:any=await controller.createTask(p.id,'Approved outcome'),r:any=await controller.createRun(t.id),worker:any=await controller.assign(r.id,'worker','implement');await store.mutate(s=>{const run=s.projects[0]!.tasks[0]!.runs[0]!;run.reviews.push({id:'review_verified',status:'verified',reviewerAssignmentId:'reviewer-proof',implementationAssignmentIds:[worker.id],verdict:'clear',scope:['all changes'],summary:'independently reviewed',createdAt:new Date().toISOString()});run.validation={id:'validation_verified',status:'passed',passed:true,reportedPassed:true,checks:[{name:'controller tests',passed:true}],gitEvidence:{status:'verified',commit:'abc123',submittedAt:new Date().toISOString()},createdAt:new Date().toISOString()};run.pinnedBaseCommit='a'.repeat(40);const storedWorker=run.assignments.find(a=>a.id===worker.id)!;storedWorker.responseId='resp_worker';run.workerEvidence={provenance:'recorded_replay',workerAssignmentId:worker.id,responseId:storedWorker.responseId,pinnedBaseCommit:run.pinnedBaseCommit,completeSnapshot:{reportedComplete:true,reportedErrors:0,entryCount:0},scopeVerified:true,allowedScope:['README.md'],entries:[],changes:[{kind:'modify',path:'README.md'}],reviewDiff:'fixture diff',acceptance:'not_decided'};run.validation.observations=[{name:'fixture check',command:'true',args:[],exitCode:0,timedOut:false,output:'passed',outputTruncated:false,startedAt:new Date().toISOString(),finishedAt:new Date().toISOString(),passed:true}];const validationEvidence={passed:true,policy:run.validation.policy,observations:run.validation.observations};run.assignments.push({id:'reviewer-proof',roleId:'reviewer',status:'succeeded',requestedConfig:{harnessId:'fixture',model:'simulated'},requestedModel:'simulated',selectedHarnessId:'fixture',reportedHarnessId:'fixture',actualModelStatus:'observed',actualConfig:{harnessId:'fixture',model:'simulated'},responseId:'resp_reviewer',sessionId:'session_reviewer',reviewerExecution:{mode:'read_only',mutationAttempted:false,validation:validationEvidence}} as any);run.reviewerRecommendation={id:'recommendation_fixture',status:'proposed',provenance:'simulated_fixture',reviewerAssignmentId:'reviewer-proof',harnessId:'fixture',model:'simulated',actualModel:'simulated',responseId:'resp_reviewer',sessionId:'session_reviewer',reviewMode:'read_only',mutationAttempted:false,verdict:'recommend',rationale:'Simulated test recommendation',createdAt:new Date().toISOString()};});const unavailable={recall:async()=>({status:'ready' as const,bankId:'bank',memories:[]}),retainOutcome:async()=>({status:'degraded' as const,bankId:'bank',error:'temporary outage'})};const approving=new Controller(store,uhp,false,false,undefined,unavailable);await approving.approveRun(r.id,{approved:true,evidenceCommit:'a'.repeat(40)});let state=await store.load();for(let i=0;i<100&&!state.events.some(e=>e.type==='memory.retention_attempt_failed');i++){await new Promise(resolve=>setTimeout(resolve,2));state=await store.load();}expect(state.events.some(e=>e.type==='memory.retention_attempt_failed')).toBe(true);expect(state.events.some(e=>e.type==='memory.retention_completed')).toBe(false);const restartedStore=new JsonStore(store.filePath);let retries=0;const recovered=new Controller(restartedStore,uhp,false,false,undefined,{recall:unavailable.recall,retainOutcome:async outcome=>{retries++;expect(outcome.submissionId).toBe(worker.submissionId);return {status:'accepted',bankId:'bank',operationId:'op-retry'};}});await recovered.resumePendingRetentions();expect(retries).toBe(1);state=await restartedStore.load();for(let i=0;i<100&&!state.events.some(e=>e.type==='memory.retention_completed');i++){await new Promise(resolve=>setTimeout(resolve,2));state=await restartedStore.load();}expect(state.events.find(e=>e.type==='memory.retention_intent')?.data.idempotencyReference).toBe(`foreman-submission-${worker.submissionId}`);expect(state.events.find(e=>e.type==='memory.retention_completed')?.data).toMatchObject({retentionId:worker.submissionId,status:'accepted',operationId:'op-retry'});});
   it('records terminal completion when cancellation races with a completed UHP response',async()=>{let release!:()=>void,started!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;}),created=new Promise<void>(resolve=>{started=resolve;});const {controller,store}=await setup({submit:async input=>{await input.onEvent?.({type:'response.created',responseId:'race-response',event:{type:'response.created'}});started();await gate;return {externalId:'race-response',responseId:'race-response',status:'completed',result:'completed before cancel'};},cancel:async()=>({status:'completed'})});const p:any=await controller.createProject('Cancel race'),t:any=await controller.createTask(p.id,'Completed during cancel'),r:any=await controller.createRun(t.id);const assignmentPromise=controller.assign(r.id,'worker','finish task');await created;const assignment=(await store.load()).projects[0]!.tasks[0]!.runs[0]!.assignments[0]!;const canceled:any=await controller.cancelAssignment(assignment.id);expect(canceled.status).toBe('succeeded');expect((await store.load()).events.some(e=>e.type==='assignment.cancel_raced_terminal'&&e.data.source==='cancel-response')).toBe(true);release();await expect(assignmentPromise).resolves.toMatchObject({status:'succeeded',result:'completed before cancel'});});
+});
+
+describe('empty Orchestrator response handling',()=>{
+  it('retries once when Orchestrator returns empty, then dispatches on valid JSON',async()=>{
+    const turns:string[]=[],prompts:string[]=[];let orchestratorTurns=0;let controllerRef:Controller;let storeRef:JsonStore;
+    const {controller,store}=await setup({submit:async input=>{
+      turns.push(input.roleId);prompts.push(input.prompt);
+      let outputText='Planner prepared the task.';
+      if(input.roleId==='orchestrator'){orchestratorTurns++;outputText=orchestratorTurns===1?'':JSON.stringify({workerTask:'Update README.md with the requested note.',targetFiles:['README.md']});}
+      else if(input.roleId==='worker')outputText='Updated README.md.';
+      else if(input.roleId==='reviewer')outputText=JSON.stringify({verdict:'recommend',rationale:'Verified.'});
+      const current=input.roleId==='reviewer'?(await storeRef.load()).projects[0]!.tasks[0]!.runs[0]:undefined;
+      const agySoftDenied=orchestratorTurns===1&&input.roleId==='orchestrator';
+      return {externalId:`empty-retry-${input.roleId}-${turns.length}`,responseId:`empty-retry-response-${input.roleId}-${turns.length}`,sessionId:`empty-retry-session-${input.roleId}`,status:'completed',outputText,actualModel:String(input.config.model),requestedModel:String(input.config.model),selectedHarnessId:String(input.config.harnessId),...(current?{reviewerExecution:{mode:'read_only',mutationAttempted:false,validation:(controllerRef as any).reviewerEvidencePackage(current).controllerValidation}}:{}),...(agySoftDenied?{result:{metadata:{agy_diagnostic:{response_empty:true,soft_denial_observed:true,outcome:'soft_denied_without_response',tool_events:[{step_index:0,name:'run_command',state:'denied',error_category:'permission_denied'},{step_index:1,name:'view_file',state:'denied',error_category:'permission_denied'}]}}}}:{})};
+    }});controllerRef=controller;storeRef=store;
+    const run=await prepareAutomaticRun(controller,store);
+    (controller as any).verifyWorkerOutput=async(runId:string,workerId:string)=>{await store.mutate(s=>{const r=s.projects[0]!.tasks[0]!.runs[0]!;completeAutomaticEvidence(r,r.assignments.find(a=>a.id===workerId)!);r.sessions.orchestrator.uhpSessionId=r.assignments.filter(a=>a.roleId==='orchestrator').at(-1)?.sessionId;r.orchestratorInbox=(controllerRef as any).buildOrchestratorInbox(runId,r);});return {};};
+    await controller.startWork(run.id);const completed=await waitForController(store,run.id);
+    expect(turns,JSON.stringify(completed.controller?.stoppedReason)).toEqual(['planner','orchestrator','orchestrator','worker','reviewer']);
+    expect(prompts[2]).toContain('no tools');
+    const events=(await store.load()).events;const retryEvent=events.find(e=>e.type==='orchestrator.empty_response_retry');
+    expect(retryEvent).toBeDefined();expect(retryEvent?.data.deniedTools).toContain('run_command');
+    expect(completed.controller?.stoppedReason).toBeUndefined();
+    expect(completed.reviewerRecommendation?.verdict).toBe('recommend');
+  });
+  it('stops with clear reason when Orchestrator returns empty on both initial and retry turns',async()=>{
+    const {controller,store}=await setup({submit:async input=>{
+      const outputText=input.roleId==='orchestrator'?'':'Planner prepared.';
+      const agySoftDenied=input.roleId==='orchestrator';
+      return {externalId:`empty-twice-${input.roleId}`,responseId:`empty-twice-resp-${input.roleId}`,sessionId:`empty-twice-session-${input.roleId}`,status:'completed',outputText,...(agySoftDenied?{result:{metadata:{agy_diagnostic:{response_empty:true,soft_denial_observed:true,outcome:'soft_denied_without_response',tool_events:[{step_index:0,name:'run_command',state:'denied',error_category:'permission_denied'}]}}}}:{})};
+    }});
+    const run=await prepareAutomaticRun(controller,store);
+    await controller.startWork(run.id);const completed=await waitForController(store,run.id);
+    expect(completed.controller?.phase).toBe('stopped');
+    expect(completed.controller?.stoppedReason).toContain('Orchestrator returned no answer');
+    expect(completed.controller?.stoppedReason).toContain('run_command');
+    expect(completed.controller?.stoppedReason).not.toContain('strict JSON');
+    expect((await store.load()).events.some(e=>e.type==='orchestrator.empty_response_retry')).toBe(true);
+  });
+  it('stops without retry when orchestrator budget is 1 and first turn is empty',async()=>{
+    const {controller,store}=await setup({submit:async input=>{
+      const outputText=input.roleId==='orchestrator'?'':'Planner prepared.';
+      const agySoftDenied=input.roleId==='orchestrator';
+      return {externalId:`budget-empty-${input.roleId}`,responseId:`budget-empty-resp-${input.roleId}`,sessionId:`budget-empty-session-${input.roleId}`,status:'completed',outputText,...(agySoftDenied?{result:{metadata:{agy_diagnostic:{response_empty:true,soft_denial_observed:true,outcome:'soft_denied_without_response',tool_events:[{step_index:0,name:'view_file',state:'denied',error_category:'file_access'}]}}}}:{})};
+    }});
+    const run=await prepareAutomaticRun(controller,store);
+    await controller.startWork(run.id,{budgets:{roleTurns:{planner:3,orchestrator:1,worker:1,reviewer:1},workerAttempts:1}});
+    const completed=await waitForController(store,run.id);
+    expect(completed.controller?.phase).toBe('stopped');
+    expect(completed.controller?.stoppedReason).toContain('Orchestrator returned no answer');
+    expect((await store.load()).events.some(e=>e.type==='orchestrator.empty_response_retry')).toBe(false);
+  });
+  it('records emptyResponse with deniedTools when agy_diagnostic reports soft denial with permission errors',async()=>{
+    const {controller,store}=await setup({submit:async input=>{
+      if(input.roleId==='orchestrator')return {externalId:'diag-test',responseId:'diag-resp',sessionId:'diag-session',status:'completed',outputText:'',result:{metadata:{agy_diagnostic:{response_empty:true,soft_denial_observed:true,outcome:'soft_denied_without_response',tool_events:[{step_index:0,name:'bash',state:'denied',error_category:'permission_denied'},{step_index:1,name:'write_file',state:'denied',error_category:'file_access'}]}}}};
+      return {externalId:`diag-other-${input.roleId}`,responseId:`diag-other-resp-${input.roleId}`,sessionId:`diag-other-session-${input.roleId}`,status:'completed',outputText:'ok'};
+    }});
+    const run=await prepareAutomaticRun(controller,store);
+    await controller.startWork(run.id,{budgets:{roleTurns:{planner:3,orchestrator:1,worker:1,reviewer:1},workerAttempts:1}});
+    const completed=await waitForController(store,run.id);
+    const orchestratorAssignment=completed.assignments.find((a:Assignment)=>a.roleId==='orchestrator')!;
+    expect(orchestratorAssignment.emptyResponse).toBeDefined();
+    expect(orchestratorAssignment.emptyResponse?.reason).toContain('tried tools it does not have');
+    expect(orchestratorAssignment.emptyResponse?.deniedTools).toEqual(expect.arrayContaining(['bash','write_file']));
+    expect(completed.controller?.stoppedReason).toContain('tried tools it does not have');
+  });
+  it('reports original strict JSON message for non-empty malformed Orchestrator output',async()=>{
+    const {controller,store}=await setup({submit:async input=>{
+      if(input.roleId==='orchestrator')return {externalId:'malformed',responseId:'malformed-resp',sessionId:'malformed-session',status:'completed',outputText:'Not JSON at all, just some prose.'};
+      return {externalId:`ok-${input.roleId}`,responseId:`ok-resp-${input.roleId}`,sessionId:`ok-session-${input.roleId}`,status:'completed',outputText:'ok'};
+    }});
+    const run=await prepareAutomaticRun(controller,store);
+    await controller.startWork(run.id,{budgets:{roleTurns:{planner:3,orchestrator:1,worker:1,reviewer:1},workerAttempts:1}});
+    const completed=await waitForController(store,run.id);
+    expect(completed.controller?.stoppedReason).toContain('strict JSON');
+    expect(completed.controller?.stoppedReason).not.toContain('no answer');
+    const orchestratorAssignment=completed.assignments.find((a:Assignment)=>a.roleId==='orchestrator')!;
+    expect(orchestratorAssignment.emptyResponse).toBeUndefined();
+  });
+});
+
+describe('validation correction',()=>{
+  async function seedValidationFailed(controller:Controller,store:JsonStore,bridgeBaseUrl:string,runId:string,failOutput='AssertionError: expected 1 to equal 2\nExpected: 2\nReceived: 1'){
+    const stamp=new Date().toISOString(),base='e'.repeat(40);
+    await store.mutate(s=>{
+      const run=s.projects[0]!.tasks[0]!.runs.find(r=>r.id===runId)!;
+      run.pinnedBaseCommit=base;run.workspaceId='validation-failed-workspace';run.allowedScope=['README.md'];
+      run.sessions.orchestrator.uhpSessionId='validation-failed-orchestrator-session';
+      const orchestrator:Assignment={id:'vf-orchestrator',roleId:'orchestrator',status:'succeeded',requestedConfig:{harnessId:'fixture',model:'model-fixture'},responseId:'vf-orch-response',sessionId:'validation-failed-orchestrator-session',prompt:'plan',result:JSON.stringify({workerTask:'Update README.md.'}),submissionId:'vf-orch-sub',idempotencyKey:'vf-orch-key',createdAt:stamp};
+      const worker:Assignment={id:'vf-worker',roleId:'worker',status:'succeeded',requestedConfig:{harnessId:'fixture',model:'model-fixture'},responseId:'vf-worker-response',sessionId:'vf-worker-session',prompt:'Update README.md.',submissionId:'vf-worker-sub',idempotencyKey:'vf-worker-key',createdAt:stamp};
+      run.assignments.push(orchestrator,worker);
+      run.workerProposal={id:'vf-wprop',status:'dispatched',text:'Update README.md.',orchestratorAssignmentId:orchestrator.id,workerAssignmentId:worker.id,workspaceId:'validation-failed-workspace',pinnedBaseCommit:base,createdAt:stamp};
+      run.workerEvidence={provenance:'bridge_snapshot',workerAssignmentId:worker.id,responseId:worker.responseId!,pinnedBaseCommit:base,completeSnapshot:{reportedComplete:true,reportedErrors:0,entryCount:1},scopeVerified:true,allowedScope:['README.md'],entries:[],changes:[{path:'README.md',kind:'modify'}],reviewDiff:'diff --git a/README.md b/README.md\n+attempted',acceptance:'not_decided'};
+      run.validation={id:'vf-validation',status:'failed',passed:false,reportedPassed:false,checks:[{name:'fixture validation',passed:false}],observations:[{name:'fixture validation',command:'pnpm',args:['test'],exitCode:1,timedOut:false,output:failOutput,outputTruncated:false,passed:false}],policy:{requireAllChecksPass:true,configuredCheckCount:1},gitEvidence:{status:'verified',commit:base,changedPaths:['README.md'],submittedAt:stamp},createdAt:stamp} as any;
+      run.orchestratorInbox=(controller as any).buildOrchestratorInbox(runId,run);
+      run.status='failed';run.controller={startedAt:stamp,active:false,phase:'stopped',stoppedReason:'Validation failed · 1 checks recorded.',budgets:{roleTurns:{planner:3,orchestrator:3,worker:2,reviewer:2},workerAttempts:2}};
+    });
+    controller.configureVerifiedWorkspace({repoPath:'/fixture/repo',bridgeBaseUrl,allowedScope:['README.md'],commands:[{name:'fixture validation',command:'pnpm',args:['test']}]});
+  }
+
+  it('runs Orchestrator follow-up, passing Worker verification, and Reviewer from failed validation on request',async()=>{
+    const turns:string[]=[],orchestratorPrompts:string[]=[];let workerCount=0,controllerRef:Controller;
+    const bridge=createServer((req,res)=>{let body='';req.on('data',part=>body+=part);req.on('end',()=>{res.setHeader('content-type','application/json');if(req.method==='GET'&&req.url==='/v1/uhp'){res.end(JSON.stringify({capabilities:{extensions:{foreman_workspace_bridge_v1:{version:1,seed:true,complete_snapshot:true,execution_boundary:'bubblewrap'}}}}));return;}if(req.method==='POST'&&req.url==='/extensions/foreman-workspace/v1/workspaces'){const parsed=JSON.parse(body);res.end(JSON.stringify({workspace_id:`vc-workspace-${Date.now()}`,base_commit:parsed.base_commit}));return;}res.statusCode=404;res.end('{}');});});
+    bridge.listen(0,'127.0.0.1');await once(bridge,'listening');bridgeServers.push(bridge);const address=bridge.address() as import('node:net').AddressInfo;
+    const {controller,store}=await setup({submit:async input=>{
+      turns.push(input.roleId);let outputText='';
+      if(input.roleId==='orchestrator'){orchestratorPrompts.push(input.prompt);outputText=JSON.stringify({workerTask:'Apply one README.md correction.',targetFiles:['README.md']});}
+      else if(input.roleId==='worker'){workerCount++;outputText=`Worker correction ${workerCount} applied`;}
+      else if(input.roleId==='reviewer'){const current=(await store.load()).projects[0]!.tasks[0]!.runs.find(r=>r.id===input.runId)!;return {externalId:`vc-reviewer-${turns.length}`,responseId:`vc-reviewer-response-${turns.length}`,sessionId:`vc-reviewer-session-${turns.length}`,status:'completed',outputText:JSON.stringify({verdict:'recommend',rationale:'Correction looks good.'}),actualModel:'model-fixture',requestedModel:'model-fixture',selectedHarnessId:'fixture',reviewerExecution:{mode:'read_only',mutationAttempted:false,validation:(controllerRef as any).reviewerEvidencePackage(current).controllerValidation}};}
+      return {externalId:`vc-${input.roleId}-${turns.length}`,responseId:`vc-response-${input.roleId}-${turns.length}`,sessionId:`vc-session-${input.roleId}`,status:'completed',outputText,actualModel:'model-fixture',requestedModel:'model-fixture',selectedHarnessId:'fixture'};
+    }});controllerRef=controller;
+    const run=await prepareAutomaticRun(controller,store);
+    await seedValidationFailed(controller,store,`http://127.0.0.1:${address.port}`,run.id);
+    (controller as any).verifyWorkerOutput=async(runId:string,workerId:string)=>{let result:any;await store.mutate(s=>{const r=s.projects[0]!.tasks[0]!.runs.find(x=>x.id===runId)!,w=r.assignments.find(a=>a.id===workerId)!;const base='e'.repeat(40);r.workerEvidence={provenance:'bridge_snapshot',workerAssignmentId:w.id,responseId:w.responseId??'vc-verify-resp',pinnedBaseCommit:base,completeSnapshot:{reportedComplete:true,reportedErrors:0,entryCount:1},scopeVerified:true,allowedScope:['README.md'],entries:[],changes:[{path:'README.md',kind:'modify'}],reviewDiff:'diff --git a/README.md b/README.md\n+correction',acceptance:'not_decided'};r.validation={id:'vc-passed-validation',status:'passed',passed:true,reportedPassed:true,checks:[{name:'fixture validation',passed:true}],observations:[{name:'fixture validation',command:'pnpm',args:['test'],exitCode:0,timedOut:false,output:'passed',outputTruncated:false,passed:true}],policy:{requireAllChecksPass:true,configuredCheckCount:1},gitEvidence:{status:'verified',commit:base,changedPaths:['README.md'],submittedAt:new Date().toISOString()},createdAt:new Date().toISOString()} as any;r.sessions.orchestrator.uhpSessionId=r.assignments.filter(a=>a.roleId==='orchestrator').at(-1)?.sessionId;r.orchestratorInbox=(controller as any).buildOrchestratorInbox(runId,r);result={workerEvidence:r.workerEvidence,validation:r.validation};});return result;};
+    const resumed=await controller.requestValidationCorrection(run.id);
+    expect(resumed.controller?.active).toBe(true);expect(resumed.controller?.phase).toBe('orchestrating');
+    const completed=await waitForController(store,run.id);
+    expect(turns).toContain('orchestrator');expect(turns).toContain('worker');expect(turns).toContain('reviewer');
+    expect(completed.controller).toMatchObject({active:false,phase:'awaiting_approval'});
+    expect(completed.reviewerRecommendation?.verdict).toBe('recommend');
+    expect(completed.validation?.status).toBe('passed');
+    expect((await store.load()).events.some(e=>e.type==='validation.correction_requested'&&e.entityId===run.id)).toBe(true);
+  });
+
+  it('returns 409 when the worker attempt budget is exhausted',async()=>{
+    const {controller,store}=await setup();
+    controller.configureVerifiedWorkspace({repoPath:'/fixture/repo',bridgeBaseUrl:'http://127.0.0.1:1',allowedScope:['README.md'],commands:[{name:'check',command:'true',args:[]}]});
+    const project:any=await controller.createProject('Budget exhausted'),task:any=await controller.createTask(project.id,'Test'),run:any=await controller.createRun(task.id);
+    const stamp=new Date().toISOString(),base='f'.repeat(40);
+    await store.mutate(s=>{const r=s.projects[0]!.tasks[0]!.runs[0]!;r.pinnedBaseCommit=base;r.allowedScope=['README.md'];r.sessions.orchestrator.uhpSessionId='budget-orch-session';
+      const o1:Assignment={id:'budget-orch-1',roleId:'orchestrator',status:'succeeded',requestedConfig:{harnessId:'fixture',model:'model-fixture'},responseId:'budget-orch-1-resp',sessionId:'budget-orch-session',prompt:'p',submissionId:'s1',idempotencyKey:'k1',createdAt:stamp};
+      const w1:Assignment={id:'budget-worker-1',roleId:'worker',status:'succeeded',requestedConfig:{harnessId:'fixture',model:'model-fixture'},responseId:'budget-worker-1-resp',sessionId:'budget-worker-1-session',prompt:'p',submissionId:'s2',idempotencyKey:'k2',createdAt:stamp};
+      const w2:Assignment={id:'budget-worker-2',roleId:'worker',status:'succeeded',requestedConfig:{harnessId:'fixture',model:'model-fixture'},responseId:'budget-worker-2-resp',sessionId:'budget-worker-2-session',prompt:'p',submissionId:'s3',idempotencyKey:'k3',createdAt:stamp};
+      r.assignments.push(o1,w1,w2);r.workerProposal={id:'budget-wprop',status:'dispatched',text:'Fix.',orchestratorAssignmentId:o1.id,workerAssignmentId:w2.id,workspaceId:'budget-ws',pinnedBaseCommit:base,createdAt:stamp};
+      r.workerEvidence={provenance:'bridge_snapshot',workerAssignmentId:w2.id,responseId:w2.responseId!,pinnedBaseCommit:base,completeSnapshot:{reportedComplete:true,reportedErrors:0,entryCount:1},scopeVerified:true,allowedScope:['README.md'],entries:[],changes:[{path:'README.md',kind:'modify'}],reviewDiff:'diff',acceptance:'not_decided'};
+      r.validation={id:'budget-validation',status:'failed',passed:false,reportedPassed:false,checks:[],observations:[],policy:{requireAllChecksPass:true,configuredCheckCount:0},gitEvidence:{status:'verified',commit:base,changedPaths:[],submittedAt:stamp},createdAt:stamp} as any;
+      r.orchestratorInbox=(controller as any).buildOrchestratorInbox(run.id,r);
+      r.status='failed';r.controller={startedAt:stamp,active:false,phase:'stopped',stoppedReason:'Validation failed.',budgets:{roleTurns:{planner:3,orchestrator:3,worker:2,reviewer:2},workerAttempts:2}};
+    });
+    await expect(controller.requestValidationCorrection(run.id)).rejects.toMatchObject({statusCode:409,message:'Worker follow-up budget is exhausted'});
+  });
+
+  it('returns 409 when the run is not in a stopped state',async()=>{
+    const {controller,store}=await setup();
+    controller.configureVerifiedWorkspace({repoPath:'/fixture/repo',bridgeBaseUrl:'http://127.0.0.1:1',allowedScope:['README.md'],commands:[{name:'check',command:'true',args:[]}]});
+    const project:any=await controller.createProject('Active run'),task:any=await controller.createTask(project.id,'Test'),run:any=await controller.createRun(task.id);
+    const stamp=new Date().toISOString();
+    await store.mutate(s=>{const r=s.projects[0]!.tasks[0]!.runs[0]!;r.status='running';r.controller={startedAt:stamp,active:true,phase:'orchestrating',budgets:{roleTurns:{planner:3,orchestrator:3,worker:2,reviewer:2},workerAttempts:2}};});
+    await expect(controller.requestValidationCorrection(run.id)).rejects.toMatchObject({statusCode:409});
+  });
+
+  it('sends failing check output excerpt to the Orchestrator follow-up prompt',async()=>{
+    const orchestratorPrompts:string[]=[];let controllerRef:Controller;
+    const bridge=createServer((req,res)=>{let body='';req.on('data',part=>body+=part);req.on('end',()=>{res.setHeader('content-type','application/json');if(req.method==='GET'&&req.url==='/v1/uhp'){res.end(JSON.stringify({capabilities:{extensions:{foreman_workspace_bridge_v1:{version:1,seed:true,complete_snapshot:true,execution_boundary:'bubblewrap'}}}}));return;}if(req.method==='POST'&&req.url==='/extensions/foreman-workspace/v1/workspaces'){const parsed=JSON.parse(body);res.end(JSON.stringify({workspace_id:'excerpt-workspace',base_commit:parsed.base_commit}));return;}res.statusCode=404;res.end('{}');});});
+    bridge.listen(0,'127.0.0.1');await once(bridge,'listening');bridgeServers.push(bridge);const address=bridge.address() as import('node:net').AddressInfo;
+    const failOutput='\u001b[31mAssertionError\u001b[0m: expected false to be true\n\u001b[32m- Expected: true\u001b[0m\n\u001b[31m+ Received: false\u001b[0m';
+    const {controller,store}=await setup({submit:async input=>{orchestratorPrompts.push(input.prompt);const current=input.roleId==='reviewer'?(await store.load()).projects[0]!.tasks[0]!.runs.find(r=>r.id===input.runId):undefined;return {externalId:`excerpt-${input.roleId}`,responseId:`excerpt-resp-${input.roleId}`,sessionId:`excerpt-session-${input.roleId}`,status:'completed',outputText:input.roleId==='orchestrator'?JSON.stringify({workerTask:'Fix the assertion.',targetFiles:['README.md']}):input.roleId==='reviewer'?JSON.stringify({verdict:'recommend',rationale:'Correction verified.'}):'Worker done',actualModel:'model-fixture',requestedModel:'model-fixture',selectedHarnessId:'fixture',...(input.roleId==='reviewer'&&current?{reviewerExecution:{mode:'read_only',mutationAttempted:false,validation:(controllerRef as any).reviewerEvidencePackage(current).controllerValidation}}:{})};
+    }});controllerRef=controller;
+    const run=await prepareAutomaticRun(controller,store);
+    await seedValidationFailed(controller,store,`http://127.0.0.1:${address.port}`,run.id,failOutput);
+    (controller as any).verifyWorkerOutput=async(runId:string,workerId:string)=>{await store.mutate(s=>{const r=s.projects[0]!.tasks[0]!.runs.find(x=>x.id===runId)!,w=r.assignments.find(a=>a.id===workerId)!;const base='e'.repeat(40);r.workerEvidence={provenance:'bridge_snapshot',workerAssignmentId:w.id,responseId:w.responseId??'excerpt-verify-resp',pinnedBaseCommit:base,completeSnapshot:{reportedComplete:true,reportedErrors:0,entryCount:1},scopeVerified:true,allowedScope:['README.md'],entries:[],changes:[{path:'README.md',kind:'modify'}],reviewDiff:'diff',acceptance:'not_decided'};r.validation={id:'excerpt-val',status:'passed',passed:true,reportedPassed:true,checks:[],observations:[{name:'fixture validation',command:'pnpm',args:['test'],exitCode:0,timedOut:false,output:'passed',outputTruncated:false,passed:true}],policy:{requireAllChecksPass:true,configuredCheckCount:1},gitEvidence:{status:'verified',commit:base,changedPaths:[],submittedAt:new Date().toISOString()},createdAt:new Date().toISOString()} as any;r.sessions.orchestrator.uhpSessionId=r.assignments.filter(a=>a.roleId==='orchestrator').at(-1)?.sessionId;r.orchestratorInbox=(controllerRef as any).buildOrchestratorInbox(runId,r);});return {};};
+    await controller.requestValidationCorrection(run.id);
+    await waitForController(store,run.id);
+    const orchPrompt=orchestratorPrompts.find(p=>p.includes('Foreman validation failed'));
+    expect(orchPrompt).toBeDefined();
+    expect(orchPrompt).toContain('AssertionError: expected false to be true');
+    expect(orchPrompt).toContain('Expected: true');
+    expect(orchPrompt).not.toContain('\u001b[');
+  });
+});
+
+describe('store EventEmitter for SSE push',()=>{
+  it('emits mutation with new events after a successful mutate that appends events',async()=>{
+    const {store}=await setup();
+    const received:{events:unknown[]}[]=[];
+    store.on('mutation',(events:unknown[])=>received.push({events}));
+    await store.mutate(s=>{s.events.push({id:'evt_test',type:'test.event',entityType:'service',entityId:'test',at:new Date().toISOString(),data:{}});});
+    expect(received).toHaveLength(1);
+    expect(received[0]!.events).toHaveLength(1);
+    expect((received[0]!.events[0] as any).type).toBe('test.event');
+  });
+
+  it('does not emit mutation when a mutate does not append events',async()=>{
+    const {store}=await setup();
+    const received:{events:unknown[]}[]=[];
+    store.on('mutation',(events:unknown[])=>received.push({events}));
+    // Mutation that does not change events.
+    await store.mutate(s=>{s.projects.push({id:'prj_test',name:'No events',status:'active',defaultRoleConfigs:{},createdAt:new Date().toISOString(),tasks:[]});});
+    expect(received).toHaveLength(0);
+  });
+
+  it('emits mutation with only the newly appended events (not the full list)',async()=>{
+    const {store,controller}=await setup();
+    // First mutation adds events via createProject.
+    await controller.createProject('A');
+    const afterFirst=(await store.load()).events.length;
+    const received:{events:unknown[]}[]=[];
+    store.on('mutation',(events:unknown[])=>received.push({events}));
+    await controller.createProject('B');
+    expect(received.length).toBeGreaterThan(0);
+    // Each emission should only have the new events (not previous ones).
+    for(const r of received)expect(r.events.length).toBeLessThan(afterFirst+1);
+  });
+});
+
+describe('store burst-coalescing durability',()=>{
+  it('persists A\'s data when A skips persist and B\'s fn throws',async()=>{
+    const dir=await mkdtemp(join(tmpdir(),'foreman-store-'));dirs.push(dir);
+    const store=new JsonStore(join(dir,'state.json'));
+    await store.load();
+    // Enqueue A and B simultaneously so A skips persist (B is queued behind it).
+    const aFinished=store.mutate(s=>{s.events.push({id:'evt_a',type:'a.done',entityType:'service',entityId:'svc',at:new Date().toISOString(),data:{}}); });
+    const bFinished=store.mutate(()=>{throw new Error('B fails');}).catch(()=>'b-caught');
+    await Promise.all([aFinished,bFinished]);
+    // A's event must be on disk.
+    const ondisk=JSON.parse(await readFile(join(dir,'state.json'),'utf8'));
+    expect(ondisk.events.some((e:any)=>e.id==='evt_a')).toBe(true);
+  });
+
+  it('persists correct final state after a burst and writes fewer times than mutations',async()=>{
+    const dir=await mkdtemp(join(tmpdir(),'foreman-store-'));dirs.push(dir);
+    // Subclass to count persist calls without spying on ESM module exports.
+    let persistCount=0;
+    const {JsonStore:JS}=await import('../src/store.js');
+    class CountingStore extends JS{
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      protected override async persist(state:any):Promise<void>{persistCount++;return super.persist(state);}
+    }
+    const store=new CountingStore(join(dir,'state.json'));
+    await store.load();
+    const N=10;
+    await Promise.all(Array.from({length:N},(_,i)=>store.mutate(s=>{s.events.push({id:`evt_${i}`,type:'burst.item',entityType:'service',entityId:'svc',at:new Date().toISOString(),data:{}});})));
+    // Final state on disk must have all N events.
+    const ondisk=JSON.parse(await readFile(join(dir,'state.json'),'utf8'));
+    expect(ondisk.events.filter((e:any)=>e.type==='burst.item')).toHaveLength(N);
+    // Should have coalesced — fewer writes than mutations.
+    expect(persistCount).toBeLessThan(N);
+  });
+
+  it('flush() writes dirty in-memory state to disk',async()=>{
+    const dir=await mkdtemp(join(tmpdir(),'foreman-store-'));dirs.push(dir);
+    const store=new JsonStore(join(dir,'state.json'));
+    await store.load();
+    // Hold an artificial pending mutation so A skips persist.
+    let releasePending!:()=>void;
+    const pending=new Promise<void>(resolve=>{releasePending=resolve;});
+    const artificial=store.mutate(()=>pending);
+    // A fires and sets dirty=true because artificial is still queued.
+    const aFinished=store.mutate(s=>{s.events.push({id:'evt_flush',type:'flush.test',entityType:'service',entityId:'svc',at:new Date().toISOString(),data:{}});});
+    // Release the artificial mutation and let A run.
+    releasePending();
+    await artificial;
+    await aFinished;
+    // flush() must persist A's event.
+    await store.flush();
+    const ondisk=JSON.parse(await readFile(join(dir,'state.json'),'utf8'));
+    expect(ondisk.events.some((e:any)=>e.id==='evt_flush')).toBe(true);
+  });
+});
+
+describe('stateForUi size reduction',()=>{
+  it('strips contentBase64 from evidence entries/changes and filters high-volume events',async()=>{
+    const {stateForUi}=await import('../src/state-transform.js');
+    const {initialState}=await import('../src/domain.js');
+    const base=initialState();
+    // Build ~1 MB contentBase64 payload: 750 KB raw → ~1 MB base64.
+    const bigContent=Buffer.alloc(750_000,'x').toString('base64');
+    const now=new Date().toISOString();
+    const entry={path:'big-file.bin',kind:'file' as const,contentBase64:bigContent,executable:false};
+    const change={kind:'modify' as const,path:'big-file.bin',
+      before:{path:'big-file.bin',kind:'file' as const,contentBase64:bigContent,executable:false},
+      after:{path:'big-file.bin',kind:'file' as const,contentBase64:bigContent,executable:false}};
+    const evidence:any={provenance:'recorded_replay',workerAssignmentId:'wa_1',responseId:'resp_1',
+      pinnedBaseCommit:'a'.repeat(40),completeSnapshot:{reportedComplete:true,reportedErrors:0,entryCount:1},
+      scopeVerified:true,allowedScope:['big-file.bin'],entries:[entry],changes:[change],reviewDiff:'+x\n',acceptance:'not_decided'};
+    // 1000 events: 900 assignment.progress, 50 assignment.reconciled, 50 others.
+    const events:any[]=[];
+    for(let i=0;i<900;i++)events.push({id:`ep_${i}`,type:'assignment.progress',entityType:'assignment',entityId:'a1',at:now,data:{i}});
+    for(let i=0;i<50;i++)events.push({id:`er_${i}`,type:'assignment.reconciled',entityType:'assignment',entityId:'a1',at:now,data:{i}});
+    for(let i=0;i<50;i++)events.push({id:`eo_${i}`,type:'run.created',entityType:'run',entityId:'run_1',at:now,data:{i}});
+    const task:any={id:'task_1',title:'T',goal:'G',status:'active',createdAt:now,suggestedAllowedPaths:[],dependsOn:[],runs:[{
+      id:'run_1',status:'completed',createdAt:now,sessions:{planner:{localId:'lp'},orchestrator:{localId:'lo'}},
+      sessionHistory:[],roleConfigs:{},guidance:[],assignments:[],reviews:[],workerEvidence:evidence}]};
+    const project:any={id:'prj_1',name:'P',status:'active',createdAt:now,defaultRoleConfigs:{},tasks:[task]};
+    const state={...base,projects:[project],events};
+    const before=JSON.stringify(state).length;
+    const after=JSON.stringify(stateForUi(state)).length;
+    process.stdout.write(`stateForUi size: before=${before} bytes after=${after} bytes (saved ${Math.round((1-after/before)*100)}%)\n`);
+    // Must substantially reduce size.
+    expect(after).toBeLessThan(before * 0.15);
+    // High-volume events: 900 progress → keep last 200, 50 reconciled → keep all 50, 50 other → keep all.
+    const ui=stateForUi(state);
+    const progressKept=ui.events.filter(e=>e.type==='assignment.progress').length;
+    const reconciledKept=ui.events.filter(e=>e.type==='assignment.reconciled').length;
+    const otherKept=ui.events.filter(e=>e.type==='run.created').length;
+    // 900 progress + 50 reconciled = 950 high-vol; last 200 = last 150 progress + all 50 reconciled.
+    expect(progressKept).toBe(150);
+    expect(reconciledKept).toBe(50);
+    expect(otherKept).toBe(50);
+    // Evidence entries and change contentBase64 must be stripped.
+    const run=ui.projects[0]!.tasks[0]!.runs[0]!;
+    expect(run.workerEvidence!.entries).toHaveLength(0);
+    expect(run.workerEvidence!.changes[0]!.before!.contentBase64).toBe('');
+    expect(run.workerEvidence!.changes[0]!.after!.contentBase64).toBe('');
+  });
+});
+
+describe('incremental corrections and capability text',()=>{
+  it('sends overlay entries to bridge on validation_failed retry and records overlaidPriorAssignmentId',async()=>{
+    const {controller,store}=await setup({submit:async()=>({externalId:'ext',status:'completed',result:'edited README',responseId:'resp-retry-worker',sessionId:'session-worker'})});
+    const base='b'.repeat(40);
+    const seededWorkspaces:string[]=[];
+    const overlayRequests:{workspaceId:string;entries:unknown[]}[]=[];
+    const bridge=createServer((req,res)=>{
+      let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{
+        res.setHeader('content-type','application/json');
+        const u=req.url??'';
+        if(req.method==='GET'&&u==='/v1/uhp'){res.end(JSON.stringify({capabilities:{extensions:{foreman_workspace_bridge_v1:{version:1,seed:true,complete_snapshot:true,execution_boundary:'bubblewrap'}}}}));return;}
+        if(req.method==='POST'&&u==='/extensions/foreman-workspace/v1/workspaces'){const b=JSON.parse(body);const wsId=`retry-ws-${seededWorkspaces.length+1}`;seededWorkspaces.push(b.base_commit);res.end(JSON.stringify({workspace_id:wsId,base_commit:b.base_commit}));return;}
+        const overlayMatch=u.match(/^\/extensions\/foreman-workspace\/v1\/workspaces\/([^/]+)\/overlay$/);
+        if(req.method==='POST'&&overlayMatch){const b=JSON.parse(body);overlayRequests.push({workspaceId:overlayMatch[1]!,entries:b.entries});res.end(JSON.stringify({workspace_id:overlayMatch[1],applied:b.entries.length}));return;}
+        res.statusCode=404;res.end('{}');
+      });
+    });
+    bridge.listen(0,'127.0.0.1');await once(bridge,'listening');bridgeServers.push(bridge);
+    const {port}=bridge.address() as import('node:net').AddressInfo;
+    const stamp=new Date().toISOString();
+    controller.configureVerifiedWorkspace({repoPath:'/fixture/repo',bridgeBaseUrl:`http://127.0.0.1:${port}`,allowedScope:['README.md'],commands:[{name:'check',command:'true',args:[]}]});
+    const project:any=await controller.createProject('Overlay test'),task:any=await controller.createTask(project.id,'Incremental fix'),run:any=await controller.createRun(task.id);
+    // Set up a run with prior Worker evidence (validation_failed, has changes)
+    const priorWorkerContent=Buffer.from('changed README content').toString('base64');
+    await store.mutate(s=>{
+      const current=s.projects[0]!.tasks[0]!.runs[0]!;
+      current.pinnedBaseCommit=base;current.workspaceId='initial-ws';
+      current.allowedScope=['README.md'];current.sessions.orchestrator.uhpSessionId='session-orchestrator';
+      const orchestrator:any={id:'orch-1',roleId:'orchestrator',status:'succeeded',requestedConfig:{harnessId:'fixture',model:'model-fixture'},responseId:'resp-orch',sessionId:'session-orchestrator',prompt:'plan',result:JSON.stringify({workerTask:'Edit README.md to fix formatting. Target file: README.md',targetFiles:['README.md']}),submissionId:'orch-sub',idempotencyKey:'orch-key',createdAt:stamp};
+      const worker:any={id:'worker-1',roleId:'worker',status:'succeeded',requestedConfig:{harnessId:'antigravity-cli',model:'gemini-fixture'},responseId:'resp-worker-1',sessionId:'session-worker-1',prompt:'Edit README.md to fix formatting. Target file: README.md',submissionId:'worker-sub',idempotencyKey:'worker-key',createdAt:stamp};
+      current.roleConfigs={worker:{harnessId:'antigravity-cli',model:'gemini-fixture'}};
+      s.roles.find(x=>x.id==='worker')!.availableConfigs=[{harnessId:'antigravity-cli',model:'gemini-fixture'}];
+      s.roles.find(x=>x.id==='worker')!.config={harnessId:'antigravity-cli',model:'gemini-fixture'};
+      current.assignments.push(orchestrator,worker);
+      current.workerProposal={id:'wprop-1',status:'dispatched',text:'Edit README.md to fix formatting. Target file: README.md',targetFiles:['README.md'],orchestratorAssignmentId:'orch-1',workerAssignmentId:'worker-1',workspaceId:'initial-ws',pinnedBaseCommit:base,createdAt:stamp};
+      current.workerEvidence={provenance:'bridge_snapshot',workerAssignmentId:'worker-1',responseId:'resp-worker-1',pinnedBaseCommit:base,completeSnapshot:{reportedComplete:true,reportedErrors:0,entryCount:1},scopeVerified:true,allowedScope:['README.md'],entries:[{path:'README.md',kind:'file',executable:false,contentBase64:priorWorkerContent}],changes:[{kind:'modify',path:'README.md',before:{path:'README.md',kind:'file',executable:false,contentBase64:Buffer.from('original').toString('base64')},after:{path:'README.md',kind:'file',executable:false,contentBase64:priorWorkerContent}}],reviewDiff:'+changed README content',acceptance:'not_decided'} as any;
+      current.validation={id:'val-1',status:'failed',passed:false,reportedPassed:false,checks:[{name:'check',passed:false}],observations:[{name:'check',command:'true',args:[],exitCode:1,timedOut:false,output:'format error',outputTruncated:false,passed:false}],policy:{requireAllChecksPass:true,configuredCheckCount:1},createdAt:stamp} as any;
+    });
+    // Trigger retry — should seed fresh workspace then apply overlay
+    const worker=await controller.retryWorkerProposal(run.id,'wprop-1');
+    expect(worker.status).toBe('succeeded');
+    expect(seededWorkspaces).toHaveLength(1);
+    expect(seededWorkspaces[0]).toBe(base);
+    // Overlay must have been sent with the prior attempt's change
+    expect(overlayRequests).toHaveLength(1);
+    expect(overlayRequests[0]!.workspaceId).toBe('retry-ws-1');
+    expect(overlayRequests[0]!.entries).toHaveLength(1);
+    expect((overlayRequests[0]!.entries[0] as any)).toMatchObject({path:'README.md',contentBase64:priorWorkerContent,mode:'100644'});
+    // overlaidPriorAssignmentId must appear in the retry_workspace_seeded event
+    const events=(await store.load()).events;
+    const seededEvent=events.find(e=>e.type==='worker.retry_workspace_seeded');
+    expect(seededEvent?.data).toMatchObject({overlaidPriorAssignmentId:'worker-1',retryKind:'validation_failed'});
+  });
+
+  it('skips overlay for transport_failure retries (no prior evidence)',async()=>{
+    const {controller,store}=await setup({submit:async()=>({externalId:'ext',status:'completed',result:'worker done',responseId:'resp-transport-retry',sessionId:'session-worker'})});
+    const base='c'.repeat(40);
+    const seededWorkspaces:string[]=[],overlayRequests:unknown[]=[];
+    const bridge=createServer((req,res)=>{
+      let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{
+        res.setHeader('content-type','application/json');const u=req.url??'';
+        if(req.method==='GET'&&u==='/v1/uhp'){res.end(JSON.stringify({capabilities:{extensions:{foreman_workspace_bridge_v1:{version:1,seed:true,complete_snapshot:true,execution_boundary:'bubblewrap'}}}}));return;}
+        if(req.method==='POST'&&u==='/extensions/foreman-workspace/v1/workspaces'){const b=JSON.parse(body);seededWorkspaces.push(b.base_commit);res.end(JSON.stringify({workspace_id:`transport-ws-${seededWorkspaces.length}`,base_commit:b.base_commit}));return;}
+        if(req.method==='POST'&&u.includes('/overlay')){overlayRequests.push(JSON.parse(body));res.end(JSON.stringify({workspace_id:'x',applied:0}));return;}
+        res.statusCode=404;res.end('{}');
+      });
+    });
+    bridge.listen(0,'127.0.0.1');await once(bridge,'listening');bridgeServers.push(bridge);
+    const {port}=bridge.address() as import('node:net').AddressInfo;
+    const stamp=new Date().toISOString();
+    controller.configureVerifiedWorkspace({repoPath:'/fixture/repo',bridgeBaseUrl:`http://127.0.0.1:${port}`,allowedScope:['README.md'],commands:[{name:'check',command:'true',args:[]}]});
+    const project:any=await controller.createProject('Transport retry test'),task:any=await controller.createTask(project.id,'Transport task'),run:any=await controller.createRun(task.id);
+    await store.mutate(s=>{
+      const current=s.projects[0]!.tasks[0]!.runs[0]!;
+      current.pinnedBaseCommit=base;current.workspaceId='transport-initial-ws';current.allowedScope=['README.md'];current.sessions.orchestrator.uhpSessionId='session-orch';
+      const orchestrator:any={id:'orch-t',roleId:'orchestrator',status:'succeeded',requestedConfig:{harnessId:'fixture',model:'model-fixture'},responseId:'resp-orch-t',sessionId:'session-orch',prompt:'plan',result:JSON.stringify({workerTask:'Edit README.md',targetFiles:['README.md']}),submissionId:'orch-sub-t',idempotencyKey:'orch-key-t',createdAt:stamp};
+      const worker:any={id:'worker-t',roleId:'worker',status:'failed',requestedConfig:{harnessId:'fixture',model:'model-fixture'},prompt:'Edit README.md',submissionId:'worker-sub-t',idempotencyKey:'worker-key-t',error:'CLI failed',createdAt:stamp};
+      current.assignments.push(orchestrator,worker);
+      current.workerProposal={id:'wprop-t',status:'dispatched',text:'Edit README.md',targetFiles:['README.md'],orchestratorAssignmentId:'orch-t',workerAssignmentId:'worker-t',workspaceId:'transport-initial-ws',pinnedBaseCommit:base,createdAt:stamp};
+    });
+    const worker=await controller.retryWorkerProposal(run.id,'wprop-t');
+    expect(worker.status).toBe('succeeded');
+    expect(seededWorkspaces).toHaveLength(1);
+    expect(overlayRequests).toHaveLength(0); // no overlay for transport failure
+  });
+
+  it('includes Worker capability text in initial orchestrate prompt',async()=>{
+    const prompts:string[]=[];
+    const {controller,store}=await setup({submit:async input=>{prompts.push(input.prompt);return {externalId:'ext',status:'completed',result:JSON.stringify({workerTask:'Edit README.md. Target file: README.md',targetFiles:['README.md']}),responseId:'resp-orch',sessionId:'session-orch'};}});
+    const run=await prepareAutomaticRun(controller,store);
+    await store.mutate(s=>{const current=s.projects[0]!.tasks[0]!.runs[0]!;current.roleConfigs={...current.roleConfigs,worker:{harnessId:'antigravity-cli',model:'gemini-fixture'}};s.roles.find(x=>x.id==='worker')!.availableConfigs=[{harnessId:'antigravity-cli',model:'gemini-fixture'}];s.roles.find(x=>x.id==='worker')!.config={harnessId:'antigravity-cli',model:'gemini-fixture'};});
+    await controller.orchestrate(run.id,'Edit README.md to add a note.');
+    const orchestratePrompts=prompts.filter(p=>p.startsWith('You are the Foreman Orchestrator'));
+    expect(orchestratePrompts).toHaveLength(1);
+    expect(orchestratePrompts[0]).toContain('The Worker can only read and edit files');
+    expect(orchestratePrompts[0]).toContain('It cannot run shell commands, formatters, tests, or package scripts');
+    expect(orchestratePrompts[0]).toContain('Foreman runs the configured checks afterwards');
+  });
+
+  it('includes capability text and workspace context in Orchestrator follow-up note for validation_failed',async()=>{
+    const prompts:string[]=[];
+    const seededBases:string[]=[],overlayMade:unknown[]=[];
+    const bridge=createServer((req,res)=>{
+      let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{
+        res.setHeader('content-type','application/json');const u=req.url??'';
+        if(req.method==='GET'&&u==='/v1/uhp'){res.end(JSON.stringify({capabilities:{extensions:{foreman_workspace_bridge_v1:{version:1,seed:true,complete_snapshot:true,execution_boundary:'bubblewrap'}}}}));return;}
+        if(req.method==='POST'&&u==='/extensions/foreman-workspace/v1/workspaces'){const b=JSON.parse(body);seededBases.push(b.base_commit);res.end(JSON.stringify({workspace_id:`followup-ws-${seededBases.length}`,base_commit:b.base_commit}));return;}
+        const om=u.match(/^\/extensions\/foreman-workspace\/v1\/workspaces\/([^/]+)\/overlay$/);
+        if(req.method==='POST'&&om){const b=JSON.parse(body);overlayMade.push(b.entries);res.end(JSON.stringify({workspace_id:om[1],applied:(b.entries as unknown[]).length}));return;}
+        res.statusCode=404;res.end('{}');
+      });
+    });
+    bridge.listen(0,'127.0.0.1');await once(bridge,'listening');bridgeServers.push(bridge);
+    const {port}=bridge.address() as import('node:net').AddressInfo;
+    const {controller,store}=await setup({submit:async input=>{prompts.push(input.prompt);return {externalId:'ext',status:'completed',result:JSON.stringify({workerTask:'Apply the fix. Target file: README.md',targetFiles:['README.md']}),responseId:`resp-${prompts.length}`,sessionId:'session-orchestrator'};}});
+    controller.configureVerifiedWorkspace({repoPath:'/fixture/repo',bridgeBaseUrl:`http://127.0.0.1:${port}`,allowedScope:['README.md'],commands:[{name:'check',command:'true',args:[]}]});
+    const project:any=await controller.createProject('Follow-up capability'),task:any=await controller.createTask(project.id,'Capability test'),run:any=await controller.createRun(task.id);
+    const stamp=new Date().toISOString(),base='a'.repeat(40);
+    const priorContent=Buffer.from('edit').toString('base64');
+    await store.mutate(s=>{
+      const current=s.projects[0]!.tasks[0]!.runs[0]!;
+      current.pinnedBaseCommit=base;current.workspaceId='ws-initial';current.allowedScope=['README.md'];current.sessions.orchestrator.uhpSessionId='session-orchestrator';
+      current.roleConfigs={worker:{harnessId:'antigravity-cli',model:'gemini-fixture'}};
+      s.roles.find(x=>x.id==='worker')!.availableConfigs=[{harnessId:'antigravity-cli',model:'gemini-fixture'}];
+      s.roles.find(x=>x.id==='worker')!.config={harnessId:'antigravity-cli',model:'gemini-fixture'};
+      const orch:any={id:'orch-fu',roleId:'orchestrator',status:'succeeded',requestedConfig:{harnessId:'fixture',model:'model-fixture'},responseId:'resp-orch-fu',sessionId:'session-orchestrator',prompt:'plan',result:JSON.stringify({workerTask:'Edit README.md. Target file: README.md',targetFiles:['README.md']}),submissionId:'sub-orch',idempotencyKey:'key-orch',createdAt:stamp};
+      const worker:any={id:'worker-fu',roleId:'worker',status:'succeeded',requestedConfig:{harnessId:'antigravity-cli',model:'gemini-fixture'},responseId:'resp-worker-fu',sessionId:'session-worker-fu',prompt:'Edit README.md. Target file: README.md',submissionId:'sub-worker',idempotencyKey:'key-worker',createdAt:stamp};
+      current.assignments.push(orch,worker);
+      current.workerProposal={id:'wprop-fu',status:'dispatched',text:'Edit README.md. Target file: README.md',targetFiles:['README.md'],orchestratorAssignmentId:'orch-fu',workerAssignmentId:'worker-fu',workspaceId:'ws-initial',pinnedBaseCommit:base,createdAt:stamp};
+      current.workerEvidence={provenance:'bridge_snapshot',workerAssignmentId:'worker-fu',responseId:'resp-worker-fu',pinnedBaseCommit:base,completeSnapshot:{reportedComplete:true,reportedErrors:0,entryCount:1},scopeVerified:true,allowedScope:['README.md'],entries:[{path:'README.md',kind:'file',executable:false,contentBase64:priorContent}],changes:[{kind:'modify',path:'README.md',before:{path:'README.md',kind:'file',executable:false,contentBase64:Buffer.from('orig').toString('base64')},after:{path:'README.md',kind:'file',executable:false,contentBase64:priorContent}}],reviewDiff:'+edit',acceptance:'not_decided'} as any;
+      current.validation={id:'val-fu',status:'failed',passed:false,reportedPassed:false,checks:[{name:'check',passed:false}],observations:[{name:'check',command:'true',args:[],exitCode:1,timedOut:false,output:'fmt fail',outputTruncated:false,passed:false}],policy:{requireAllChecksPass:true,configuredCheckCount:1},createdAt:stamp} as any;
+      current.controller={startedAt:stamp,active:false,phase:'validating',budgets:{roleTurns:{planner:3,orchestrator:2,worker:2,reviewer:2},workerAttempts:2}};
+      current.orchestratorInbox=(controller as any).buildOrchestratorInbox(current.id,current);
+    });
+    // Override verifyWorkerOutput to avoid bridge snapshot fetch; just set passed validation
+    (controller as any).verifyWorkerOutput=async(runId:string)=>{await store.mutate(s=>{const current=s.projects[0]!.tasks[0]!.runs.find(r=>r.id===runId)!;current.workerEvidence={...current.workerEvidence,acceptance:'not_decided'} as any;current.validation={id:'val-pass',status:'passed',passed:true,reportedPassed:true,checks:[{name:'check',passed:true}],observations:[],policy:{requireAllChecksPass:true,configuredCheckCount:1},createdAt:stamp} as any;});};
+    await (controller as any).runAutomaticFollowup(run.id);
+    // The first new submission is the Orchestrator follow-up containing the note
+    const followUpPrompts=prompts.filter(p=>p.includes('Foreman validation failed'));
+    expect(followUpPrompts).toHaveLength(1);
+    expect(followUpPrompts[0]).toContain('The Worker can only read and edit files');
+    expect(followUpPrompts[0]).toContain("previous attempt's changes");
+    // Also verify overlay was applied (validation_failed kind → overlay)
+    expect(overlayMade).toHaveLength(1);
+  });
 });

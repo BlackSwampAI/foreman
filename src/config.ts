@@ -12,6 +12,7 @@ export interface ForemanConfig {
   hindsightBaseUrl?: string;
   requestTimeoutMs: number;
   taskTimeoutMs: number;
+  workerTimeoutMs: number;
   workspaceSourceRepo?: string;
   workspaceBridgeUrl?: string;
   workspaceAllowedScope: string[];
@@ -60,7 +61,8 @@ export function loadConfig(): ForemanConfig {
     uhpModel,
     hindsightBaseUrl: optionalHttpUrl('HINDSIGHT_BASE_URL'),
     requestTimeoutMs: integer('FOREMAN_REQUEST_TIMEOUT_MS', 120000, 100, 120000),
-    taskTimeoutMs: integer('FOREMAN_TASK_TIMEOUT_MS', 120000, 1000, 600000),
+    taskTimeoutMs: integer('FOREMAN_TASK_TIMEOUT_MS', 180000, 1000, 900000),
+    workerTimeoutMs: integer('FOREMAN_WORKER_TIMEOUT_MS', 600000, 1000, 900000),
     workspaceSourceRepo: process.env.FOREMAN_WORKSPACE_SOURCE_REPO?.trim() || undefined,
     workspaceBridgeUrl: process.env.FOREMAN_WORKSPACE_BRIDGE_URL?.trim() || undefined,
     workspaceAllowedScope,

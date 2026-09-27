@@ -88,4 +88,22 @@ describe('LocalBridge', () => {
     await expect(manager.start(f.root)).rejects.toThrow('Select a local Git repository');
     expect(spawnFake).not.toHaveBeenCalled();
   });
+
+  it('exposes stable bridge key, state dir, and work dir for a given repo and instanceId', async () => {
+    const f = await fixture();
+    const dataDir = join(f.root, 'data');
+    const tempRoot = join(f.root, 'tmp');
+    const manager = new LocalBridge({ bridgeScript: f.bridge, dataDir, homeDir: f.home, tempDir: tempRoot });
+    const key = manager.bridgeKey(f.repo, 'proj-abc');
+    expect(key).toMatch(/^[a-f0-9]{20}$/);
+    // Same inputs produce the same key.
+    expect(manager.bridgeKey(f.repo, 'proj-abc')).toBe(key);
+    // Different instanceId produces a different key.
+    expect(manager.bridgeKey(f.repo, 'proj-xyz')).not.toBe(key);
+    // stateDir and workDir are inside their respective roots.
+    const sd = manager.stateDirForInstance(f.repo, 'proj-abc');
+    const wd = manager.workDirForInstance(f.repo, 'proj-abc');
+    expect(sd).toBe(join(dataDir, key));
+    expect(wd).toBe(join(tempRoot, 'foreman-local-bridge-work', key));
+  });
 });

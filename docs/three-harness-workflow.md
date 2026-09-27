@@ -126,11 +126,17 @@ version before making another attempt.
 ## Configure roles and create a run
 
 Wait for UHP discovery to complete. In the UI's **Roles and harnesses**
-section, select a discovered harness/model pair at Global, Project, or Run
-scope. The practical defaults use Claude Code or Codex CLI for Planner,
+settings panel (opens on Project scope by default), select a discovered
+harness/model pair at Global, Project, or Run scope. Role config follows three
+scopes: Global → Project → Run. A more specific scope overrides the less
+specific one; a **Reset to inherited** button removes the override at the
+current scope. Discovery does not overwrite a saved choice.
+
+The practical defaults use Claude Code or Codex CLI for Planner,
 Orchestrator, and Reviewer, and `antigravity-cli / gemini-3.8-flash-low` for
 Worker when that Flash model is available. Any discovered pair can be selected
-for any role. Selections remain editable per role and per run.
+for any role. The UI shows a warning when Antigravity CLI is selected for
+Planner or Orchestrator; Claude Code or Codex is recommended for those roles.
 
 Create a disposable project, task, and run for a small change. Start requires a
 successful Planner turn and queued guidance. You may pin a full Git commit SHA
@@ -143,22 +149,26 @@ returned snapshot with the pinned Git base.
 ## Run the workflow
 
 1. **Human ↔ Planner.** Send a message in the Planner conversation surface.
-   Foreman stores ordered guidance and submits one Planner turn. Planner
-   replies and assignment/session metadata appear in the run. Planner and
-   Orchestrator use separate continuing contexts.
+   Foreman stores ordered guidance and submits one Planner turn. For Claude
+   Code or Codex harnesses, the Planner receives a read-only snapshot of the
+   repository at HEAD (Read, Grep, Glob available; no write access). For
+   Antigravity CLI or when the snapshot cannot be seeded, it receives a
+   deterministic digest of the file tree, package.json, README, and
+   rarity-weighted keyword hits. Planner and Orchestrator use separate
+   continuing contexts.
 2. **Start the controller.** Click **Start work** and set the per-role turn
    budgets and Worker attempt limit. Defaults are Planner 3, Orchestrator 3,
    Worker 2, Reviewer 2, and two Worker attempts. These limits count CLI turns
    and Worker attempts; AGY token usage and internal steps are unbounded per
    CLI invocation, and AGY `max_step` is ignored. CLI counters are harness
    reports, may use different accounting, and do not establish provider
-   request counts or cost. The controller automatically
-   sends the recorded Planner request and guidance to Orchestrator. Orchestrator
-   must return a strict JSON object containing a bounded `workerTask`; only a
-   successful, bound proposal can advance the run. For an Antigravity Worker,
-   the proposal must name an exact target file. Foreman gives Orchestrator the
-   pinned in-scope file list and automatically asks for one correction if the
-   first proposal names only directories.
+   request counts or cost. The controller automatically sends the recorded
+   Planner request and guidance to Orchestrator. Orchestrator must return a
+   strict JSON object `{"workerTask":"...","targetFiles":["relative/path",...]}`;
+   scope is checked against `targetFiles` before dispatch. For an Antigravity
+   Worker, the proposal must name exact target files. If Orchestrator returns
+   an empty or soft-denied response, Foreman records the reason and retries
+   once with a clarified prompt.
 3. **Worker and evidence.** Foreman dispatches the proposal with the selected
    Worker harness/model. The Worker edits only its isolated workspace seeded
    from the pinned base. Foreman obtains and verifies the complete snapshot,

@@ -178,3 +178,97 @@ describe('GitHub integration with fake gh and disposable repositories', () => {
     expect(() => requireSameOriginWrite({ ...req, headers: { ...req.headers, host: 'localhost:3001', origin: 'http://localhost:3001' } }, { confirm: 'PUSH_RESULT_BRANCH' }, 'push', policy)).toThrow(/configured local host and port|same-origin/);
   });
 });
+
+describe('CI failure log excerpts', () => {
+  async function ciFailureFixture(options: { logLines?: string; checkUrl?: string } = {}) {
+    const root = await mkdtemp(join(tmpdir(), 'foreman-github-cifail-'));
+    dirs.push(root);
+    const repo = join(root, 'repo'), remote = join(root, 'remote.git'), data = join(root, 'data');
+    const fake = join(root, 'fake-gh');
+    await mkdir(repo);
+    git(repo, 'init', '-q'); git(repo, 'config', 'user.name', 'F'); git(repo, 'config', 'user.email', 'f@f.invalid');
+    await writeFile(join(repo, 'README.md'), 'base\n');
+    git(repo, 'add', '-A'); git(repo, 'commit', '-qm', 'base');
+    const base = git(repo, 'rev-parse', 'HEAD');
+    await writeFile(join(repo, 'README.md'), 'result\n');
+    git(repo, 'add', '-A'); git(repo, 'commit', '-qm', 'result');
+    const result = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'branch', 'foreman/results/run_cifail', result);
+    await mkdir(remote); git(remote, 'init', '--bare', '-q');
+    git(repo, 'remote', 'add', 'origin', 'https://github.com/acme/project.git');
+    git(repo, 'config', `url.file://${remote}.insteadOf`, 'https://github.com/acme/project.git');
+
+    const checkUrl = options.checkUrl ?? 'https://github.com/acme/project/actions/runs/99999/jobs/12345';
+    const logLines = options.logLines ?? [
+      'check\tRun pnpm format:check\t2024-01-01T00:00:00Z\t[warn] docs/nba-support-audit.md',
+      'check\tRun pnpm format:check\t2024-01-01T00:00:01Z\t[warn] some/other/file.md',
+      'check\tRun pnpm format:check\t2024-01-01T00:00:02Z\tCode style issues found in the above file(s). Forgot to run Prettier?',
+    ].join('\n');
+    const callsLog = join(root, 'gh-calls.json');
+    await writeFile(callsLog, '');
+    const nodePath = process.execPath;
+    const script = `#!${nodePath}\nconst fs=require('fs'),a=process.argv.slice(2);fs.appendFileSync(${JSON.stringify(callsLog)},JSON.stringify(a)+'\\n');\nif(a[0]==='auth')process.exitCode=0;\nif(a[0]==='api'&&a.some(x=>x==='user')){process.stdout.write(JSON.stringify({login:'u'})+'\\n');process.exitCode=0;}\nif(a[0]==='api'&&a.some(x=>x.includes('repos/acme/project'))&&!a.some(x=>x.includes('pulls'))&&!a.some(x=>x.includes('check-runs'))&&!a.some(x=>x.includes('status'))&&!a.some(x=>x.includes('reviews'))){process.stdout.write(JSON.stringify({default_branch:'main'})+'\\n');process.exitCode=0;}\nif(a[0]==='api'&&a.some(x=>x.includes('/pulls'))&&a[1]==='--method'&&a[2]==='GET'&&!a.some(x=>x.includes('/pulls/17'))){process.stdout.write(JSON.stringify([{number:17,html_url:'https://github.com/acme/project/pull/17',title:'T',state:'open',node_id:'PR_x',head:{sha:'${result}',ref:'foreman/results/run_cifail',repo:{full_name:'acme/project'}},base:{ref:'main'},user:{login:'u'}}])+'\\n');process.exitCode=0;}\nif(a[0]==='api'&&a.some(x=>x.includes('/pulls/17'))&&!a.some(x=>x.includes('/reviews'))&&!a.some(x=>x.includes('check-runs'))){process.stdout.write(JSON.stringify({number:17,html_url:'https://github.com/acme/project/pull/17',title:'T',state:'open',node_id:'PR_x',head:{sha:'${result}',ref:'foreman/results/run_cifail',repo:{full_name:'acme/project'}},base:{ref:'main'},user:{login:'u'}})+'\\n');process.exitCode=0;}\nif(a[0]==='pr'&&a[1]==='view'){process.stdout.write(JSON.stringify({reviewDecision:null,mergeStateStatus:'CLEAN'})+'\\n');process.exitCode=0;}\nif(a[0]==='api'&&a.some(x=>x.includes('/check-runs'))){process.stdout.write(JSON.stringify({check_runs:[{name:'Check formatting',status:'completed',conclusion:'failure',html_url:${JSON.stringify(checkUrl)},output:{summary:'Code style issues'}}]})+'\\n');process.exitCode=0;}\nif(a[0]==='api'&&a.some(x=>x.includes('/status'))){process.stdout.write(JSON.stringify({statuses:[]})+'\\n');process.exitCode=0;}\nif(a[0]==='api'&&a.some(x=>x.includes('/reviews'))){process.stdout.write(JSON.stringify([])+'\\n');process.exitCode=0;}\nif(a[0]==='pr'&&a[1]==='diff'){process.stdout.write('diff --git a/README.md b/README.md\\n+r\\n');process.exitCode=0;}\nif(a[0]==='api'&&a.some(x=>x.includes('/rules/branches/'))){process.stdout.write(JSON.stringify([])+'\\n');process.exitCode=0;}\nif(a[0]==='api'&&a[1]==='graphql'){process.stdout.write(JSON.stringify({data:{node:{mergeQueueEntry:null}}})+'\\n');process.exitCode=0;}\nif(a[0]==='run'&&a[1]==='view'){process.stdout.write(${JSON.stringify(logLines)}+'\\n');process.exitCode=0;}\nif(process.exitCode===undefined){process.stderr.write('unhandled: '+a.join(' ')+'\\n');process.exitCode=1;}`;
+    await writeFile(fake, script, { mode: 0o700 }); await chmod(fake, 0o700);
+
+    const state = initialState();
+    const projectId = 'project_cifail', runId = 'run_cifail', taskId = 'task_cifail';
+    state.projects.push({ id: projectId, name: 'CIF', status: 'active', defaultRoleConfigs: {}, createdAt: new Date().toISOString(), tasks: [{ id: taskId, title: 'CIF task', status: 'completed', createdAt: new Date().toISOString(), runs: [{ id: runId, status: 'completed', createdAt: new Date().toISOString(), sessions: {} as any, sessionHistory: [], roleConfigs: {}, guidance: [], assignments: [], reviews: [], pinnedBaseCommit: base, approval: { id: 'a', approved: true, decision: 'approved', createdAt: new Date().toISOString() }, promotion: { status: 'applied', destinationBranch: 'foreman/results/run_cifail', resultCommit: result, resultTree: git(repo, 'rev-parse', `${result}^{tree}`), updatedAt: new Date().toISOString() } }] }] });
+    const store = new JsonStore(join(data, 'state.json')); await store.mutate(s => Object.assign(s, state));
+    await saveWorkspaceSetup(data, projectId, { repoPath: repo, allowedScope: ['README.md'], validationCommands: [{ name: 'T', command: 'true', args: [] }] });
+    return { root, repo, data, store, fake, callsLog, base, result, integration: new GitHubIntegration(store, data, { ghPath: fake }) };
+  }
+
+  it('returns empty failures when no PR exists', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'foreman-cifail-nopr-'));
+    dirs.push(root);
+    const repo = join(root, 'repo'), data = join(root, 'data');
+    await mkdir(repo);
+    git(repo, 'init', '-q'); git(repo, 'config', 'user.name', 'T'); git(repo, 'config', 'user.email', 't@t.invalid');
+    await writeFile(join(repo, 'README.md'), 'x'); git(repo, 'add', '-A'); git(repo, 'commit', '-qm', 'x');
+    const base = git(repo, 'rev-parse', 'HEAD');
+    await writeFile(join(repo, 'README.md'), 'y'); git(repo, 'add', '-A'); git(repo, 'commit', '-qm', 'y');
+    const result = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'branch', 'foreman/results/run_nopr', result);
+    git(repo, 'remote', 'add', 'origin', 'https://github.com/acme/project.git');
+    const fake = join(root, 'fake-gh');
+    const nodePath = process.execPath;
+    const script = `#!${nodePath}\nconst a=process.argv.slice(2);\nif(a[0]==='auth')process.exitCode=0;\nif(a[0]==='api'&&a.some(x=>x==='user')){process.stdout.write(JSON.stringify({login:'u'})+'\\n');process.exitCode=0;}\nif(a[0]==='api'&&a.some(x=>x.includes('repos/acme/project'))&&!a.some(x=>x.includes('pulls'))){process.stdout.write(JSON.stringify({default_branch:'main'})+'\\n');process.exitCode=0;}\nif(a[0]==='api'&&a.some(x=>x.includes('/pulls'))){process.stdout.write(JSON.stringify([])+'\\n');process.exitCode=0;}\nif(process.exitCode===undefined){process.stderr.write('unhandled: '+a.join(' '));process.exitCode=1;}`;
+    await writeFile(fake, script, { mode: 0o700 }); await chmod(fake, 0o700);
+    const state = initialState();
+    state.projects.push({ id: 'project_nopr', name: 'NP', status: 'active', defaultRoleConfigs: {}, createdAt: new Date().toISOString(), tasks: [{ id: 'task_nopr', title: 'T', status: 'completed', createdAt: new Date().toISOString(), runs: [{ id: 'run_nopr', status: 'completed', createdAt: new Date().toISOString(), sessions: {} as any, sessionHistory: [], roleConfigs: {}, guidance: [], assignments: [], reviews: [], pinnedBaseCommit: base, approval: { id: 'a', approved: true, decision: 'approved', createdAt: new Date().toISOString() }, promotion: { status: 'applied', destinationBranch: 'foreman/results/run_nopr', resultCommit: result, resultTree: git(repo, 'rev-parse', `${result}^{tree}`), updatedAt: new Date().toISOString() } }] }] });
+    const store = new JsonStore(join(data, 'state.json')); await store.mutate(s => Object.assign(s, state));
+    await saveWorkspaceSetup(data, 'project_nopr', { repoPath: repo, allowedScope: ['README.md'], validationCommands: [{ name: 'T', command: 'true', args: [] }] });
+    const integration = new GitHubIntegration(store, data, { ghPath: fake });
+    const result2 = await integration.getCiFailures('run_nopr');
+    expect(result2.failures).toHaveLength(0);
+    expect(result2.source).toBe('no_pr');
+  });
+
+  it('fetches failed job logs and extracts prettier [warn] lines as excerpt', async () => {
+    const f = await ciFailureFixture();
+    const result = await f.integration.getCiFailures('run_cifail');
+    expect(result.failures.length).toBeGreaterThan(0);
+    const fail = result.failures[0]!;
+    expect(fail.jobName).toBe('check');
+    expect(fail.stepName).toBe('Run pnpm format:check');
+    expect(fail.excerpt).toContain('[warn]');
+    expect(fail.excerpt).toContain('nba-support-audit.md');
+  });
+
+  it('calls gh run view with --log-failed and passes the correct run ID', async () => {
+    const f = await ciFailureFixture({ checkUrl: 'https://github.com/acme/project/actions/runs/77777/jobs/22222' });
+    await f.integration.getCiFailures('run_cifail');
+    const callText = await import('node:fs/promises').then(fs => fs.readFile(f.callsLog, 'utf8'));
+    const calls: string[][] = callText.trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
+    const logCall = calls.find(c => c.includes('run') && c.includes('view') && c.includes('--log-failed'));
+    expect(logCall).toBeDefined();
+    expect(logCall).toContain('77777');
+  });
+
+  it('returns empty failures when check runs have no actions/runs URL', async () => {
+    const f = await ciFailureFixture({ checkUrl: 'https://ci.external.example/build/123' });
+    const result = await f.integration.getCiFailures('run_cifail');
+    expect(result.failures).toHaveLength(0);
+    expect(result.source).toBe('no_action_urls');
+  });
+});

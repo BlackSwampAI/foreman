@@ -41,6 +41,7 @@ export interface UhpSubmitResult {
   ignoredFields?: string[];
   usage?: UhpUsage | null;
   runtimeMs?: number;
+  cliFailureCategory?: string;
   response?: UhpResponse;
   reviewerExecution?: { mode?: string; mutationAttempted?: boolean; validation?: unknown };
 }
@@ -180,7 +181,7 @@ export class UhpClient implements UhpAdapter {
     const model = modelId ? discovery.harnessModels[harness.id]?.find((candidate) => candidate.id === modelId && candidate.available !== false) : undefined;
     if (!model) throw new UhpError(modelId ? `Configured UHP model '${modelId}' is unavailable for harness '${harness.id}'` : "UHP model must be explicitly configured for this submission");
 
-      const timeoutSeconds = boundedInteger(configNumber(input.config.timeoutSeconds, harness.timeoutSeconds, 120), 1, 600, "UHP timeoutSeconds");
+      const timeoutSeconds = boundedInteger(configNumber(input.config.timeoutSeconds, harness.timeoutSeconds, 120), 1, 900, "UHP timeoutSeconds");
     const timeoutMs = boundedInteger(this.options.timeoutMs ?? 10_000, 1_000, 120_000, "UHP request timeoutMs");
     const maxStep = optionalBounded(input.config.maxStep, harness.maxStep, 1000, "maxStep") ?? 100;
     const controller = new AbortController();
@@ -198,7 +199,7 @@ export class UhpClient implements UhpAdapter {
         body: JSON.stringify({
           input: input.prompt,
           model: model.id,
-          metadata: { harness_id: harness.id, foreman_submission_id: input.submissionId, foreman_assignment_id: input.assignmentId, foreman_run_id: input.runId, foreman_role_id: input.roleId, foreman_task_id: input.taskId, foreman_project_id: input.projectId, ...(input.roleId==='worker'&&typeof input.config.workspaceId==='string'?{workspace_id:input.config.workspaceId}:{}), ...(input.roleId==='reviewer'?{foreman_review_mode:'read_only',review_evidence:reviewEvidence}:{}) },
+          metadata: { harness_id: harness.id, foreman_submission_id: input.submissionId, foreman_assignment_id: input.assignmentId, foreman_run_id: input.runId, foreman_role_id: input.roleId, foreman_task_id: input.taskId, foreman_project_id: input.projectId, ...(input.roleId==='worker'&&typeof input.config.workspaceId==='string'?{workspace_id:input.config.workspaceId}:{}), ...(input.roleId==='reviewer'?{foreman_review_mode:'read_only',review_evidence:reviewEvidence}:{}), ...((input.roleId==='planner'||input.roleId==='orchestrator')&&typeof input.config.readOnlyWorkspaceId==='string'?{foreman_read_only_workspace_id:input.config.readOnlyWorkspaceId}:{}) },
           stream: true,
           store: true,
           timeout_seconds: timeoutSeconds,
@@ -249,15 +250,20 @@ export class UhpClient implements UhpAdapter {
       // A CLI can fail before it creates a resumable session or reports its model.
       // Preserve terminal failures and their diagnostics; completed responses still
       // pass the strict identity checks below.
-      if (status !== "completed" && input.roleId !== "reviewer") return {
-        externalId: final.id, responseId: final.id, ...(sessionId ? { sessionId } : {}), status,
-        requestedModel: model.id, selectedHarnessId: harness.id,
-        ...(actualModel ? { actualModel, actualModelStatus: "observed" as const } : actualModelStatus ? { actualModelStatus } : {}),
-        ...(cliInvocation ? { cliInvocation } : {}),
-        outputText: extractOutputText(responseObject), result: responseObject.error ?? responseObject,
-        ...(Object.hasOwn(responseObject, "usage") ? { usage: normalizeUsage(responseObject.usage) } : {}),
-        runtimeMs: Date.now() - startedAt,
-      };
+      if (status !== "completed" && input.roleId !== "reviewer") {
+        const nonCompletedMeta = responseObject.metadata && typeof responseObject.metadata === "object" ? responseObject.metadata as Record<string, unknown> : {};
+        const cliFailureCategory = typeof nonCompletedMeta.cli_failure_category === "string" ? nonCompletedMeta.cli_failure_category : undefined;
+        return {
+          externalId: final.id, responseId: final.id, ...(sessionId ? { sessionId } : {}), status,
+          requestedModel: model.id, selectedHarnessId: harness.id,
+          ...(actualModel ? { actualModel, actualModelStatus: "observed" as const } : actualModelStatus ? { actualModelStatus } : {}),
+          ...(cliInvocation ? { cliInvocation } : {}),
+          outputText: extractOutputText(responseObject), result: responseObject.error ?? responseObject,
+          ...(Object.hasOwn(responseObject, "usage") ? { usage: normalizeUsage(responseObject.usage) } : {}),
+          runtimeMs: Date.now() - startedAt,
+          ...(cliFailureCategory ? { cliFailureCategory } : {}),
+        };
+      }
       const modelFallback = responseMetadata.model_fallback === true || (!!actualModel && reportedRequestedModel !== undefined && actualModel !== reportedRequestedModel);
       const cliModelUnavailable = !actualModel && actualModelStatus === "unavailable" && !!cliInvocation && reportedRequestedModel === model.id && reportedHarnessId === harness.id && hasExplicitModelArgument(cliInvocation.args, model.id) && (harness.id === "antigravity-cli" || harness.id === "codex-cli");
       if (!actualModel && !cliModelUnavailable) throw new UhpError("UHP response did not report the actual model or a bound unavailable-model report");

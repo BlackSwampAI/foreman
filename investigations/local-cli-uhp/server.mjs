@@ -13,7 +13,8 @@ import { posix } from 'node:path';
 import { TextDecoder } from 'node:util';
 import { createRequire } from 'node:module';
 import { roleSessionBinding, roleStatePath, resolvePreviousRoleSession, withRoleSession } from './role-sessions.mjs';
-import { codexCliArgs } from './cli-args.mjs';
+import { claudeCodeCliArgs, codexCliArgs } from './cli-args.mjs';
+import { bwrapBaseArgs } from './bwrap-args.mjs';
 import { readClaudeControlUsage } from './claude-quota.mjs';
 
 const VERSION = '2026-09-12';
@@ -26,11 +27,15 @@ const SOURCE_REPO = process.env.LOCAL_CLI_UHP_SOURCE_REPO ? resolve(process.env.
 const BWRAP = process.env.LOCAL_CLI_UHP_BWRAP ?? 'bwrap';
 const MAX_PROMPT = 16_000;
 const MAX_OUTPUT = 64_000;
-const MAX_TIMEOUT = 120;
+const MAX_TIMEOUT = 900;
 const MAX_REVIEW_DIFF = 48_000;
 const SSE_KEEPALIVE_MS = (() => { const value = Number(process.env.LOCAL_CLI_UHP_KEEPALIVE_MS); return Number.isFinite(value) && value > 0 ? Math.min(value, 60_000) : 10_000; })();
 const AGY_WORKER_AGENT = 'foreman-worker';
 const AGY_WORKER_TOOLS = Object.freeze(['view_file','replace_file_content','multi_replace_file_content','write_to_file','finish']);
+// manage_task: classified as a planning/todo tool by assumption — no local documentation found confirming
+// it is side-effect-free. The verified snapshot diff and commandExecutionPolicy "off" remain the safety
+// boundary; any filesystem or command effect would still surface in the post-run snapshot comparison.
+const TOLERATED_AGY_TOOLS = new Set(['manage_task']);
 const AGY_WORKER_EFFORT = process.env.AGY_WORKER_EFFORT;
 if (AGY_WORKER_EFFORT !== undefined && !['low', 'medium', 'high'].includes(AGY_WORKER_EFFORT)) {
   throw new Error('AGY_WORKER_EFFORT must be low, medium, or high');
@@ -371,7 +376,22 @@ function parseAgy(text, stderr = '') {
     const nameSafe = typeof name === 'string' && /^[A-Za-z0-9_.-]{1,80}$/.test(name) ? name : 'unknown_tool';
     const errorText = `${step.tool_info?.error?.type ?? ''} ${step.tool_info?.error?.message ?? ''}`.toLowerCase();
     const errorCategory = /permission|approval|denied/.test(errorText) ? 'permission_denied' : /read.only|write|filesystem|file access/.test(errorText) ? 'file_access' : step.tool_info?.error ? 'tool_error' : undefined;
-    return { step_index:Number.isSafeInteger(step.step_index) && step.step_index >= 0 && step.step_index <= 1000000 ? step.step_index : undefined, name:nameSafe, state:typeof step.state === 'string' && /^[A-Z_]{1,24}$/.test(step.state) ? step.state : 'unknown', error_category:errorCategory };
+    let deniedPath;
+    if (errorCategory === 'permission_denied') {
+      const args = step.tool_info?.args;
+      const rawPath = args && typeof args === 'object' && !Array.isArray(args)
+        ? (args.file_path ?? args.path ?? args.target)
+        : (Array.isArray(args) ? args[0] : undefined);
+      if (typeof rawPath === 'string') {
+        if (rawPath.startsWith('/workspace/')) {
+          const rel = rawPath.slice('/workspace/'.length);
+          deniedPath = validRelativePath(rel) ? rel : 'outside workspace';
+        } else if (rawPath.startsWith('/')) { deniedPath = 'outside workspace'; }
+        else if (validRelativePath(rawPath)) { deniedPath = rawPath; }
+        else { deniedPath = 'unknown'; }
+      } else { deniedPath = 'unknown'; }
+    }
+    return { step_index:Number.isSafeInteger(step.step_index) && step.step_index >= 0 && step.step_index <= 1000000 ? step.step_index : undefined, name:nameSafe, state:typeof step.state === 'string' && /^[A-Z_]{1,24}$/.test(step.state) ? step.state : 'unknown', error_category:errorCategory, ...(deniedPath ? {denied_path:deniedPath} : {}) };
   });
   // AGY emits lifecycle updates (for example ACTIVE then DONE) for one tool
   // step. Keep the latest sanitized observation per step/name so diagnostics
@@ -397,9 +417,7 @@ function parseAgy(text, stderr = '') {
   return { text: responseText, model, session: conversation, turnCompleted: !!result, isError: result?.status !== 'SUCCESS', mutationAttempted, malformedOutput, unrecognizedOutput, usage: result?.usage && typeof result.usage === 'object' ? result.usage : undefined, diagnostic:{ permission_mode:permissionMode, observed_agent:agent ?? 'unreported', cwd, available_tools:initTools, available_tools_semantics:'headless_init_tools_available_to_cli_not_profile_allowlist', tool_events:toolEvents, tool_lifecycle_update_count:toolUpdates.length, distinct_tool_step_count:distinctToolSteps.size, reported_cli_turns:reportedCliTurns, soft_denial_observed:softDenialObserved, result_status:typeof result?.status === 'string' && /^(SUCCESS|ERROR|CANCELED|INTERRUPTED|INVALID|WAITING|RUNNING)$/.test(result.status) ? result.status : 'unreported', response_empty:responseText.length === 0, response_characters:responseText.length, streamed_agent_text_characters:chunks.reduce((n,s)=>n+s.length,0) } };
 }
 function cliArgs(kind, model, timeout, maxStep, reviewer = false, sessionId, persistentContext = false) {
-  if (kind === 'claude') return reviewer
-    ? ['-p', '--output-format', 'stream-json', '--verbose', '--model', model, '--max-turns', String(Math.min(maxStep, 2)), '--safe-mode', '--restricted', '--strict-mcp-config', '--permission-mode', 'plan', '--tools', '']
-    : ['-p', '--output-format', 'stream-json', '--verbose', '--model', model, '--max-turns', String(Math.min(maxStep, 10)), '--restricted', '--strict-mcp-config', '--permission-mode', persistentContext ? 'plan' : 'acceptEdits', '--tools', persistentContext ? 'Read' : 'Read,Edit,Write', ...(sessionId ? ['--resume', sessionId] : [])];
+  if (kind === 'claude') return claudeCodeCliArgs(model, { reviewer, sessionId, persistentContext, maxStep });
   return codexCliArgs(model, { reviewer, sessionId, persistentContext });
 }
 function agyArgs(model, timeout, conversationId, reviewer = false, worker = false) {
@@ -407,20 +425,23 @@ function agyArgs(model, timeout, conversationId, reviewer = false, worker = fals
 }
 
 function agyWorkerAgentDocument() {
-  return `---\nname: ${AGY_WORKER_AGENT}\ndescription: Foreman isolated file editing worker\nmainAgent: true\nsubagent: false\nexcludeDefaultComponents: true\ncommandExecutionPolicy: "off"\ntools:\n${AGY_WORKER_TOOLS.map(tool => `  - ${tool}`).join('\n')}\n---\nUse only the listed file tools to make the requested change in the assigned workspace. Use the exact relative file paths named in the task; do not enumerate directories or infer additional paths. If the task names no target path, report that and make no change. Never run terminal commands. Foreman will inspect the complete snapshot and validate the change.\n`;
+  return `---\nname: ${AGY_WORKER_AGENT}\ndescription: Foreman isolated file editing worker\nmainAgent: true\nsubagent: false\nexcludeDefaultComponents: true\ncommandExecutionPolicy: "off"\ntools:\n${AGY_WORKER_TOOLS.map(tool => `  - ${tool}`).join('\n')}\n---\nUse only the listed file tools to make the requested change in the assigned workspace. Use the exact relative file paths named in the task; do not enumerate directories or infer additional paths. If the task names no target path, report that and make no change. Never run terminal commands. Do not use task-management or planning tools (such as manage_task); they are not part of the Worker profile and will be flagged. Foreman will inspect the complete snapshot and validate the change.\n`;
 }
 
 function agyWorkerToolPolicy(observedAgent, toolEvents) {
   const observed = Array.isArray(toolEvents) ? toolEvents.map(event => event.name).filter(name => typeof name === 'string') : [];
   const expected = [...AGY_WORKER_TOOLS].sort();
-  const unsafeToolEvents = [...new Set(observed.filter(name => !AGY_WORKER_TOOLS.includes(name)))];
-  return { expected_profile_tools:expected, selected_agent:typeof observedAgent === 'string' ? observedAgent : 'unreported', selected_agent_matches:observedAgent === AGY_WORKER_AGENT, observed_executed_tool_events:observed, unsafe_tool_events:unsafeToolEvents, executed_tools_within_profile:unsafeToolEvents.length === 0 };
+  const unsafeToolEvents = [...new Set(observed.filter(name => !AGY_WORKER_TOOLS.includes(name) && !TOLERATED_AGY_TOOLS.has(name)))];
+  const toleratedToolEvents = [...new Set(observed.filter(name => TOLERATED_AGY_TOOLS.has(name)))];
+  return { expected_profile_tools:expected, selected_agent:typeof observedAgent === 'string' ? observedAgent : 'unreported', selected_agent_matches:observedAgent === AGY_WORKER_AGENT, observed_executed_tool_events:observed, unsafe_tool_events:unsafeToolEvents, ...(toleratedToolEvents.length ? {tolerated_tool_events:toleratedToolEvents} : {}), executed_tools_within_profile:unsafeToolEvents.length === 0 };
 }
 
 function agyWorkerPolicyFailureMessage(diagnostic) {
-  return diagnostic?.observed_agent === 'unreported'
-    ? 'AGY Worker did not emit an initialization event identifying the selected agent'
-    : 'AGY Worker selected the wrong agent or executed an out-of-profile tool';
+  if (diagnostic?.observed_agent === 'unreported') return 'AGY Worker did not emit an initialization event identifying the selected agent';
+  if (!diagnostic?.selected_agent_matches) return 'AGY Worker selected the wrong agent; retry, or switch the Worker model';
+  const unsafe = Array.isArray(diagnostic?.unsafe_tool_events) ? diagnostic.unsafe_tool_events : [];
+  if (unsafe.length > 0) return `The Worker used AGY's \`${unsafe[0]}\` tool, which Foreman's Worker profile doesn't allow; retry, or switch the Worker model.`;
+  return 'AGY Worker executed an out-of-profile tool';
 }
 
 function agyWorkerPrompt(prompt) {
@@ -495,6 +516,35 @@ async function seedWorkspace(baseCommit) {
     state.workspaces[id] = { baseCommit: sha }; await persist();
     return ws;
   } catch (error) { await rm(dir, { recursive: true, force: true }); throw error; }
+}
+async function overlayWorkspace(ws, entries) {
+  if (!Array.isArray(entries)) throw Error('Overlay entries must be an array');
+  if (entries.length > 10_000) throw Error('Overlay entry limit exceeded');
+  let total = 0;
+  for (const entry of entries) {
+    const path = entry?.path;
+    if (!validRelativePath(path)) throw Error(`Unsafe or missing overlay path: ${JSON.stringify(path)}`);
+    if (entry.delete === true) continue;
+    if (typeof entry.contentBase64 !== 'string') throw Error(`Overlay entry missing contentBase64: ${path}`);
+    const bytes = Buffer.from(entry.contentBase64, 'base64');
+    if (bytes.toString('base64') !== entry.contentBase64) throw Error(`Non-canonical base64 in overlay entry: ${path}`);
+    const mode = entry.mode;
+    if (!['100644', '100755', '120000'].includes(mode)) throw Error(`Unsupported overlay entry mode: ${path}`);
+    if (bytes.length > 16 * 1024 * 1024 || (total += bytes.length) > 256 * 1024 * 1024) throw Error(`Overlay entry size limit exceeded: ${path}`);
+    if (mode === '120000') {
+      const target = bytes.toString('utf8');
+      if (linkEscapes(path, target)) throw Error(`Overlay symlink escapes workspace: ${path}`);
+    }
+  }
+  for (const entry of entries) {
+    const target = join(ws.dir, ...entry.path.split('/'));
+    if (entry.delete === true) { await rm(target, { force: true }); continue; }
+    const bytes = Buffer.from(entry.contentBase64, 'base64');
+    await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+    if (entry.mode === '120000') { await rm(target, { force: true }); await symlink(bytes.toString('utf8'), target); }
+    else { await writeFile(target, bytes, { mode: entry.mode === '100755' ? 0o755 : 0o644, flag: 'w' }); await chmod(target, entry.mode === '100755' ? 0o755 : 0o644); }
+  }
+  return { applied: entries.length };
 }
 async function snapshotWorkspace(ws) {
   const entries = []; const errors = []; let total = 0;
@@ -605,17 +655,7 @@ async function resolveCaBundle() {
   }
   throw Error('host_ca_bundle_unavailable');
 }
-function bwrapBaseArgs(ws, runtime = [], readOnlyWorkspace = false, mountAuth = true) {
-  const dirs = new Set(['/tmp/cli-home', '/opt', '/etc', '/etc/ssl', '/etc/ssl/certs']);
-  for (const file of runtime) {
-    let parent = dirname(file);
-    while (parent !== '/') { dirs.add(parent); parent = dirname(parent); }
-  }
-  const dirArgs = [...dirs].sort((a, b) => a.split('/').length - b.split('/').length).flatMap(dir => ['--dir', dir]);
-  const mounts = runtime.flatMap(file => ['--ro-bind', file, file]);
-  const resolverMounts = ['/etc/hosts','/etc/nsswitch.conf','/etc/resolv.conf'].flatMap(path => ['--ro-bind', path, path]);
-  return ['--die-with-parent', '--new-session', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', ...dirArgs, ...mounts, ...resolverMounts, readOnlyWorkspace ? '--ro-bind' : '--bind', ws.dir, '/workspace', '--chdir', '/workspace', ...(mountAuth ? ['--ro-bind', ws.authDir, '/auth'] : [])];
-}
+// bwrapBaseArgs imported from ./bwrap-args.mjs
 
 const CLAUDE_ROLE_DIRS = ['projects','session-env','file-history','todos','plans','tasks','sessions','shell-snapshots','jobs','daemon','state'];
 async function claudeAuthMountArgs(ws) {
@@ -895,12 +935,14 @@ async function runTask(record, prompt) {
   const persistentRole = record.metadata.role_session_binding !== undefined;
   const roleStatePath = persistentRole ? record.metadata.role_session_state_path : undefined;
   const ws = !reviewer && record.metadata.workspace_id ? workspaces.get(record.metadata.workspace_id) : undefined;
-  const work = ws?.dir ?? (reviewer ? join(ROOT, `review-${randomUUID()}`) : join(roleStatePath, 'context'));
+  const roWsId = typeof record.metadata.foreman_read_only_workspace_id === 'string' ? record.metadata.foreman_read_only_workspace_id : undefined;
+  const roWs = persistentRole && roWsId ? workspaces.get(roWsId) : undefined;
+  const work = ws?.dir ?? roWs?.dir ?? (reviewer ? join(ROOT, `review-${randomUUID()}`) : join(roleStatePath, 'context'));
   if (!ws && !reviewer && !persistentRole) throw Error('Worker workspace binding is unavailable');
-  if (!ws) await mkdir(work, { recursive: persistentRole, mode: 0o700 });
-  const taskWorkspace = ws ?? { id: record.id, dir: work, roleStatePath, executionStage: 'task_setup' };
+  if (!ws && !roWs) await mkdir(work, { recursive: persistentRole, mode: 0o700 });
+  const taskWorkspace = ws ?? roWs ?? { id: record.id, dir: work, roleStatePath, executionStage: 'task_setup' };
   if (persistentRole) {
-    record.metadata.execution_boundary = { reviewer_read_only: true, project_workspace_mounted: false, workspace_writable: false, role_context_isolated: true, proven: true };
+    record.metadata.execution_boundary = { reviewer_read_only: true, project_workspace_mounted: !!roWs, workspace_writable: false, role_context_isolated: true, proven: true };
   }
   if (reviewer) { tasks.get(record.id).reviewerWorkDir = work; await chmod(work, 0o500); record.metadata.reviewer_boundary = { project_workspace_mounted: false, workspace_writable: false, claude_tool_allowlist_empty: kind === 'claude', codex_sandbox: kind === 'codex-cli' ? 'read-only' : undefined, codex_mutation_tools: kind === 'codex-cli' ? 'blocked_by_read_only_sandbox' : undefined }; }
   const inheritedNames = new Set(['PATH','HOME','USER','LOGNAME','LANG','LC_ALL','TERM','TMPDIR','TMP','TEMP','XDG_RUNTIME_DIR','SSL_CERT_FILE','SSL_CERT_DIR','NODE_EXTRA_CA_CERTS','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY','DBUS_SESSION_BUS_ADDRESS']);
@@ -975,6 +1017,7 @@ async function runTask(record, prompt) {
   const agyWorkerPolicy = agyWorker ? agyWorkerToolPolicy(parsed.diagnostic.observed_agent, parsed.diagnostic.tool_events) : undefined;
   const invalidAgyWorkerPolicy = !!agyWorker && (!agyWorkerPolicy?.selected_agent_matches || !agyWorkerPolicy.executed_tools_within_profile);
   if (agyWorkerPolicy) record.metadata.agy_worker_tool_policy = { ...agyWorkerPolicy, configured_agent: AGY_WORKER_AGENT, command_execution_policy: 'off', available_tools_are_diagnostic_only:true, execution_observations_passed: !invalidAgyWorkerPolicy };
+  if (agyWorkerPolicy?.tolerated_tool_events?.length) record.metadata.tolerated_tool_warning = `Worker used tolerated AGY built-in tool(s) (assumed no filesystem/command effect; snapshot diff and commandExecutionPolicy "off" are the safety boundary): ${agyWorkerPolicy.tolerated_tool_events.join(', ')}`;
   record.status = active.cancelRequested ? 'cancelled' : spawnError ? 'failed' : parsed.isError || invalidJsonStream || invalidAgyWorkerPolicy || missingReportedIdentity || reviewerFailed ? 'failed' : exit.code === 0 ? 'completed' : exit.signal === 'SIGTERM' ? 'incomplete' : 'failed';
   record.output_text = parsed.text;
   if (parsed.model) record.model = parsed.model;
@@ -1009,6 +1052,14 @@ async function runTask(record, prompt) {
   if (reviewer) { record.metadata.foreman_review_mode = 'read_only'; record.metadata.reviewer_mutation_attempted = parsed.mutationAttempted === true; record.metadata.reviewer_output_overflow = cliOutputOverflow; record.metadata.reviewer_validation = record.metadata.review_evidence.controllerValidation; if (kind === 'agy') record.metadata.reviewer_boundary = { ...record.metadata.reviewer_boundary, tool_attempts_blocked: parsed.mutationAttempted === true, proven: true }; }
   if (kind !== 'claude' && !reviewer) record.metadata.cli_output_overflow = cliOutputOverflow;
   if (record.status !== 'completed') record.error = { message: spawnError ? 'CLI could not be started' : invalidAgyWorkerPolicy ? agyWorkerPolicyFailureMessage(parsed.diagnostic) : reviewer && parsed.mutationAttempted ? 'Reviewer attempted to use a tool or mutate state' : cliOutputOverflow ? 'CLI output exceeded the bounded stream limit' : (reviewer || kind !== 'claude') && (parsed.malformedOutput || parsed.unrecognizedOutput) ? 'CLI output contained malformed or unrecognized stream records' : kind === 'codex-cli' && !reviewer && !parsed.session ? exit.code !== 0 || exit.signal ? 'Codex CLI exited before reporting a session id' : 'Codex CLI did not report a session id' : (kind === 'codex-cli' || kind === 'agy') && !reviewer && !parsed.turnCompleted ? `${kind === 'agy' ? 'Antigravity CLI' : 'Codex CLI'} exited without completing a turn` : parsed.isError ? kind === 'claude' ? 'Claude Code reported an unsuccessful task' : kind === 'agy' ? 'Antigravity CLI reported an unsuccessful task' : 'Codex CLI reported an unsuccessful task' : missingReportedIdentity ? 'CLI did not report an actual model and session id' : active.cancelRequested ? 'CLI task was cancelled' : exit.signal ? `CLI terminated by ${exit.signal}` : 'CLI exited unsuccessfully' };
+  if (record.error && kind === 'agy') {
+    const denied = (parsed.diagnostic?.tool_events ?? []).filter(e => e.error_category === 'permission_denied');
+    if (denied.length >= 3) {
+      const examples = [...new Set(denied.map(e => e.denied_path).filter(p => p && p !== 'unknown' && p !== 'outside workspace'))].slice(0, 2);
+      const ex = examples.length ? ` (e.g. ${examples.map(p => `${p}: not in workspace`).join('; ')})` : '';
+      record.error.message += `; ${denied.length} file operation${denied.length === 1 ? '' : 's'} were denied${ex}`;
+    }
+  }
   if (persistentRole && parsed.session) {
     record.metadata.role_session = { binding: record.metadata.role_session_binding, cli_session_id: parsed.session, state_path: record.metadata.role_session_state_path };
   }
@@ -1240,6 +1291,16 @@ const server = createServer(async (req, res) => {
       const b = await body(req); const ws = await seedWorkspace(b.base_commit);
       return send(res, 201, { workspace_id: ws.id, base_commit: ws.baseCommit });
     }
+    const overlayPath = url.pathname.match(/^\/extensions\/foreman-workspace\/v1\/workspaces\/([^/]+)\/overlay$/);
+    if (req.method === 'POST' && overlayPath) {
+      const ws = workspaces.get(decodeURIComponent(overlayPath[1]));
+      if (!ws) return send(res, 404, { error: { code: 'workspace_not_found' } });
+      const response = ws.responseId ? state.responses[ws.responseId] : undefined;
+      if (response?.status === 'in_progress') return send(res, 409, { error: { code: 'workspace_task_in_progress' } });
+      const b = await body(req);
+      const result = await overlayWorkspace(ws, b.entries);
+      return send(res, 200, { workspace_id: ws.id, applied: result.applied });
+    }
     const snapshotPath = url.pathname.match(/^\/extensions\/foreman-workspace\/v1\/workspaces\/([^/]+)\/snapshot$/);
     if (req.method === 'GET' && snapshotPath) {
       const ws = workspaces.get(decodeURIComponent(snapshotPath[1]));
@@ -1293,10 +1354,12 @@ const server = createServer(async (req, res) => {
       const reviewer = b.metadata?.foreman_review_mode === 'read_only';
       const roleId = b.metadata?.foreman_role_id ?? b.metadata?.role_id;
       const persistentRole = roleId === 'planner' || roleId === 'orchestrator';
+      const roWorkspaceId = typeof b.metadata?.foreman_read_only_workspace_id === 'string' ? b.metadata.foreman_read_only_workspace_id : undefined;
       let roleSession;
       if (b.previous_response_id !== undefined && !persistentRole) return send(res, 400, { error: { code: 'session_role_unsupported' } });
       if (persistentRole) {
         if (workspaceId || reviewer) return send(res, 400, { error: { code: 'role_workspace_forbidden' } });
+        if (roWorkspaceId && !workspaces.has(roWorkspaceId)) return send(res, 409, { error: { code: 'workspace_required', message: 'foreman_read_only_workspace_id references an unknown workspace' } });
         try {
           const binding = roleSessionBinding({ run_id: b.metadata?.foreman_run_id, role_id: roleId, harness_id: h.id, model: b.model, project_id: b.metadata?.foreman_project_id });
           roleSession = resolvePreviousRoleSession({ previousResponseId: b.previous_response_id, responses: state.responses, expectedBinding: binding, rootDir: ROOT });

@@ -68,6 +68,19 @@ export class LocalBridge {
 
   get status(): LocalBridgeStatus | undefined { return this.active; }
 
+  /** Compute the key used for a given repoPath + instanceId pair. */
+  bridgeKey(repoPath: string, instanceId: string): string {
+    return createHash('sha256').update(`${repoPath}\0${instanceId}`).digest('hex').slice(0, 20);
+  }
+  /** Absolute path to the bridge state directory for a given repoPath + instanceId pair. */
+  stateDirForInstance(repoPath: string, instanceId: string): string {
+    return resolve(this.options.dataDir, this.bridgeKey(repoPath, instanceId));
+  }
+  /** Absolute path to the bridge work directory for a given repoPath + instanceId pair. */
+  workDirForInstance(repoPath: string, instanceId: string): string {
+    return join(this.options.tempDir, 'foreman-local-bridge-work', this.bridgeKey(repoPath, instanceId));
+  }
+
   async start(repoPath: string, instanceId = repoPath): Promise<LocalBridgeStatus> {
     const repo = await isGitRepo(repoPath);
     if (this.active?.repoPath === repo && this.activeInstanceId === instanceId && this.child && this.child.exitCode === null) return this.active;

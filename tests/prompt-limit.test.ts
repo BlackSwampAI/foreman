@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Controller, type UhpAdapter } from '../src/controller.js';
+import { Controller, workerProposalScopeIssue, type UhpAdapter } from '../src/controller.js';
 import { JsonStore } from '../src/store.js';
 
 const dirs: string[] = [];
@@ -34,6 +34,31 @@ async function setup(adapter: Partial<UhpAdapter> = {}) {
 }
 
 describe('UHP prompt size and stopped-run recovery', () => {
+  it('enforces scope via targetFiles and ignores prose; legacy fallback passes non-AGY and uses Target file: lines for AGY', () => {
+    const scope = ['docs/'];
+    // targetFiles in scope — prose with e.g., NBA-compatible/NFL-only/unverified, GET /v1/state/{sport} does not matter
+    expect(workerProposalScopeIssue(['docs/api-matrix.md'], scope)).toBeUndefined();
+    // regression: workerTask mentioning "e.g." and API route example with targetFiles in scope passes
+    expect(workerProposalScopeIssue(['nodes/Sleeper/transport/sleeperApiRequest.ts'], ['nodes/'])).toBeUndefined();
+    // out-of-scope targetFile is rejected with the standard message
+    expect(workerProposalScopeIssue(['docs/api-matrix.md', 'src/controller.ts'], scope)).toContain('outside the allowed scope: src/controller.ts');
+    // absolute path is rejected
+    expect(workerProposalScopeIssue(['/etc/passwd'], scope)).toContain('outside the allowed scope: /etc/passwd');
+    // path traversal is rejected
+    expect(workerProposalScopeIssue(['../secret.ts'], scope)).toContain('outside the allowed scope: ../secret.ts');
+    // non-AGY with no targetFiles: legacy pass (post-diff verification enforces scope)
+    expect(workerProposalScopeIssue(undefined, scope)).toBeUndefined();
+    // AGY with no targetFiles and no Target file: line: requires a target
+    expect(workerProposalScopeIssue(undefined, scope, true)).toContain('Antigravity Worker requires');
+    // AGY with no targetFiles but a valid Target file: line in the task text: passes
+    expect(workerProposalScopeIssue(undefined, scope, true, [], 'Target file: docs/api-matrix.md. Update the coverage table.')).toBeUndefined();
+    // AGY with no targetFiles but an out-of-scope Target file: line: rejected
+    expect(workerProposalScopeIssue(undefined, scope, true, [], 'Target file: src/controller.ts. Fix the bug.')).toContain('outside the allowed scope: src/controller.ts');
+    // AGY with explicit empty targetFiles: requires a target
+    expect(workerProposalScopeIssue([], scope, true)).toContain('Antigravity Worker requires');
+    // AGY with targetFiles in scope: passes
+    expect(workerProposalScopeIssue(['docs/api-matrix.md'], scope, true)).toBeUndefined();
+  });
   it('stores the complete Reviewer rationale without clipping it', async () => {
     const { controller, store, run } = await setup();
     const current = (await store.load()).projects[0]!.tasks[0]!.runs[0]!;
@@ -221,7 +246,7 @@ describe('UHP prompt size and stopped-run recovery', () => {
 
     await store.mutate(state => {
       const current = state.projects[0]!.tasks[0]!.runs[0]!;
-      current.assignments.find(item => item.id === 'orchestrator-saved-plan')!.result = JSON.stringify({ workerTask: 'Target file: /state/nba' });
+      current.assignments.find(item => item.id === 'orchestrator-saved-plan')!.result = JSON.stringify({ workerTask: 'Update docs/api-matrix.md.', targetFiles: ['/state/nba'] });
       current.controller = { ...current.controller!, active: false, phase: 'stopped' };
       current.status = 'awaiting_approval';
     });

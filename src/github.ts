@@ -21,6 +21,8 @@ export interface GitHubRunStatus {
   remoteBranchSha?:string|null; remoteBranchStatus?:'matching'|'missing'|'different'|'unavailable';
   pullRequest?:GitHubPullRequest; message?:string; actionResult?:string;
 }
+export interface CiJobFailure { jobName:string; stepName:string; excerpt:string }
+export interface CiFailures { runId:string; failures:CiJobFailure[]; source?:string }
 export interface GitHubIntegrationOptions { ghPath?:string; timeoutMs?:number; outputLimitBytes?:number }
 
 const SHA=/^[a-f0-9]{40}$/i;
@@ -80,8 +82,9 @@ export class GitHubIntegration {
     if(status.remoteBranchStatus!=='matching'||status.remoteBranchSha?.toLowerCase()!==context.run.promotion!.resultCommit!.toLowerCase())throw httpError(409,'The remote result branch is not verified at Foreman’s promoted commit. Push the result branch and refresh status before opening a PR.');
     const branch=context.run.promotion!.destinationBranch!;
     const baseBranch=await this.defaultBranch(context);
-    const title=`Foreman result ${runId}`;
-    const body=`Human-approved Foreman result for run ${runId}.\n\nCommit: ${context.run.promotion!.resultCommit}`;
+    const draft=context.run.prDraft;
+    const title=draft?.title??`Foreman result ${runId}`;
+    const body=draft?.body??`Human-approved Foreman result for run ${runId}.\n\nCommit: ${context.run.promotion!.resultCommit}`;
     await this.gh(['pr','create','--repo',context.repository,'--head',branch,'--base',baseBranch,'--title',title,'--body',body]);
     return {...await this.getRunStatus(runId),actionResult:'Pull request created.'};
   }
@@ -151,6 +154,58 @@ export class GitHubIntegration {
     await this.git(context.repoPath,['fetch','--no-tags',context.remoteName,baseBranch]);
     await this.git(context.repoPath,['merge','--ff-only',`${context.remoteName}/${baseBranch}`]);
     return {...await this.getRunStatus(runId),actionResult:`Fetched ${context.remoteName}/${baseBranch} and fast-forwarded the clean local ${baseBranch} checkout. You can now start a dependent Foreman task.`};
+  }
+
+  /** Fetch per-job log excerpts for the failed CI runs on this PR. Read-only. */
+  async getCiFailures(runId:string):Promise<CiFailures>{
+    const context=await this.context(runId);
+    const pr=await this.findPullRequest(context);
+    if(!pr)return {runId,failures:[],source:'no_pr'};
+    const details=await this.pullRequestDetails(context,pr,'').catch(()=>undefined);
+    if(!details)return {runId,failures:[],source:'pr_unavailable'};
+    const failedChecks=details.checks.filter(c=>['failure','timed_out','cancelled','action_required','startup_failure'].includes(c.conclusion??''));
+    if(!failedChecks.length)return {runId,failures:[],source:'no_failures'};
+    // Extract GitHub Actions run IDs from detailsUrl: .../actions/runs/RUN_ID/jobs/JOB_ID
+    const ciRunIds=new Map<string,string>(); // runId -> jobName
+    for(const check of failedChecks){
+      if(!check.detailsUrl)continue;
+      const m=check.detailsUrl.match(/\/actions\/runs\/(\d+)/);
+      if(m&&m[1])ciRunIds.set(m[1]!,check.name);
+    }
+    if(!ciRunIds.size)return {runId,failures:[],source:'no_action_urls'};
+    const failures:CiJobFailure[]=[];
+    const MAX_LOG=32_768; // 32KB per run log
+    for(const [ghRunId] of ciRunIds){
+      let logText='';
+      try{
+        const result=await this.gh(['run','view',ghRunId,'--log-failed','--repo',context.repository]);
+        logText=result.stdout;
+      }catch{continue;}
+      // Strip ANSI codes
+      logText=logText.replace(/\u001b(?:\[[0-9;]*[mGKHFJA-Za-z]|\][^\u0007]*\u0007|[PX^_][^\u001b]*\u001b\\)/g,'');
+      // Parse tab-separated log lines: JOB\tSTEP\tTIMESTAMP\tCONTENT (or JOB\tSTEP\tCONTENT)
+      const jobStepLines=new Map<string,string[]>();
+      for(const line of logText.slice(0,MAX_LOG).split('\n')){
+        const parts=line.split('\t');
+        if(parts.length>=3){
+          const jobName=parts[0]!.trim();
+          const stepName=parts[1]!.trim();
+          // Content is the rest (may include timestamp as part[2] and actual content as part[3])
+          const content=parts.length>=4?parts.slice(3).join('\t'):parts.slice(2).join('\t');
+          const key=`${jobName}\x00${stepName}`;
+          if(!jobStepLines.has(key))jobStepLines.set(key,[]);
+          jobStepLines.get(key)!.push(content);
+        }
+      }
+      for(const [key,lines] of jobStepLines){
+        const [jobName,stepName]=key.split('\x00') as [string,string];
+        // Keep last 40 lines, highlight relevant ones
+        const relevant=lines.filter(l=>/\[warn\]|\berror\b|error TS\d|FAIL\b|AssertionError|Expected|✕|×/.test(l));
+        const excerpt=(relevant.length?relevant:lines).slice(-40).join('\n').trim().slice(0,2000);
+        if(excerpt)failures.push({jobName,stepName,excerpt});
+      }
+    }
+    return {runId,failures};
   }
 
   private async promotedContext(runId:string):Promise<RunContext>{

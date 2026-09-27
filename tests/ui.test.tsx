@@ -1,7 +1,49 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { describe, expect, it } from 'vitest';
-import { App, type State, type TaskStartPreview } from '../ui/main.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { App, debounce, type State, type TaskStartPreview } from '../ui/main.js';
+import { DecisionPanel, type DecisionPanelProps } from '../ui/decision-panel.js';
+import { ChecksPipeline, type StationObservation, type GithubCheckEntry } from '../ui/checks-pipeline.js';
+import { parseChecksSummary } from '../ui/check-output.js';
+import { PrDraftPanel, type PrDraftData } from '../ui/pr-draft.js';
+
+describe('debounce helper',()=>{
+  beforeEach(()=>{ vi.useFakeTimers(); });
+  afterEach(()=>{ vi.useRealTimers(); });
+
+  it('delays execution until wait ms after the last call',()=>{
+    const fn=vi.fn();
+    const d=debounce(fn,200);
+    d();d();d();
+    expect(fn).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(199);
+    expect(fn).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it('fires at most once during rapid calls when maxWait elapses',()=>{
+    const fn=vi.fn();
+    const d=debounce(fn,200,500);
+    // Simulate rapid calls over 600 ms (past maxWait).
+    for(let i=0;i<6;i++){d();vi.advanceTimersByTime(100);}
+    // maxWait (500 ms) elapsed during the loop → should have fired once.
+    expect(fn).toHaveBeenCalledTimes(1);
+    // After the burst stops, trailing call fires too.
+    vi.advanceTimersByTime(200);
+    expect(fn).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not fire again if debounced after maxWait already fired',()=>{
+    const fn=vi.fn();
+    const d=debounce(fn,200,500);
+    d();
+    vi.advanceTimersByTime(500); // maxWait fires
+    expect(fn).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(200); // trailing timer should already be cleared
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe('project Planner UI',()=>{
   it('shows the continuing Planner, task tree, start controls, and named navigation with inline icons',()=>{
@@ -114,11 +156,15 @@ describe('project Planner UI',()=>{
     const correctionFailedHtml=renderToStaticMarkup(createElement(App,{initialState:correctionFailed}));expect(correctionFailedHtml).toContain('Run stopped');expect(correctionFailedHtml).not.toContain('Recovered for human review');expect(correctionFailedHtml).toContain('UHP response did not report its session id');
   });
   it('offers explicit reuse of a saved initial Worker proposal on a stopped run',()=>{
-    const state:State={projects:[{id:'prj_saved_initial',name:'Saved proposal project',tasks:[{id:'tsk_saved_initial',title:'Map NBA coverage',status:'in progress',runs:[{id:'run_saved_initial',status:'failed',controller:{startedAt:'2026-09-25T12:00:00.000Z',phase:'stopped',active:false,stoppedReason:'Orchestrator did not return a valid bounded Worker proposal',budgets:{roleTurns:{planner:2,orchestrator:1,worker:1,reviewer:1},workerAttempts:1}},assignments:[{id:'asgn_saved_initial',roleId:'orchestrator',status:'succeeded',createdAt:'2026-09-25T12:01:00.000Z',result:JSON.stringify({workerTask:'Target file: docs/api-matrix.md. Inspect nodes/Sleeper/Sleeper.node.ts, SportDescription.ts, and LeagueDescription.ts.'})}]}]}]}],roles:[],events:[{id:'saved_initial_invalid',type:'orchestrator.proposal_invalid',entityType:'run',entityId:'run_saved_initial',at:'2026-09-25T12:02:00.000Z',data:{assignmentId:'asgn_saved_initial',reason:'Worker proposal references a path outside the allowed scope: LeagueDescription.ts'}}]};
+    const state:State={projects:[{id:'prj_saved_initial',name:'Saved proposal project',tasks:[{id:'tsk_saved_initial',title:'Map NBA coverage',status:'in progress',runs:[{id:'run_saved_initial',status:'failed',controller:{startedAt:'2026-09-25T12:00:00.000Z',phase:'stopped',active:false,stoppedReason:'Worker proposal references a path outside the allowed scope: LeagueDescription.ts',budgets:{roleTurns:{planner:2,orchestrator:1,worker:1,reviewer:1},workerAttempts:1}},assignments:[{id:'asgn_saved_initial',roleId:'orchestrator',status:'succeeded',createdAt:'2026-09-25T12:01:00.000Z',result:JSON.stringify({workerTask:'Target file: docs/api-matrix.md. Inspect nodes/Sleeper/Sleeper.node.ts, SportDescription.ts, and LeagueDescription.ts.'})}]}]}]}],roles:[],events:[{id:'saved_initial_invalid',type:'orchestrator.proposal_invalid',entityType:'run',entityId:'run_saved_initial',at:'2026-09-25T12:02:00.000Z',data:{assignmentId:'asgn_saved_initial',reason:'Worker proposal references a path outside the allowed scope: LeagueDescription.ts'}}]};
     const html=renderToStaticMarkup(createElement(App,{initialState:state}));
     expect(html).toContain('>Resume saved Worker proposal</button>');
-    expect(html).toContain('Saved proposal rejection: Worker proposal references a path outside the allowed scope: LeagueDescription.ts');
+    expect(html.match(/Worker proposal references a path outside the allowed scope: LeagueDescription\.ts/g)).toHaveLength(1);
+    expect(html).not.toContain('Saved proposal rejection:');
     expect(html).toContain('It will not make another Orchestrator call, approve the result, or promote it.');
+    expect(html).toContain('role="group" aria-label="Saved Worker proposal recovery"');
+    expect(html).toContain('class="saved-proposal-actions"');
+    expect(html).toContain('aria-describedby="saved-proposal-resume-description"');
     const unrelated=structuredClone(state);unrelated.events![0]!.data.assignmentId='another-assignment';
     expect(renderToStaticMarkup(createElement(App,{initialState:unrelated}))).not.toContain('>Resume saved Worker proposal</button>');
   });
@@ -186,5 +232,552 @@ describe('project Planner UI',()=>{
     const state:State={projects:[{id:'prj_no_run',name:'No run project',tasks:[{id:'tsk_no_run',title:'Ready task',runs:[]}]}],roles:[{id:'worker',name:'Worker',enabled:true,config:{harnessId:'codex',model:'gpt-6-sol'},availableConfigs:[{harnessId:'codex',model:'gpt-6-sol'}]}]};
     const html=renderToStaticMarkup(createElement(App,{initialState:state}));
     expect(html).toContain('class="outline small settings-button" type="button">Settings</button>');expect(html).not.toContain('aria-label="Configuration scope"');expect(html).not.toContain('id="roles"');expect(html).not.toContain('/api/runs/undefined/roles/worker/config');
+  });
+});
+describe('antigravity-cli role warning',()=>{
+  it('shows AGY warning in settings dialog when antigravity-cli is selected for orchestrator or planner',()=>{
+    const agyCfg={harnessId:'antigravity-cli',model:'gemini-3.8-flash-high'};
+    const state:State={projects:[{id:'prj_agy',name:'AGY project',tasks:[]}],roles:[
+      {id:'planner',name:'Planner',enabled:true,config:agyCfg,availableConfigs:[agyCfg]},
+      {id:'orchestrator',name:'Orchestrator',enabled:true,config:agyCfg,availableConfigs:[agyCfg]},
+      {id:'worker',name:'Worker',enabled:true,config:{harnessId:'antigravity-cli',model:'gemini-3.8-flash-low'},availableConfigs:[{harnessId:'antigravity-cli',model:'gemini-3.8-flash-low'}]},
+      {id:'reviewer',name:'Reviewer',enabled:true,config:{harnessId:'codex-cli',model:'gpt-6-sol'},availableConfigs:[{harnessId:'codex-cli',model:'gpt-6-sol'}]},
+    ]};
+    const html=renderToStaticMarkup(createElement(App,{initialState:state,initialSettingsOpen:true}));
+    // Warning should appear for planner and orchestrator, not for worker or reviewer
+    const warningText='Antigravity is an agentic CLI; as';
+    expect(html).toContain(warningText);
+    // The warning text for the Planner and Orchestrator roles should mention the role names
+    expect(html).toContain('as Planner it may try tools');
+    expect(html).toContain('as Orchestrator it may try tools');
+    // Worker with antigravity-cli should NOT have the warning (only planner/orchestrator)
+    // Reviewer with codex-cli should NOT have the warning
+    const reviewerIdx=html.indexOf('>Reviewer<');
+    const reviewerSnippet=reviewerIdx>=0?html.slice(reviewerIdx,reviewerIdx+500):'';
+    expect(reviewerSnippet).not.toContain('agy-role-warning');
+  });
+  it('shows AGY warning in task Advanced options when antigravity-cli is selected for orchestrator',()=>{
+    const agyCfg={harnessId:'antigravity-cli',model:'gemini-3.8-flash-high'};
+    const safeCfg={harnessId:'codex-cli',model:'gpt-6-sol'};
+    const state:State={projects:[{id:'prj_agy_advanced',name:'AGY advanced',tasks:[{id:'tsk_agy',title:'Task with AGY orchestrator',runs:[]}]}],roles:[
+      {id:'orchestrator',name:'Orchestrator',enabled:true,config:agyCfg,availableConfigs:[agyCfg,safeCfg]},
+      {id:'worker',name:'Worker',enabled:true,config:safeCfg,availableConfigs:[safeCfg]},
+      {id:'reviewer',name:'Reviewer',enabled:true,config:safeCfg,availableConfigs:[safeCfg]},
+    ]};
+    const preview:TaskStartPreview={taskId:'tsk_agy',scope:['README.md'],roleConfigs:{orchestrator:agyCfg,worker:safeCfg,reviewer:safeCfg},validationCriteria:[],validationCommands:[],budgets:{roleTurns:{planner:3,orchestrator:2,worker:1,reviewer:1},workerAttempts:1},baseCommit:'a'.repeat(40),requiresExplicitBase:false,reasons:[],canStart:true};
+    const html=renderToStaticMarkup(createElement(App,{initialState:state,initialTaskStartPreview:preview}));
+    expect(html).toContain('agy-role-warning');
+    expect(html).toContain('Antigravity is an agentic CLI');
+    expect(html).toContain('Claude Code or Codex is recommended for this role.');
+  });
+});
+
+describe('task status pills',()=>{
+  const makeState=(taskStatus:string,runStatus?:string,runExtra?:Record<string,unknown>):State=>({projects:[{id:'prj_pill',name:'Pill project',tasks:[{id:'tsk_pill',title:'Pill task',status:taskStatus,runs:runStatus?[{id:'run_pill',status:runStatus,...runExtra} as import('../ui/main.js').Task['runs'] extends Array<infer R>|undefined ? R : never]:[]}]}],roles:[]});
+  it('renders tone-running pill for a running run',()=>{
+    const html=renderToStaticMarkup(createElement(App,{initialState:makeState('running','running')}));
+    expect(html).toContain('class="status-pill tone-running"');
+    expect(html).toContain('>Running<');
+  });
+  it('renders tone-running pill for an active task status',()=>{
+    // task.status='active', no runs → taskRunDisplayStatus returns 'active'
+    const html=renderToStaticMarkup(createElement(App,{initialState:makeState('active')}));
+    expect(html).toContain('class="status-pill tone-running"');
+    expect(html).toContain('>Active<');
+  });
+  it('renders tone-running pill for planning run status',()=>{
+    const html=renderToStaticMarkup(createElement(App,{initialState:makeState('active','planning')}));
+    expect(html).toContain('class="status-pill tone-running"');
+    expect(html).toContain('>Planning<');
+  });
+  it('renders tone-failed pill for a blocked task (failed run status)',()=>{
+    // taskRunDisplayStatus returns 'blocked' when latest run status is 'failed'
+    const html=renderToStaticMarkup(createElement(App,{initialState:makeState('active','failed')}));
+    expect(html).toContain('class="status-pill tone-failed"');
+    expect(html).toContain('>Blocked<');
+  });
+  it('renders tone-passed pill for a completed run',()=>{
+    const html=renderToStaticMarkup(createElement(App,{initialState:makeState('completed','completed')}));
+    expect(html).toContain('class="status-pill tone-passed"');
+    expect(html).toContain('>Completed<');
+  });
+  it('renders tone-passed pill for awaiting_approval when validation passed and reviewer recommended',()=>{
+    const html=renderToStaticMarkup(createElement(App,{initialState:makeState('active','awaiting_approval',{validation:{id:'v1',passed:true,status:'passed',checks:[]},reviewerRecommendation:{id:'rec1',provenance:'uhp_response',reviewerAssignmentId:'asgn1',verdict:'recommend',createdAt:'2026-01-01T00:00:00.000Z'}})}));
+    expect(html).toContain('class="status-pill tone-passed"');
+    expect(html).toContain('>Awaiting Approval<');
+  });
+  it('renders tone-neutral pill for awaiting_approval when validation not passed',()=>{
+    const html=renderToStaticMarkup(createElement(App,{initialState:makeState('active','awaiting_approval',{validation:{id:'v2',passed:false,status:'failed',checks:[]}})}));
+    expect(html).toContain('class="status-pill tone-neutral"');
+    expect(html).toContain('>Awaiting Approval<');
+  });
+  it('renders tone-neutral pill for awaiting_approval when reviewer requested changes',()=>{
+    const html=renderToStaticMarkup(createElement(App,{initialState:makeState('active','awaiting_approval',{validation:{id:'v3',passed:true,status:'passed',checks:[]},reviewerRecommendation:{id:'rec2',provenance:'uhp_response',reviewerAssignmentId:'asgn2',verdict:'request_changes',createdAt:'2026-01-01T00:00:00.000Z'}})}));
+    expect(html).toContain('class="status-pill tone-neutral"');
+  });
+  it('renders tone-neutral pill for awaiting_approval when reviewer verdict is unparsed',()=>{
+    const html=renderToStaticMarkup(createElement(App,{initialState:makeState('active','awaiting_approval',{validation:{id:'v4',passed:true,status:'passed',checks:[]},reviewerRecommendation:{id:'rec3',provenance:'uhp_response',reviewerAssignmentId:'asgn3',verdict:'unparsed',createdAt:'2026-01-01T00:00:00.000Z'}})}));
+    expect(html).toContain('class="status-pill tone-neutral"');
+  });
+  it('renders tone-neutral pill for a cancelled run',()=>{
+    const html=renderToStaticMarkup(createElement(App,{initialState:makeState('cancelled','cancelled')}));
+    expect(html).toContain('class="status-pill tone-neutral"');
+    expect(html).toContain('>Cancelled<');
+  });
+  it('renders tone-neutral pill for a ready task with no runs',()=>{
+    const html=renderToStaticMarkup(createElement(App,{initialState:makeState('ready')}));
+    expect(html).toContain('class="status-pill tone-neutral"');
+    expect(html).toContain('>Ready<');
+  });
+});
+
+describe('validation check list and correction button',()=>{
+  const ESC='\u001b';
+  const ansiOutput=[
+    `${ESC}[31mFAIL${ESC}[0m tests/routing.test.ts > routing hooks > rejects invalid values`,
+    '',
+    `${ESC}[31mAssertionError${ESC}[0m: expected 'error' to equal 'ok'`,
+    `${ESC}[32m- Expected: "ok"${ESC}[0m`,
+  ].join('\n');
+
+  function makeValidationFailedState(workerCount:number,workerAttempts:number):State{
+    const assignments:any[]=[{id:'asgn_orch_vf',roleId:'orchestrator',status:'succeeded'}];
+    for(let i=0;i<workerCount;i++)assignments.push({id:`asgn_worker_vf_${i}`,roleId:'worker',status:'succeeded'});
+    return {projects:[{id:'prj_vf',name:'Validation failed project',tasks:[{id:'tsk_vf',title:'Validation failed task',status:'in progress',runs:[{id:'run_vf',status:'failed',
+      controller:{startedAt:'2026-09-26T10:00:00.000Z',phase:'stopped',active:false,stoppedReason:'Validation failed · 1 checks recorded.',budgets:{roleTurns:{planner:3,orchestrator:3,worker:workerAttempts,reviewer:2},workerAttempts}},
+      assignments,
+      workerEvidence:{workerAssignmentId:`asgn_worker_vf_${workerCount-1}`,responseId:'resp_vf',pinnedBaseCommit:'a'.repeat(40),completeSnapshot:{reportedComplete:true,reportedErrors:0,entryCount:1},scopeVerified:true,allowedScope:['README.md'],entries:[],changes:[{path:'README.md',kind:'modified',summary:'Attempted fix'}]},
+      validation:{status:'failed',observations:[{name:'tests',command:'pnpm',args:['test'],exitCode:1,timedOut:false,output:ansiOutput,outputTruncated:false,passed:false}]},
+    }]}]}],roles:[]};
+  }
+
+  it('renders per-check list with tone-failed pill and extracts failing test name from ANSI output',()=>{
+    const html=renderToStaticMarkup(createElement(App,{initialState:makeValidationFailedState(1,2)}));
+    expect(html).toContain('class="status-pill tone-failed"');
+    expect(html).toContain('>Failed<');
+    expect(html).toContain('>tests<');
+    expect(html).toContain('$ pnpm test');
+    expect(html).toContain('class="failing-test"');
+    expect(html).toContain('tests/routing.test.ts &gt; routing hooks &gt; rejects invalid values');
+    expect(html).toContain('class="full-output"');
+    // ANSI stripped in validation-check-list section (failing-test/failure-line elements have plain text)
+    const checkListStart=html.indexOf('class="validation-check-list"');
+    const checkListEnd=html.indexOf('class="validation-correction-action"');
+    const checkListSection=checkListStart>=0&&checkListEnd>checkListStart?html.slice(checkListStart,checkListEnd):'';
+    expect(checkListSection).not.toContain('\u001b[');
+  });
+
+  it('shows Ask Orchestrator correction button when budget is available',()=>{
+    const html=renderToStaticMarkup(createElement(App,{initialState:makeValidationFailedState(1,2)}));
+    expect(html).toContain('Ask Orchestrator for a correction');
+    expect(html).toContain('class="validation-correction-action"');
+  });
+
+  it('does not show correction button when worker attempt budget is exhausted',()=>{
+    const html=renderToStaticMarkup(createElement(App,{initialState:makeValidationFailedState(2,2)}));
+    expect(html).not.toContain('Ask Orchestrator for a correction');
+  });
+  it('renders exactly one correction button for a validation-blocked stopped run',()=>{
+    const html=renderToStaticMarkup(createElement(App,{initialState:makeValidationFailedState(1,2)}));
+    const matches=html.match(/Ask Orchestrator for a correction/g);
+    expect(matches).toHaveLength(1);
+  });
+});
+
+describe('usage dock refresh stability',()=>{
+  const baseState:State={projects:[{id:'prj_refresh',name:'Refresh project'}],roles:[]};
+  const sampleUsage={harnesses:[{harnessId:'claude-code',windows:{fiveHour:{status:'available' as const,usedPercent:40,remainingPercent:60}}}]};
+  it('with previous data and loading=true shows rows plus per-row spinners not a whole-element loading message',()=>{
+    const html=renderToStaticMarkup(createElement(App,{initialState:baseState,initialCliUsage:sampleUsage,initialCliUsageLoading:true}));
+    expect(html).toContain('usage-provider');
+    expect(html).toContain('class="usage-spinner"');
+    expect(html).not.toContain('Loading quota reports');
+  });
+  it('on first load with no data shows the placeholder loading message',()=>{
+    const html=renderToStaticMarkup(createElement(App,{initialState:baseState,initialCliUsage:undefined,initialCliUsageLoading:true}));
+    expect(html).toContain('Loading quota reports');
+    expect(html).not.toContain('usage-provider');
+  });
+  it('with previous data and loading=false shows rows without spinners',()=>{
+    const html=renderToStaticMarkup(createElement(App,{initialState:baseState,initialCliUsage:sampleUsage,initialCliUsageLoading:false}));
+    expect(html).toContain('usage-provider');
+    expect(html).not.toContain('class="usage-spinner"');
+  });
+});
+
+// ── Shared fixture helpers ─────────────────────────────────────────────────
+
+const baseDecisionProps:DecisionPanelProps={
+  filesChanged:3,allowedScope:['src/'],validationPassedCount:2,validationTotalCount:2,
+  validationPassed:true,observations:[],reviewerVerdict:'recommend',
+  reviewerRationaleSnippet:'Looks good.',approvable:true,reviewerRecommends:true,
+  pending:false,onApprove:()=>{},onReject:()=>{},
+  approved:false,promoted:false,branchPushed:false,prOpen:false,prMerged:false,
+};
+
+const sampleObservation=(name:string,passed:boolean,output?:string):StationObservation=>({
+  name,command:'pnpm',args:['test'],exitCode:passed?0:1,timedOut:false,
+  output:output??'',outputTruncated:false,passed,
+});
+
+// ── Decision panel ─────────────────────────────────────────────────────────
+
+describe('decision panel',()=>{
+  it('renders "Ready for your review" heading and checklist when awaiting approval',()=>{
+    const html=renderToStaticMarkup(createElement(DecisionPanel,baseDecisionProps));
+    expect(html).toContain('Ready for your review');
+    expect(html).toContain('class="decision-checklist"');
+    expect(html).toContain('>Changes<');
+    expect(html).toContain('>Checks<');
+    expect(html).toContain('>Reviewer<');
+  });
+
+  it('renders tone-passed pills for passed checks and recommend verdict',()=>{
+    const html=renderToStaticMarkup(createElement(DecisionPanel,baseDecisionProps));
+    // There should be tone-passed pills for files changed, checks passed, reviewer recommends
+    const pillMatches=html.match(/class="status-pill tone-passed"/g);
+    expect(pillMatches).not.toBeNull();
+    expect(pillMatches!.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('renders primary Approve button when reviewer recommends',()=>{
+    const html=renderToStaticMarkup(createElement(DecisionPanel,baseDecisionProps));
+    expect(html).toContain('class="primary"');
+    expect(html).toContain('>Approve result<');
+  });
+
+  it('renders outline Approve button and tone-failed Reviewer pill when request_changes',()=>{
+    const props:DecisionPanelProps={...baseDecisionProps,reviewerVerdict:'request_changes',reviewerRecommends:false};
+    const html=renderToStaticMarkup(createElement(DecisionPanel,props));
+    expect(html).toContain('class="outline"');
+    expect(html).toContain('>Approve result<');
+    expect(html).toContain('class="status-pill tone-failed"');
+    expect(html).toContain('Reviewer asks for changes');
+  });
+
+  it('renders tone-failed Reviewer pill when verdict is reject',()=>{
+    const props:DecisionPanelProps={...baseDecisionProps,reviewerVerdict:'reject',reviewerRecommends:false};
+    const html=renderToStaticMarkup(createElement(DecisionPanel,props));
+    expect(html).toContain('Reviewer recommends rejecting');
+    expect(html).toContain('class="status-pill tone-failed"');
+  });
+
+  it('shows disclaimer advisory text',()=>{
+    const html=renderToStaticMarkup(createElement(DecisionPanel,baseDecisionProps));
+    expect(html).toContain('The Reviewer only advises; you decide.');
+  });
+
+  it('shows Approve and Reject controls when not yet approved',()=>{
+    const html=renderToStaticMarkup(createElement(DecisionPanel,baseDecisionProps));
+    expect(html).toContain('>Approve result<');
+    expect(html).toContain('>Reject result<');
+  });
+
+  it('hides approval controls when already approved',()=>{
+    const props:DecisionPanelProps={...baseDecisionProps,approved:true,promoted:false};
+    const html=renderToStaticMarkup(createElement(DecisionPanel,props));
+    expect(html).not.toContain('>Approve result<');
+    expect(html).not.toContain('>Reject result<');
+  });
+});
+
+// ── Decision panel stepper ─────────────────────────────────────────────────
+
+describe('decision panel stepper',()=>{
+  it('shows Review as done and Approve as current when awaiting approval',()=>{
+    const html=renderToStaticMarkup(createElement(DecisionPanel,baseDecisionProps));
+    // Review step is always done
+    expect(html).toContain('stepper-done');
+    // Approve step is current
+    expect(html).toContain('stepper-current');
+    expect(html).toContain('>Approve<');
+  });
+
+  it('shows Approve as done and Promote as current after approval',()=>{
+    const props:DecisionPanelProps={...baseDecisionProps,approved:true,promoted:false};
+    const html=renderToStaticMarkup(createElement(DecisionPanel,props));
+    // Promote should be current
+    const currentIdx=html.indexOf('stepper-current');
+    const promoteIdx=html.indexOf('>Promote<');
+    expect(currentIdx).toBeGreaterThanOrEqual(0);
+    // The "Promote" label appears near the current step class
+    expect(Math.abs(currentIdx-promoteIdx)).toBeLessThan(500);
+  });
+
+  it('shows Promote and Push as done, PR as current after branch pushed',()=>{
+    const props:DecisionPanelProps={...baseDecisionProps,approved:true,promoted:true,branchPushed:true,prOpen:false};
+    const html=renderToStaticMarkup(createElement(DecisionPanel,props));
+    expect(html).toContain('>Push<');
+    // PR step should be current
+    const prIdx=html.indexOf('>PR<');
+    const currentIdx=html.indexOf('stepper-current');
+    expect(prIdx).toBeGreaterThanOrEqual(0);
+    expect(currentIdx).toBeGreaterThanOrEqual(0);
+    expect(Math.abs(prIdx-currentIdx)).toBeLessThan(500);
+  });
+
+  it('shows next-step hint for Promote when approved but not promoted',()=>{
+    const props:DecisionPanelProps={...baseDecisionProps,approved:true,promoted:false};
+    const html=renderToStaticMarkup(createElement(DecisionPanel,props));
+    expect(html).toContain('Promote approved result');
+    expect(html).toContain('class="decision-next-step"');
+  });
+
+  it('shows PR open hint when PR is open',()=>{
+    const props:DecisionPanelProps={...baseDecisionProps,approved:true,promoted:true,branchPushed:true,prOpen:true,prMerged:false,prUrl:'https://github.com/example/pr/1'};
+    const html=renderToStaticMarkup(createElement(DecisionPanel,props));
+    expect(html).toContain('is open');
+    expect(html).toContain('href="https://github.com/example/pr/1"');
+  });
+});
+
+// ── Checks pipeline ────────────────────────────────────────────────────────
+
+describe('checks pipeline',()=>{
+  it('renders passed and failed stations with correct tone classes',()=>{
+    const obs=[sampleObservation('lint',true),sampleObservation('tests',false)];
+    const html=renderToStaticMarkup(createElement(ChecksPipeline,{observations:obs}));
+    expect(html).toContain('tone-passed');
+    expect(html).toContain('tone-failed');
+    expect(html).toContain('>lint<');
+    expect(html).toContain('>tests<');
+  });
+
+  it('parses vitest output summary into "N passed · N failed of N" in station',()=>{
+    const output='Tests  1 failed | 17 passed (18)\n';
+    const obs=[sampleObservation('vitest',false,output)];
+    const html=renderToStaticMarkup(createElement(ChecksPipeline,{observations:obs}));
+    expect(html).toContain('17 passed · 1 failed of 18');
+  });
+
+  it('renders ciChecksNotConfigured note when provided',()=>{
+    const obs=[sampleObservation('tests',true)];
+    const html=renderToStaticMarkup(createElement(ChecksPipeline,{observations:obs,ciChecksNotConfigured:['format:check','lint']}));
+    expect(html).toContain('class="checks-ci-unconfigured"');
+    expect(html).toContain('format:check');
+    expect(html).toContain('lint');
+    expect(html).toContain('add them to this repository');
+  });
+
+  it('labels local vs remote check sections',()=>{
+    const obs=[sampleObservation('tests',true)];
+    const ci=[{name:'CI / build',status:'completed',conclusion:'success'}];
+    const html=renderToStaticMarkup(createElement(ChecksPipeline,{observations:obs,ciChecks:ci}));
+    expect(html).toContain('Foreman checks (local)');
+    expect(html).toContain('GitHub CI (remote)');
+    expect(html).toContain('CI / build');
+  });
+
+  it('returns null when observations empty and no CI',()=>{
+    const el=createElement(ChecksPipeline,{observations:[]});
+    const html=renderToStaticMarkup(el);
+    expect(html).toBe('');
+  });
+
+  it('shows running placeholder when running=true and no observations yet',()=>{
+    const html=renderToStaticMarkup(createElement(ChecksPipeline,{observations:[],running:true}));
+    expect(html).toContain('tone-running');
+    expect(html).toContain('Validating');
+  });
+});
+
+// ── parseChecksSummary ─────────────────────────────────────────────────────
+
+describe('parseChecksSummary',()=>{
+  it('parses vitest "Tests N failed | N passed (total)"',()=>{
+    expect(parseChecksSummary('Tests  1 failed | 17 passed (18)')).toBe('17 passed · 1 failed of 18');
+  });
+  it('parses vitest with only passed tests',()=>{
+    expect(parseChecksSummary('Tests  42 passed (42)')).toBe('42 passed of 42');
+  });
+  it('parses node:test "# pass N / # fail N"',()=>{
+    expect(parseChecksSummary('# pass 10\n# fail 2\n')).toBe('10 passed · 2 failed of 12');
+  });
+  it('strips ANSI codes before parsing',()=>{
+    expect(parseChecksSummary('\u001b[32mTests  5 passed (5)\u001b[0m')).toBe('5 passed of 5');
+  });
+  it('returns undefined for unrecognised output',()=>{
+    expect(parseChecksSummary('no summary here')).toBeUndefined();
+  });
+});
+
+// ── Reviewer card UX ───────────────────────────────────────────────────────
+
+describe('reviewer card UX',()=>{
+  // Build a minimal awaiting_approval state with a reviewer recommendation
+  const makeReviewerCardState=(verdict:'recommend'|'request_changes'):State=>({
+    projects:[{id:'prj_reviewer_ux',name:'Reviewer UX project',tasks:[{
+      id:'tsk_reviewer_ux',title:'Reviewer UX task',status:'in progress',runs:[{
+        id:'run_reviewer_ux',status:'awaiting_approval',
+        controller:{startedAt:'2026-09-26T10:00:00.000Z',phase:'awaiting_approval',active:false,budgets:{roleTurns:{planner:2,orchestrator:2,worker:2,reviewer:2},workerAttempts:2}},
+        reviewerRecommendation:{
+          id:'rec_ux',status:'proposed' as const,provenance:'uhp_response' as const,
+          reviewerAssignmentId:'asgn_ux_reviewer',harnessId:'claude-code',model:'claude-opus-4',
+          responseId:'resp_ux_reviewer',sessionId:'session_ux_reviewer',
+          reviewMode:'read_only' as const,mutationAttempted:false as const,verdict,
+          rationale:'The implementation looks solid and follows the patterns.',
+          createdAt:'2026-09-26T10:05:00.000Z',
+        },
+        assignments:[
+          {id:'asgn_ux_worker',roleId:'worker',status:'succeeded'},
+          {id:'asgn_ux_reviewer',roleId:'reviewer',status:'succeeded'},
+        ],
+        workerEvidence:{
+          workerAssignmentId:'asgn_ux_worker',responseId:'resp_ux_worker',
+          pinnedBaseCommit:'a'.repeat(40),
+          completeSnapshot:{reportedComplete:true,reportedErrors:0,entryCount:1},
+          scopeVerified:true,allowedScope:['src/'],entries:[],
+          changes:[{path:'src/index.ts',kind:'modified',summary:'Added feature'}],
+          reviewDiff:'verified diff',
+        },
+        validation:{status:'passed',passed:true,observations:[{
+          name:'tests',command:'pnpm',args:['test'],exitCode:0,timedOut:false,
+          output:'Tests  5 passed (5)',outputTruncated:false,passed:true,
+        }]},
+      }],
+    }]}],
+    roles:[...(['orchestrator','worker','reviewer'] as const).map(id=>({id,name:id,enabled:true,config:{harnessId:'claude-code',model:'claude-opus-4'},availableConfigs:[{harnessId:'claude-code',model:'claude-opus-4'}]}))],
+  });
+
+  it('does not contain "UHP" in the main reviewer card text (technical details collapsed)',()=>{
+    const html=renderToStaticMarkup(createElement(App,{initialState:makeReviewerCardState('recommend')}));
+    // The visible summary label must be "Reviewer's answer", not "UHP Reviewer response"
+    expect(html).toContain("Reviewer&#x27;s answer");
+    // The tech-details collapse block is present and has a "Technical details" summary
+    expect(html).toContain('class="reviewer-tech-details"');
+    expect(html).toContain('Technical details');
+    // The rationale text appears before the tech-details collapse
+    const rationaleIdx=html.indexOf('The implementation looks solid');
+    const techDetailsIdx=html.indexOf('class="reviewer-tech-details"');
+    expect(rationaleIdx).toBeGreaterThanOrEqual(0);
+    expect(techDetailsIdx).toBeGreaterThanOrEqual(0);
+    expect(rationaleIdx).toBeLessThan(techDetailsIdx);
+    // "UHP" in main card text: it should only appear in the service-strip or inside reviewer-tech-details
+    // Everything before the tech-details block should not contain "UHP Reviewer response" or "UHP" as a label
+    const textBeforeTech=html.slice(0,techDetailsIdx);
+    // Confirm "UHP" does not appear as a standalone label or heading before the collapsed tech details
+    expect(textBeforeTech).not.toContain('UHP Reviewer response');
+  });
+
+  it('shows "Reviewer recommends approving" verdict text prominently',()=>{
+    const html=renderToStaticMarkup(createElement(App,{initialState:makeReviewerCardState('recommend')}));
+    expect(html).toContain('Reviewer recommends approving');
+  });
+
+  it('shows "Reviewer asks for changes" verdict text for request_changes',()=>{
+    const html=renderToStaticMarkup(createElement(App,{initialState:makeReviewerCardState('request_changes')}));
+    expect(html).toContain('Reviewer asks for changes');
+  });
+
+  it('shows "The Reviewer only advises; you decide." advisory in reviewer card',()=>{
+    const html=renderToStaticMarkup(createElement(App,{initialState:makeReviewerCardState('recommend')}));
+    expect(html).toContain('The Reviewer only advises; you decide.');
+  });
+
+  it('renders the decision panel when run is awaiting_approval with verified scope',()=>{
+    const html=renderToStaticMarkup(createElement(App,{initialState:makeReviewerCardState('recommend')}));
+    expect(html).toContain('class="decision-panel card"');
+    expect(html).toContain('Ready for your review');
+    expect(html).toContain('aria-label="Delivery progress"');
+  });
+
+  it('shows checks pipeline stations inside the decision panel',()=>{
+    const html=renderToStaticMarkup(createElement(App,{initialState:makeReviewerCardState('recommend')}));
+    expect(html).toContain('class="checks-pipeline"');
+    expect(html).toContain('>tests<');
+  });
+});
+
+// ── Feature: ciChecksNotConfigured in task-start panel ──────────────────────
+
+describe('ciChecksNotConfigured note in task-start panel',()=>{
+  it('shows CI note when ciChecksNotConfigured is present in task start preview',()=>{
+    const state:State={projects:[{id:'prj_ci_note',name:'CI note project',tasks:[{id:'tsk_ci_note',title:'CI note task',status:'ready'}]}],roles:[...['orchestrator','worker','reviewer'].map(id=>({id,name:id,enabled:true,config:{harnessId:'local',model:'model'},availableConfigs:[{harnessId:'local',model:'model'}]}))]};
+    const preview:TaskStartPreview={taskId:'tsk_ci_note',scope:['src/'],roleConfigs:{orchestrator:{harnessId:'local',model:'model'},worker:{harnessId:'local',model:'model'},reviewer:{harnessId:'local',model:'model'}},validationCriteria:[],validationCommands:[{name:'Tests',command:'pnpm',args:['test']}],requiresExplicitBase:false,reasons:[],canStart:true,ciChecksNotConfigured:['format:check','lint']};
+    const html=renderToStaticMarkup(createElement(App,{initialState:state,initialTaskStartPreview:preview}));
+    expect(html).toContain('CI also runs');
+    expect(html).toContain('format:check');
+    expect(html).toContain('lint');
+    expect(html).toContain('task-ci-note');
+    expect(html).toContain('add them to this repository');
+  });
+
+  it('does not show CI note when ciChecksNotConfigured is empty',()=>{
+    const state:State={projects:[{id:'prj_ci_empty',name:'CI empty project',tasks:[{id:'tsk_ci_empty',title:'CI empty task',status:'ready'}]}],roles:[...['orchestrator','worker','reviewer'].map(id=>({id,name:id,enabled:true,config:{harnessId:'local',model:'model'},availableConfigs:[{harnessId:'local',model:'model'}]}))]};
+    const preview:TaskStartPreview={taskId:'tsk_ci_empty',scope:['src/'],roleConfigs:{orchestrator:{harnessId:'local',model:'model'},worker:{harnessId:'local',model:'model'},reviewer:{harnessId:'local',model:'model'}},validationCriteria:[],validationCommands:[{name:'Tests',command:'pnpm',args:['test']}],requiresExplicitBase:false,reasons:[],canStart:true,ciChecksNotConfigured:[]};
+    const html=renderToStaticMarkup(createElement(App,{initialState:state,initialTaskStartPreview:preview}));
+    expect(html).not.toContain('class="task-ci-note"');
+  });
+});
+
+// ── Feature: ChecksPipeline with CI failures ────────────────────────────────
+
+describe('checks pipeline CI failures',()=>{
+  it('renders CI failure details with job and step names',()=>{
+    const ciChecks:GithubCheckEntry[]=[{
+      name:'CI / build',status:'completed',conclusion:'failure',
+      failures:[{jobName:'CI / build',stepName:'Run tests',excerpt:'Error: test failed\n  at expect'}],
+    }];
+    const html=renderToStaticMarkup(createElement(ChecksPipeline,{observations:[],ciChecks}));
+    expect(html).toContain('Run tests');
+    expect(html).toContain('Error: test failed');
+    expect(html).toContain('class="ci-failure-item"');
+  });
+
+  it('shows uncovered-step hint when localCheckNames do not match failure step',()=>{
+    const ciChecks:GithubCheckEntry[]=[{
+      name:'CI / lint',status:'completed',conclusion:'failure',
+      failures:[{jobName:'CI / lint',stepName:'eslint',excerpt:'ESLint: 2 problems'}],
+    }];
+    const html=renderToStaticMarkup(createElement(ChecksPipeline,{observations:[],ciChecks,localCheckNames:['Tests','Type check']}));
+    expect(html).toContain('not in Foreman');
+    expect(html).toContain('class="ci-failure-hint"');
+  });
+
+  it('does not show uncovered hint when localCheckNames match',()=>{
+    const ciChecks:GithubCheckEntry[]=[{
+      name:'CI / tests',status:'completed',conclusion:'failure',
+      failures:[{jobName:'CI / tests',stepName:'tests',excerpt:'1 failed'}],
+    }];
+    const html=renderToStaticMarkup(createElement(ChecksPipeline,{observations:[],ciChecks,localCheckNames:['Tests','lint']}));
+    expect(html).not.toContain('not in Foreman');
+  });
+});
+
+// ── Feature: PR draft panel ─────────────────────────────────────────────────
+
+describe('PR draft panel',()=>{
+  it('shows "Draft PR description with Planner" button when no draft exists',()=>{
+    const html=renderToStaticMarkup(createElement(PrDraftPanel,{runId:'run1',draft:undefined,onGenerate:()=>{},onSave:()=>{}}));
+    expect(html).toContain('Draft PR description with Planner');
+    expect(html).toContain('class="pr-draft-panel"');
+  });
+
+  it('shows draft title, body, and source badge when draft exists',()=>{
+    const draft:PrDraftData={title:'Add feature X',body:'This PR adds feature X.',source:'planner',generatedAt:'2026-09-26T10:00:00.000Z'};
+    const html=renderToStaticMarkup(createElement(PrDraftPanel,{runId:'run1',draft,onGenerate:()=>{},onSave:()=>{}}));
+    expect(html).toContain('Add feature X');
+    expect(html).toContain('This PR adds feature X.');
+    expect(html).toContain('>Planner<');
+    expect(html).toContain('Edit draft');
+    expect(html).toContain('Regenerate with Planner');
+  });
+
+  it('shows "Template" source badge for template-sourced drafts',()=>{
+    const draft:PrDraftData={title:'Fix bug Y',body:'Fixes Y.',source:'template',generatedAt:'2026-09-26T10:00:00.000Z'};
+    const html=renderToStaticMarkup(createElement(PrDraftPanel,{runId:'run1',draft,onGenerate:()=>{},onSave:()=>{}}));
+    expect(html).toContain('>Template<');
+  });
+
+  it('shows "Edited" source badge for user-edited drafts',()=>{
+    const draft:PrDraftData={title:'My PR',body:'My description.',source:'edited',generatedAt:'2026-09-26T10:00:00.000Z'};
+    const html=renderToStaticMarkup(createElement(PrDraftPanel,{runId:'run1',draft,onGenerate:()=>{},onSave:()=>{}}));
+    expect(html).toContain('>Edited<');
+  });
+
+  it('shows error message when error prop provided',()=>{
+    const html=renderToStaticMarkup(createElement(PrDraftPanel,{runId:'run1',draft:undefined,onGenerate:()=>{},onSave:()=>{},error:'Network error'}));
+    expect(html).toContain('Network error');
+    expect(html).toContain('class="pr-draft-error"');
   });
 });

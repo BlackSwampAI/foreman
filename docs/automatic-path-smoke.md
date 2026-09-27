@@ -1,5 +1,7 @@
 # Live automatic-path smoke
 
+> Note: this run predates read-only repository access for Planner/Orchestrator (added 2026-09). Planner and Orchestrator in this run had no repository snapshot or digest; subsequent runs receive a read-only snapshot (Claude Code/Codex) or a deterministic digest (Antigravity CLI). The Orchestrator `workerTask` contract also now requires `targetFiles`; legacy evidence without this field remains accepted for replay.
+
 On 2026-09-23, Foreman completed one live bounded automatic run on disposable
 run `run_f18b066c-a7f1-467c-a16b-05b294fb61c9`, pinned to
 `12a4c2821c60a1173f7232312e91b483a49bd147`. The controller made exactly one
