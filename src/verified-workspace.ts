@@ -37,6 +37,17 @@ export async function fetchBridgeSnapshot(baseUrl:string,workspaceId:string,expe
   return envelope;
 }
 
+export interface OverlayEntry { path: string; contentBase64?: string; mode?: string; delete?: true }
+
+export async function overlayBridgeWorkspace(baseUrl:string,workspaceId:string,entries:OverlayEntry[],timeoutMs=15_000):Promise<{workspaceId:string;applied:number}>{
+  if(!workspaceId||workspaceId.includes('/')||workspaceId.includes('\\'))throw new Error('Invalid bridge workspace ID');
+  const endpoint=bridgeEndpoint(baseUrl,`/extensions/foreman-workspace/v1/workspaces/${encodeURIComponent(workspaceId)}/overlay`);
+  const response=await fetch(endpoint,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({entries}),signal:AbortSignal.timeout(timeoutMs)});
+  if(!response.ok)throw new Error(`Workspace bridge overlay request failed (${response.status})`);
+  const body=await boundedJson(response,64*1024) as Record<string,unknown>;
+  if(typeof body.workspace_id!=='string'||typeof body.applied!=='number')throw new Error('Workspace bridge returned an invalid overlay result');
+  return {workspaceId:body.workspace_id,applied:body.applied};
+}
 export async function seedBridgeWorkspace(baseUrl:string,pinnedBaseCommit:string,timeoutMs=15_000):Promise<{workspaceId:string;baseCommit:string}>{
   if(!SHA.test(pinnedBaseCommit))throw new Error('A full pinned base commit SHA is required');
   const advertisedResponse=await fetch(bridgeEndpoint(baseUrl,'/v1/uhp'),{signal:AbortSignal.timeout(timeoutMs)});
@@ -100,7 +111,7 @@ export async function reconstructRecordedSnapshot(input:{repoPath:string;pinnedB
   const changes=verified.changes.map(c=>({kind:c.kind,path:c.path,...(c.previousPath?{previousPath:c.previousPath}:{}),...(c.before?{before:c.before}:{}),...(c.after?{after:c.after}:{})}));
   const reviewDiff=formatReviewDiff(changes);
   if(input.recordedEvidence.completeSnapshot.entryCount!==undefined&&input.recordedEvidence.completeSnapshot.entryCount!==result.size)throw new Error('Recorded snapshot entry count does not match reconstructed result');
-  if(input.recordedEvidence.reviewDiff!==undefined&&input.recordedEvidence.reviewDiff!==reviewDiff)throw new Error('Recorded review diff does not match reconstructed bytes');
+  if(input.recordedEvidence.reviewDiff!==undefined&&input.recordedEvidence.reviewDiff!==reviewDiff&&input.recordedEvidence.reviewDiff!==legacyFullContextReviewDiff(changes))throw new Error('Recorded review diff does not match reconstructed bytes');
   return {provenance:'recorded_replay',pinnedBaseCommit:verified.commit,completeSnapshot:{reportedComplete:true,reportedErrors:0,entryCount:result.size},scopeVerified:true,allowedScope:verified.allowedScope,entries:[...result.values()],changes,reviewDiff};
 }
 
@@ -169,7 +180,7 @@ function fromRecordedEntry(value:Record<string,any>):SnapshotEntry {
   return {path:'',kind,executable:mode==='100755',contentBase64:value.contentBase64};
 }
 function sameEntry(a:SnapshotEntry,b:SnapshotEntry):boolean{return a.kind===b.kind&&a.executable===b.executable&&a.contentBase64===b.contentBase64;}
-function formatReviewDiff(changes:ChangeEvidence[]):string{return changes.length?changes.map(c=>{
+export function formatReviewDiff(changes:ChangeEvidence[]):string{return changes.length?changes.map(c=>{
   const before=c.before,after=c.after, oldText=before?.kind==='file'?decodeText(Buffer.from(before.contentBase64,'base64')):undefined,newText=after?.kind==='file'?decodeText(Buffer.from(after.contentBase64,'base64')):undefined;
   let out=`### ${c.kind}: ${c.previousPath?`${c.previousPath} -> `:''}${c.path}\n`;
   if(before)out+=`- mode ${mode(before)}, ${Buffer.from(before.contentBase64,'base64').length} bytes, sha256 ${hash(before)}\n`;
@@ -177,10 +188,19 @@ function formatReviewDiff(changes:ChangeEvidence[]):string{return changes.length
   if(oldText!==undefined||newText!==undefined)out+=unified(c.path,oldText??'',newText??'');else if(before||after)out+='[binary or symlink bytes preserved in exact evidence]\n';
   return out;
 }).join('\n'):'No workspace changes.\n';}
+export function legacyFullContextReviewDiff(changes:ChangeEvidence[]):string{return changes.length?changes.map(c=>{
+  const before=c.before,after=c.after, oldText=before?.kind==='file'?decodeText(Buffer.from(before.contentBase64,'base64')):undefined,newText=after?.kind==='file'?decodeText(Buffer.from(after.contentBase64,'base64')):undefined;
+  let out=`### ${c.kind}: ${c.previousPath?`${c.previousPath} -> `:''}${c.path}\n`;
+  if(before)out+=`- mode ${mode(before)}, ${Buffer.from(before.contentBase64,'base64').length} bytes, sha256 ${hash(before)}\n`;
+  if(after)out+=`+ mode ${mode(after)}, ${Buffer.from(after.contentBase64,'base64').length} bytes, sha256 ${hash(after)}\n`;
+  if(oldText!==undefined||newText!==undefined)out+=legacyUnified(c.path,oldText??'',newText??'');else if(before||after)out+='[binary or symlink bytes preserved in exact evidence]\n';
+  return out;
+}).join('\n'):'No workspace changes.\n';}
 function mode(e:SnapshotEntry):string{return e.kind==='symlink'?'120000':e.executable?'100755':'100644';}
 function hash(e:SnapshotEntry):string{return createHash('sha256').update(Buffer.from(e.contentBase64,'base64')).digest('hex');}
 function decodeText(bytes:Buffer):string|undefined{if(bytes.includes(0))return;try{return new TextDecoder('utf-8',{fatal:true}).decode(bytes);}catch{return undefined;}}
-function unified(path:string,a:string,b:string):string {
+/** Legacy full-context diff emitter (all unchanged lines as context). Preserved for backward compatibility with recorded evidence. */
+function legacyUnified(path:string,a:string,b:string):string{
   const old=a?a.replace(/\n$/,'').split('\n'):[], next=b?b.replace(/\n$/,'').split('\n'):[];
   if(old.length*next.length>500_000)return '[text diff omitted: exact bytes remain in evidence]\n';
   const lcs=Array.from({length:old.length+1},()=>new Uint32Array(next.length+1));
@@ -188,5 +208,92 @@ function unified(path:string,a:string,b:string):string {
   const rows:string[]=[];let i=0,j=0;
   while(i<old.length||j<next.length){if(i<old.length&&j<next.length&&old[i]===next[j])rows.push(` ${old[i++]}`),j++;else if(j<next.length&&(i===old.length||(lcs[i]![j+1]??0)>=(lcs[i+1]?.[j]??0)))rows.push(`+${next[j++]}`);else rows.push(`-${old[i++]}`);}
   return `\n\`\`\`diff\n--- a/${path}\n+++ b/${path}\n@@ -${old.length?1:0},${old.length} +${next.length?1:0},${next.length} @@\n${rows.join('\n')}\n\`\`\`\n`;
+}
+/** Standard unified diff with 3-line context windows and merged hunks. */
+export function unified(path: string, a: string, b: string): string {
+  const CONTEXT = 3;
+  const aNoNL = a.length > 0 && !a.endsWith('\n');
+  const bNoNL = b.length > 0 && !b.endsWith('\n');
+  const old = a ? a.replace(/\n$/, '').split('\n') : [];
+  const nxt = b ? b.replace(/\n$/, '').split('\n') : [];
+  if (old.length * nxt.length > 500_000) return '[text diff omitted: exact bytes remain in evidence]\n';
+  // Build LCS table
+  const lcs = Array.from({length: old.length+1}, () => new Uint32Array(nxt.length+1));
+  for (let i = old.length-1; i >= 0; i--)
+    for (let j = nxt.length-1; j >= 0; j--)
+      lcs[i]![j] = old[i] === nxt[j] ? (lcs[i+1]?.[j+1] ?? 0)+1 : Math.max(lcs[i+1]?.[j] ?? 0, lcs[i]![j+1] ?? 0);
+  // Build flat ops: {op: ' '|'+'|'-', line: string}
+  type Op = {op: ' '|'+'|'-'; line: string};
+  const ops: Op[] = [];
+  let oi = 0, ni = 0;
+  while (oi < old.length || ni < nxt.length) {
+    if (oi < old.length && ni < nxt.length && old[oi] === nxt[ni])
+      ops.push({op: ' ', line: old[oi++]!}), ni++;
+    else if (ni < nxt.length && (oi === old.length || (lcs[oi]![ni+1] ?? 0) >= (lcs[oi+1]?.[ni] ?? 0)))
+      ops.push({op: '+', line: nxt[ni++]!});
+    else
+      ops.push({op: '-', line: old[oi++]!});
+  }
+  const hasChanges = ops.some(o => o.op !== ' ');
+  // Files differ only in trailing newline: synthesize a minimal diff
+  if (!hasChanges && aNoNL !== bNoNL) {
+    const last = old.length > 0 ? old[old.length-1]! : '';
+    const noNL = '\\ No newline at end of file';
+    const hunkLines = aNoNL
+      ? [`@@ -${old.length},1 +${nxt.length},1 @@`, '-'+last, noNL, '+'+last]
+      : [`@@ -${old.length},1 +${nxt.length},1 @@`, '-'+last, '+'+last, noNL];
+    return `\n\`\`\`diff\n--- a/${path}\n+++ b/${path}\n${hunkLines.join('\n')}\n\`\`\`\n`;
+  }
+  if (!hasChanges) return '';
+  // Mark ops needed in output: every change, plus CONTEXT lines before/after it
+  const need = new Uint8Array(ops.length);
+  for (let k = 0; k < ops.length; k++) {
+    if (ops[k]!.op !== ' ') {
+      for (let c = Math.max(0, k-CONTEXT); c <= Math.min(ops.length-1, k+CONTEXT); c++)
+        need[c] = 1;
+    }
+  }
+  // Build hunks as consecutive spans of needed ops
+  const hunks: Array<{start: number; end: number}> = [];
+  for (let k = 0; k < ops.length; k++) {
+    if (!need[k]) continue;
+    if (hunks.length && hunks[hunks.length-1]!.end >= k-1)
+      hunks[hunks.length-1]!.end = k;
+    else
+      hunks.push({start: k, end: k});
+  }
+  // Compute old/new line numbers for each op
+  let oLine = 1, nLine = 1;
+  const oAt: number[] = [], nAt: number[] = [];
+  for (const {op} of ops) {
+    oAt.push(op === '+' ? 0 : oLine);
+    nAt.push(op === '-' ? 0 : nLine);
+    if (op !== '+') oLine++;
+    if (op !== '-') nLine++;
+  }
+  // Find last old/new op indices for "no newline at end of file" markers
+  let lastOldIdx = -1, lastNxtIdx = -1;
+  for (let k = ops.length-1; k >= 0 && (lastOldIdx < 0 || lastNxtIdx < 0); k--) {
+    if (lastOldIdx < 0 && ops[k]!.op !== '+') lastOldIdx = k;
+    if (lastNxtIdx < 0 && ops[k]!.op !== '-') lastNxtIdx = k;
+  }
+  // Format hunks into lines
+  const lines: string[] = [];
+  for (const {start, end} of hunks) {
+    let oCnt = 0, nCnt = 0, oStart = 0, nStart = 0;
+    for (let k = start; k <= end; k++) {
+      if (ops[k]!.op !== '+') { if (!oCnt) oStart = oAt[k]!; oCnt++; }
+      if (ops[k]!.op !== '-') { if (!nCnt) nStart = nAt[k]!; nCnt++; }
+    }
+    if (!oCnt) oStart = 0; // new file: @@ -0,0 +1,N @@
+    if (!nCnt) nStart = 0; // deleted file: @@ -1,N +0,0 @@
+    lines.push(`@@ -${oStart},${oCnt} +${nStart},${nCnt} @@`);
+    for (let k = start; k <= end; k++) {
+      lines.push(ops[k]!.op + ops[k]!.line);
+      if (aNoNL && k === lastOldIdx && ops[k]!.op !== '+') lines.push('\\ No newline at end of file');
+      if (bNoNL && k === lastNxtIdx && ops[k]!.op !== '-') lines.push('\\ No newline at end of file');
+    }
+  }
+  return `\n\`\`\`diff\n--- a/${path}\n+++ b/${path}\n${lines.join('\n')}\n\`\`\`\n`;
 }
 function killTree(child:ReturnType<typeof spawn>):void{if(!child.pid)return;try{if(process.platform==='win32')child.kill('SIGKILL');else process.kill(-child.pid,'SIGKILL');}catch{child.kill('SIGKILL');}}

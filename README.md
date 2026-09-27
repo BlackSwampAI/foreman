@@ -1,41 +1,22 @@
-# Foreman v2
+# Foreman
 
-Foreman is a local, web-first engineering control plane for one operator. A Planner is the primary conversation surface; an Orchestrator coordinates bounded Workers and an independent Reviewer. Foreman records identities, guidance, events, checks, and approval state. External harnesses do the agent work through the Unified Harness Protocol (UHP). Hindsight supplies advisory project memory.
+Foreman is a local, web-first engineering control plane for one operator. You describe work to a Planner, the Planner proposes tasks, an Orchestrator coordinates a bounded Worker and an independent Reviewer, and Foreman gates every result with scope verification, validation checks, and a human decision before anything touches Git. External CLIs (Claude Code, Codex CLI, Antigravity) do the agent work through the Unified Harness Protocol. Hindsight supplies advisory project memory.
 
-This repository began with a new Git root. No v1 code or Git history was migrated.
+## How a run flows
 
-## Host CLI workflow
+```
+Human ↔ Planner  →  Orchestrator  →  Worker  →  checks  →  Reviewer  →  your decision  →  promote  →  GitHub
+```
 
-Foreman can use the host-side CLI bridge for Claude Code, Codex CLI, and
-Antigravity CLI (`agy`). Each harness uses its existing host sign-in; Foreman
-does not require a provider API key or copy credentials. The practical defaults
-are Claude Code or Codex CLI for Planner, Orchestrator, and Reviewer, and the
-explicit AGY model `gemini-3.8-flash-low` for Worker when `agy models` reports
-it on the host. Claude Code offers `opus` and `sonnet`, with `opus` as its
-default. Every role can select any discovered harness/model pair,
-including any discovered AGY Flash model, with global, project, and run-level
-choices in the UI. Gemini CLI is not enabled in this checkout because the
-available host profile uses API-key auth and no supported OAuth login is
-available. The [Gemini investigation](docs/gemini-cli-worker-investigation.md)
-records the host-login boundary; Gemini CLI was discarded for this Worker
-path. The [AGY usage follow-up](docs/agy-worker-usage-followup.md) records four
-verified same-task Worker turns and an optional low-effort setting. Foreman
-does not copy credentials or require a provider API key.
+1. **Planner.** You talk to the Planner about the work. The Planner can read a read-only snapshot of the repository at the current HEAD (Claude Code or Codex) or receive a deterministic digest (Antigravity CLI or snapshot unavailable). It proposes structured tasks with scope and validation criteria.
+2. **Orchestrator.** When you start a run, the Orchestrator receives the Planner's task and guidance. It returns a JSON object `{"workerTask":"...","targetFiles":["path",...]}` naming the exact files the Worker must touch. Scope is checked against `targetFiles`; the post-run snapshot diff is the authority.
+3. **Worker.** The Worker edits an isolated workspace seeded from the pinned Git base. Foreman fetches the complete snapshot, byte-compares it against the pinned commit, enforces allowed scope, and computes the exact diff.
+4. **Checks.** Foreman runs every configured validation command in a disposable workspace. An empty result (no file changes) fails the result gate even if commands pass.
+5. **Reviewer.** The Reviewer reads the verified diff and check results in read-only mode. Its recommendation is advisory; it cannot modify the result. A `request_changes` or `reject` verdict triggers a bounded Orchestrator → Worker → Reviewer correction while budget remains.
+6. **Your decision.** The "Ready for your review" panel shows a checklist, the checks pipeline (local Foreman checks and remote GitHub CI), and an Approve / Reject pair. Approval records an immutable decision bound to the evidence. It does not change Git.
+7. **Promote → GitHub.** Approved results can be promoted to a local commit, pushed, opened as a PR, and merged, each as a separate confirmed action.
 
-Follow [the host CLI workflow guide](docs/three-harness-workflow.md) to
-start the local bridge and configure a validation policy. Talk with the Planner
-in the UI, then start the bounded controller run: Foreman carries the Planner
-guidance through Orchestrator, Worker, complete-snapshot verification,
-validation, and Reviewer. Human approval and Git promotion remain separate
-operator actions. The guide retains the earlier live four-role proof as a
-historical manual workflow record. A separate live automatic-path run completed
-one successful turn per role and stopped at human approval; see the
-[automatic-path smoke report](docs/automatic-path-smoke.md) and its
-[machine-readable evidence](docs/evidence/automatic-path-smoke-20260923.json).
-The smoke left approval and Git promotion for the operator. Earlier live-call
-IDs and usage remain in the guide's historical record.
-
-## Run locally
+## Quick start
 
 Use Node 24 and pnpm 11.
 
@@ -45,40 +26,114 @@ pnpm build
 pnpm start
 ```
 
-Open `http://127.0.0.1:4399` and choose **Open repository**. Pick a local Git repository and review its allowed files and validation checks. Foreman opens the project Planner, where you describe the work and discuss the proposed tasks. For a task, review its goal and validation criteria, and edit them if needed. Choose **Approve task & start work** to approve that task plan and start its isolated run. Foreman uses the task’s suggested scope when available, or the repository’s allowed scope when it is empty. Configured checks and role choices are defaults. Task creation alone never starts work.
+Open `http://127.0.0.1:4399` and choose **Open repository**. Pick a local Git repository and review its allowed file scope and validation checks. Foreman opens the project Planner.
 
-An Antigravity proposal must name an exact target file; Foreman asks Orchestrator to correct a directory-only proposal before dispatch. A verified no-change result fails validation and can trigger a bounded automatic correction attempt. A Reviewer `request_changes` or `reject` verdict can also trigger a revised Worker pass and fresh review while the run budget permits. When the run finishes, review its verified diff, validation results, and Reviewer recommendation. **Approve result** is a separate decision after that review; approving the task plan does not approve the result or promote it to Git. Advanced options are available when you need to change scope, role harnesses or models, checks, run limits, or the Git base. Each task keeps its own runs and evidence. No `.env` file or separate bridge command is needed for this local flow. The selected repository must have a committed HEAD; uncommitted source changes are shown but runs start from the commit. Foreman stores project state in `.foreman-data/` and restores selected repositories on restart.
+The selected repository must have a committed HEAD. Uncommitted source changes are visible but runs start from the pinned commit. The folder browser shows folders on the server machine; if Foreman runs remotely, the paths are on that machine.
 
-The Planner conversation belongs to the project and keeps its full visible history. Foreman sends bounded recent and relevant context with each Planner turn; it does not make hidden summary calls. Project Planner sessions are tied to the project and selected Planner harness/model. Existing run-level Planner assignments and their replies remain attached to their original runs and are shown as historical run conversations; Foreman does not merge them into the new project conversation or claim they shared one session. Existing tasks, runs, approvals, and evidence remain intact. Projects without Planner state start a new project conversation when first used. To continue independent tasks, start each explicitly. Promotion records a result commit but does not advance the repository checkout. Before starting a task that depends on earlier work or may change overlapping paths, integrate every applicable promoted result into the repository checkout. Foreman checks that each required promoted commit is in the current repository HEAD, then pins that HEAD automatically. Use the optional Git base control in Advanced options when you need an explicit base.
+No `.env` file or separate bridge command is needed for the standard local flow. Foreman starts its own per-project bridge process.
 
-The folder browser reads the server computer's filesystem. If Foreman runs on another machine, the browser shows folders on that machine. Validation commands run in Foreman's disposable copy after Worker output is verified, so review the suggested commands before opening the repository. Host CLI logins must already be configured for the harnesses you select; unavailable harnesses are not selectable. With all three CLIs available, new projects default to Codex for Planner, Orchestrator, and Reviewer and AGY Flash Low for Worker; each role can be changed in the UI.
+For the manual bridge workflow (custom CLIs, external UHP servers, or disposable-repo testing), see [the host CLI workflow guide](docs/three-harness-workflow.md).
 
-`pnpm dev` starts the API in watch mode and `pnpm dev:ui` starts Vite for UI development. The settings below remain available for custom or legacy setups; the normal local repository flow does not require them.
+`pnpm dev` starts the API in watch mode; `pnpm dev:ui` starts Vite for UI development.
 
-| Setting | Purpose |
+## Choosing models per role
+
+Role selection follows three scopes: **Global → Project → Run**. A more specific scope overrides the less specific one. Project and run overrides store only the choices you set explicitly; unset roles inherit from the scope above. The settings panel opens on Project scope by default. A **Reset to inherited** button removes the override at the current scope.
+
+Discovery does not overwrite a saved choice. An unavailable pair shows as stale and blocks start until you select a discovered one.
+
+**Built-in defaults** (used for a role with no saved choice, when all three CLIs are available):
+
+| Role | Default |
 | --- | --- |
-| `FOREMAN_HOST`, `FOREMAN_PORT` | Bind address and port; defaults to loopback port 4399. |
-| `FOREMAN_DATA_DIR` | Local durable state directory. |
-| `UHP_BASE_URL`, `UHP_TOKEN`, `UHP_HARNESS_ID`, `UHP_MODEL` | UHP server, optional bearer credential, and optional explicit initial harness/model pair. Without a reachable server, harness/model options are unavailable. |
-| `HINDSIGHT_BASE_URL`, `HINDSIGHT_TOKEN` | Hindsight API and optional credential. Outages show degraded memory status and do not stop workflow state changes. |
-| `FOREMAN_REQUEST_TIMEOUT_MS`, `FOREMAN_TASK_TIMEOUT_MS` | Bounded service requests and task policy. Request timeout defaults to 120 seconds for CLI role turns. |
-| `FOREMAN_WORKSPACE_SOURCE_REPO` | Local Git repository used to read the pinned base and verify the complete Worker snapshot. |
-| `FOREMAN_WORKSPACE_BRIDGE_URL` | Optional loopback URL for the external workspace bridge; needed to seed and fetch a live Worker workspace, not to replay recorded evidence. |
-| `FOREMAN_WORKSPACE_ALLOWED_SCOPE` | Comma-separated exact paths or directory prefixes ending in `/` allowed in the Worker result. |
-| `FOREMAN_VALIDATION_COMMANDS` | Non-empty JSON array of `{ "name", "command", "args", "cwd?" }` entries run by Foreman in the disposable validation workspace. |
-| `FOREMAN_VALIDATION_TIMEOUT_MS`, `FOREMAN_VALIDATION_MAX_OUTPUT_BYTES` | Per-command time limit and output capture bound. Defaults are 120,000 ms and 1 MiB. |
+| Planner | Codex CLI / `gpt-6-sol` |
+| Orchestrator | Codex CLI / `gpt-6-sol` |
+| Worker | Antigravity CLI / `gemini-3.8-flash-low` |
+| Reviewer | Codex CLI / `gpt-6-sol` |
 
-The optional configuration shape is recorded in `config.schema.json`. The local project flow uses existing host CLI logins; no provider key is needed in Foreman. The API is bound to loopback by default.
+Claude Code (`opus`, `sonnet`) and any discovered Codex or Antigravity model can be selected for any role. A setup that works well in practice is Claude Code `opus` for Planner and Reviewer, `sonnet` for Orchestrator, and Antigravity `gemini-3.8-flash-low` for Worker.
 
-## Foundation scope
+**AGY caveat.** Antigravity CLI is an agentic runtime. As Planner or Orchestrator it may invoke tools instead of returning a text reply, which produces an empty or soft-denied response. The UI shows a warning when AGY is selected for Planner or Orchestrator. Claude Code or Codex is recommended for those roles. AGY `manage_task` calls during a Worker turn are tolerated with a warning; the snapshot diff and `commandExecutionPolicy: "off"` remain the safety boundary.
 
-The durable hierarchy is project → task → run → role → assignment → event/evidence. Projects outlive individual UHP sessions. Planner and Orchestrator have distinct session records. Session rotation starts a new UHP conversation while the project ID, promotion state, event history, and Hindsight bank remain stable. Guidance is ordered in the run log; the Orchestrator must acknowledge each handoff at a safe checkpoint. Conflicting active Worker work follows an explicit cancellation and revision path.
+## Checks and CI parity
 
-UHP metadata discovery supplies available configured harness/model pairs. A selection is rejected when that pair is unavailable; Foreman does not silently choose another model. Submission intent and an idempotency key are persisted before sending work. Retries depend on the server advertising idempotency. Actual response/session IDs, terminal status, and usage are recorded only when supplied by UHP.
+When you open a repository, Foreman inspects `.github/workflows` and suggests matching `pnpm`/`npm`/`yarn` script names for your validation commands (source `ci`). Publish, release, deploy, and staging steps are excluded. A `ciChecksNotConfigured` warning in the task start preview lists GitHub CI checks that have no matching local Foreman command.
 
-The controller records the external CLI bridge's Worker response and complete snapshot, verifies it against a pinned Git base and allowed scope, computes the diff, materializes that result in a disposable validation workspace, and runs configured checks itself with bounded time and captured output. Every command in the configured validation list must pass; commands absent from the list are not run or inferred. Reviewer feedback is stored as a separate recommendation; its prose cannot change the verified diff or mark it accepted, and Foreman does not apply Reviewer changes. Human approval is an immutable decision after snapshot, scope, validation, and recommendation evidence gates pass. It does not itself change Git. A separate explicit promotion rechecks the stored evidence and creates a commit rooted at the pinned base; Foreman verifies the resulting complete tree before recording promotion as applied. The approval record’s `evidenceCommit` is the pinned input base, never the result commit. The recorded Worker and Reviewer smoke evidence captures the state before the human decision. The separate live Reviewer response (`claude-opus-5-5`, `recommend`) is documented in [actual-reviewer-smoke.json](investigations/local-cli-uhp/evidence/actual-reviewer-smoke.json). The operator subsequently approved the run in the UI; [actual-reviewer-approval.json](investigations/local-cli-uhp/evidence/actual-reviewer-approval.json) records the immutable decision and its pinned input base (`ff2e868ae0360b706c57c3ef2d21741fe5f9dd9c`). This smoke run has not been promoted and has no accepted result commit. Its approval record predates the evidence-digest binding, so the current promotion endpoint rejects it; promotion remains disabled for that legacy approval unless a new bound decision or explicit migration is provided. Deterministic replay and simulated Reviewer fixtures exercise integration paths but are not live model runs. The configured live validation policy contained one README SHA-256 check; it verified the recorded bytes but is not a broader project test suite. Codex's deterministic bridge fixtures passed 23/23 with no provider calls. Three bounded live UHP submissions invoked Codex once each: the first failed before a session or usable JSON response, the second started a session but exited with a network-category error, and the third completed a turn with actual model unavailable. On the third attempt Foreman received a complete one-entry snapshot, independently verified the README-only change within scope, and passed configured validation (exit 0). The exact appended sentence, response/session IDs, measured usage (57,325 input, 640 output, 53,888 cached input tokens), and requested `gpt-6-sol` are in the [successful Codex evidence](investigations/local-cli-uhp/evidence/actual-codex-worker-smoke-retry3.json); its actual-model field remains unavailable. Acceptance remained `not_decided`; no Reviewer, approval, or Git promotion occurred. Provider request count is unavailable. The Codex runtime uses a per-response writable ephemeral home with host `auth.json` mounted read-only and a read-only host CA bundle. These results do not establish HarnessRouter subscription-login parity or full-snapshot behavior. No HarnessRouter equivalence or Claude session continuation is claimed. The host CLI bridge remains outside Foreman core and uses the existing subscription login boundary. See [workspace bridge evidence and remaining gaps](docs/workspace-bridge.md).
+Validation commands run in a disposable copy of the Worker workspace. Every configured command must pass. Commands absent from the list are not run or inferred.
 
-The [Planner dashboard](docs/screenshots/planner-dashboard.png) and [evidence and usage view](docs/screenshots/evidence-and-usage.png) show a real persisted project, task, run, and queued guidance. They intentionally show unavailable service and usage values where no harness has reported them.
+The checks pipeline in the review panel shows local Foreman results alongside remote GitHub CI status. CI failure excerpts are fetched from `GET /api/runs/:id/github/ci-failures`.
+
+## Reviewing and approving results
+
+When a run reaches `awaiting_approval`, the **Ready for your review** panel appears at the top of the run view. It shows:
+
+- A checklist: files changed, scope verified, checks passed, Reviewer verdict.
+- The checks pipeline with per-check details and failing test extraction.
+- **Approve result** / **Reject** buttons.
+- A stepper: Review → Approve → Promote → Push → PR → Merge.
+
+**Approve result** records an immutable decision bound to the evidence digest. It does not change Git.
+
+**Promote approved result** creates a local commit rooted at the pinned base and a result branch. Your checkout is unchanged.
+
+If validation failed or the Reviewer requested changes, **Retry validation** reruns the configured checks against the stored snapshot. **Ask Orchestrator for a correction** (`POST /api/runs/:id/validation-correction`) resumes the controller for one more Orchestrator → Worker → Reviewer pass. The correction Worker's workspace is seeded from the pinned base and, for validation or Reviewer failures, the previous attempt's verified changes are overlaid so the Worker only needs to describe additional edits.
+
+**Re-send same task to Worker** re-runs the Worker with the unchanged task, starting from the pinned base without overlay. Use **Ask Orchestrator for a correction** when the task itself needs to change.
+
+## GitHub handoff
+
+For a project whose local repository has a GitHub remote, Foreman uses the host's signed-in `gh` CLI to show the selected run's result branch and commit, linked pull request, CI checks, reviews, and merge state. The GitHub panel refreshes status without a model call. A missing remote or unavailable `gh` login appears as a recoverable status in the panel. GitHub credentials stay with the host; they are not put into a Worker workspace or shown in the interface.
+
+The operator's handoff is explicit:
+
+1. Inspect the verified result, validation, and Foreman Reviewer recommendation; choose **Approve result**. This approves the Foreman result only.
+2. Choose **Promote approved result** to create the verified local result commit and branch.
+3. In **GitHub**, confirm **Push result branch**. Wait for Foreman to report that the remote branch SHA matches the promoted result commit, then confirm **Open PR**. Foreman checks for an existing PR before creating one. If the remote SHA differs or cannot be checked, refresh status and resolve that state before opening or updating a PR.
+4. Inspect the actual GitHub PR diff, reviews, and individual CI checks in Foreman. Confirm a GitHub review comment, request for changes, or approval if GitHub permits it. Foreman approval does not submit a GitHub review.
+5. When GitHub requirements are met, confirm **Merge**. If branch rules require a merge queue, inspect the full diff and reviews, wait for all checks to pass, and confirm **Add to merge queue** instead. Foreman reports the queue state and does not merge immediately or submit a duplicate queue request. For direct merge, Foreman re-reads the PR head and refuses to merge if it differs from the commit reviewed in the UI. Branch protection applies; Foreman does not bypass it or enable auto-merge silently.
+6. After merge, refresh the local checkout before starting a dependent task. The GitHub base branch has advanced, but the source checkout may still be behind. Use Foreman's local refresh action only on a clean checkout that can fast-forward, or update the repository yourself and then return to Foreman. Foreman does not overwrite uncommitted changes.
+
+Push, PR creation, GitHub review, direct merge, and queue submission each require a separate UI confirmation. Planner, Orchestrator, Worker, and Reviewer messages cannot invoke those actions.
+
+Foreman can generate a Planner-drafted PR title and body via `POST /api/runs/:id/github/pr-draft`. The draft includes a deterministic Verification section and is editable before you open the PR.
+
+## Repository access for Planner and Orchestrator
+
+When the workspace bridge is configured and the harness is Claude Code or Codex, Planner and Orchestrator receive a read-only snapshot of the repository in their working directory. They can use Read, Grep, and Glob to inspect code before proposing tasks or work. The snapshot is seeded via the same bridge used for Worker workspaces, with no write access granted.
+
+If the snapshot cannot be seeded (bridge unavailable, or Antigravity CLI selected), Foreman falls back to a deterministic repository digest: the file tree at the relevant commit, a `package.json` summary, the first 60 lines of README, and rarity-weighted keyword hits from the task description. The digest is bounded to approximately 24 KB.
+
+A `repoAccess` badge on each assignment shows whether the role used a live snapshot or a digest.
+
+## Configuration
+
+The standard local flow requires no environment variables. The following settings are available for custom setups.
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `FOREMAN_HOST` | `127.0.0.1` | Bind address. |
+| `FOREMAN_PORT` | `4399` | Bind port. |
+| `FOREMAN_DATA_DIR` | `.foreman-data` | Durable state directory. |
+| `UHP_BASE_URL` | — | External UHP server base URL. Without this, Foreman uses its own per-project bridge. |
+| `UHP_HARNESS_ID`, `UHP_MODEL` | — | Optional explicit initial harness/model for the external UHP server. Must be set together. |
+| `UHP_TOKEN` | — | Optional bearer credential for the external UHP server. |
+| `HINDSIGHT_BASE_URL` | — | Hindsight API base URL. Outages show degraded memory status and do not stop workflow. |
+| `HINDSIGHT_TOKEN` | — | Optional credential for Hindsight. |
+| `FOREMAN_REQUEST_TIMEOUT_MS` | `120000` | Initial HTTP connection timeout (max 120,000 ms). Does not limit turn duration. |
+| `FOREMAN_TASK_TIMEOUT_MS` | `180000` | Turn timeout for Reviewer and other non-Worker, non-Planner/Orchestrator roles (max 900,000 ms). |
+| `FOREMAN_WORKER_TIMEOUT_MS` | `600000` | Turn timeout for Worker roles (max 900,000 ms). |
+| `FOREMAN_WORKSPACE_SOURCE_REPO` | — | Local Git repository for snapshot verification. Required with the manual bridge workflow. |
+| `FOREMAN_WORKSPACE_BRIDGE_URL` | — | Loopback URL for an external workspace bridge. |
+| `FOREMAN_WORKSPACE_ALLOWED_SCOPE` | — | Comma-separated exact paths or directory prefixes ending in `/` allowed in Worker results. |
+| `FOREMAN_VALIDATION_COMMANDS` | — | JSON array of `{"name","command","args","cwd?"}` entries run in the disposable validation workspace. |
+| `FOREMAN_VALIDATION_TIMEOUT_MS` | `120000` | Per-command time limit (max 600,000 ms). |
+| `FOREMAN_VALIDATION_MAX_OUTPUT_BYTES` | `1048576` | Per-command output capture bound (max 16 MiB). |
+
+Planner and Orchestrator turn timeouts are fixed at 300 seconds and are not configurable via environment variable. The optional configuration shape is recorded in `config.schema.json`.
+
+## Data and cleanup
+
+Foreman stores project state in `.foreman-data/`. Each project's workspace setup, bridge state, and work directories are stored under its project ID. **Deleting a project** from the UI removes its events, bridge state directory, bridge work directory, and saved workspace setup in addition to the project record itself. Promotion records a result commit but does not advance the repository checkout.
 
 ## Verify
 
@@ -88,4 +143,16 @@ pnpm test
 pnpm build
 ```
 
-The deterministic UHP fixture tests do not call a model provider. The pinned local HarnessRouter probe and its observed protocol version are recorded in the [workspace report](docs/workspace-bridge.md). Gemini CLI has no eligible cached Google-account login on this host; its current API-key configuration was limited to a one-off comparison attempt. Claude Code and Codex CLI have host account logins, but the pinned router has no provider integration and does not inherit those logins. An [experimental host-side UHP bridge](docs/subscription-cli-uhp.md) completed one separately authorized Claude Code smoke task using the existing subscription login; it is not a HarnessRouter capability. The Codex workspace-write fixture and three-attempt live proof are described in the [Codex Worker smoke report](docs/codex-worker-smoke.md). The test suite never makes provider calls.
+The deterministic UHP fixture tests do not call a model provider. The test suite never makes provider calls.
+
+## Evidence and history
+
+Historical evidence reports and investigations are in the `docs/` and `investigations/` directories. Key documents:
+
+- [Host CLI workflow guide](docs/three-harness-workflow.md) — manual bridge setup, live proof records.
+- [Architecture](docs/architecture.md) — control flow and authority model.
+- [Decisions](docs/decisions.md) — design decisions log.
+- [Automatic-path smoke report](docs/automatic-path-smoke.md) and [machine-readable evidence](docs/evidence/automatic-path-smoke-20260923.json) — live run through all four roles.
+- [Workspace bridge evidence](docs/workspace-bridge.md) — bridge protocol and remaining gaps.
+- [AGY Worker usage follow-up](docs/agy-worker-usage-followup.md) — four verified same-task AGY runs.
+- [Gemini CLI investigation](docs/gemini-cli-worker-investigation.md) — why Gemini CLI was not enabled.
