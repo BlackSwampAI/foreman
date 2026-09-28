@@ -4,6 +4,7 @@
  * before the PR is created on GitHub.
  */
 import React, { useState } from 'react';
+import { Badge } from './badge.js';
 
 export interface PrDraftData {
   title: string;
@@ -91,9 +92,9 @@ export function PrDraftPanel({ runId: _runId, draft, pending, onGenerate, onSave
         <div className="pr-draft-view">
           <div className="pr-draft-header">
             <b className="pr-draft-title">{draft.title}</b>
-            <span className={`status-pill pr-draft-source-pill tone-neutral`} title={`Source: ${sourceLabel(draft.source)}`}>
+            <Badge tone="info" className="pr-draft-source-pill" title={`Source: ${sourceLabel(draft.source)}`}>
               {sourceLabel(draft.source)}
-            </span>
+            </Badge>
           </div>
           <pre className="pr-draft-body">{draft.body}</pre>
           <div className="pr-draft-actions">

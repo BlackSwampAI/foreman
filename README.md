@@ -61,7 +61,22 @@ When you open a repository, Foreman inspects `.github/workflows` and suggests ma
 
 Validation commands run in a disposable copy of the Worker workspace. Every configured command must pass. Commands absent from the list are not run or inferred.
 
+The suggested allowed scope covers the top-level tracked paths except CI configuration (`.github/`, `.gitlab-ci.yml`, `.circleci/`, `.buildkite/`, `azure-pipelines.yml`, `Jenkinsfile`, `.travis.yml`), which runs with repository secrets once pushed. Add those paths by hand if a task really has to change them.
+
 The checks pipeline in the review panel shows local Foreman results alongside remote GitHub CI status. CI failure excerpts are fetched from `GET /api/runs/:id/github/ci-failures`.
+
+### Validation sandbox
+
+The Worker's files are untrusted, and validation runs them (`pnpm install` lifecycle scripts, test files). Foreman therefore runs every validation command inside a [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`) sandbox by default. On Linux, install it with `apt install bubblewrap` or `dnf install bubblewrap`. If `bwrap` is missing or cannot create a sandbox, validation fails with an error and does not run on the host.
+
+- **Hidden from the command:** your home directory (`/home`, `/root`, `$HOME`), Foreman's data directory, the source repository checkout, `/tmp`, `/var/tmp`, `/run` (Docker and D-Bus sockets, the user runtime directory), `/mnt`, `/media` and `/srv` are replaced by empty temporary directories. The rest of the host is mounted read-only.
+- **Provided:** the workspace, read-write at `/tmp/workspace`; a fresh `HOME`; and an environment of only `PATH`, `LANG`, `LC_ALL`, `HOME`, `TMPDIR` and the cache variables below. The command has its own PID, IPC and UTS namespaces and no capabilities. A timeout or output overflow kills its whole process tree.
+- **Toolchains under a hidden directory** (nvm, pnpm in `~/.local`) are mounted back read-only: `PATH` entries, the install prefix of the command and of `node` (when it is at least two levels below the home directory), and the paths in `FOREMAN_VALIDATION_SANDBOX_RO_PATHS`. Version managers that keep state beside their shims (Volta `~/.volta`, asdf `~/.asdf`, rustup `~/.rustup`, Homebrew on Linux) need their directory listed there.
+- **Package-manager cache:** `<data dir>/validation-cache` (owner-only) is mounted read-write at `/tmp/foreman-cache`, with `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `npm_config_cache`, `npm_config_store_dir` and `pnpm_config_store_dir` (pnpm 10 and 11), `YARN_CACHE_FOLDER` and `COREPACK_HOME` pointing into it, so installs do not download everything each time. It is shared by every validation and project. pnpm and npm verify package integrity against the lockfile, but a command that ran hostile code could still leave bad data behind, for example a swapped pnpm binary under `XDG_DATA_HOME`. Delete the directory if you suspect that.
+- **Accepted risk, network access:** the sandbox keeps the host network because installs need it. A validation command can reach the internet, any service listening on localhost (including Foreman's own API) and the host's abstract-namespace Unix sockets, though it does not receive your proxy or credential variables. Do not treat the sandbox as a network boundary.
+- Run Foreman as an unprivileged user. The sandbox hides paths but cannot stop a root process from reading root-only files that remain visible, such as `/etc/shadow`.
+
+`FOREMAN_VALIDATION_SANDBOX=none` is an explicit, unsafe opt-out for hosts without bubblewrap (for example macOS). Worker-authored code then runs directly on your machine with your credentials. Foreman prints a warning at startup, marks each check with the mode it ran in, and reports `validationSandbox: {mode, available}` from `GET /api/status`. Foreman's own tests run validation through the sandbox, so `pnpm test` needs `bwrap` as well.
 
 ## Reviewing and approving results
 
@@ -128,6 +143,8 @@ The standard local flow requires no environment variables. The following setting
 | `FOREMAN_VALIDATION_COMMANDS` | — | JSON array of `{"name","command","args","cwd?"}` entries run in the disposable validation workspace. |
 | `FOREMAN_VALIDATION_TIMEOUT_MS` | `120000` | Per-command time limit (max 600,000 ms). |
 | `FOREMAN_VALIDATION_MAX_OUTPUT_BYTES` | `1048576` | Per-command output capture bound (max 16 MiB). |
+| `FOREMAN_VALIDATION_SANDBOX` | `bwrap` | `bwrap` runs every validation command in a bubblewrap sandbox and fails if it is unavailable. `none` runs them directly on the host with your credentials, and is unsafe. See [Validation sandbox](#validation-sandbox). |
+| `FOREMAN_VALIDATION_SANDBOX_RO_PATHS` | — | Comma-separated absolute paths mounted read-only in the sandbox, for toolchains under a hidden directory such as `$HOME/.volta`. Paths that do not exist are ignored. |
 
 Planner and Orchestrator turn timeouts are fixed at 300 seconds and are not configurable via environment variable. The optional configuration shape is recorded in `config.schema.json`.
 

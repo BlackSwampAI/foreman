@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import { loadEnvFile } from 'node:process';
+import { parseSandboxMode, type ValidationSandboxMode } from './validation-sandbox.js';
 
 export interface ForemanConfig {
   host: string;
@@ -19,6 +20,7 @@ export interface ForemanConfig {
   validationCommands: Array<{name:string;command:string;args:string[];cwd?:string}>;
   validationTimeoutMs: number;
   validationMaxOutputBytes: number;
+  validationSandbox: { mode: ValidationSandboxMode; roPaths: string[]; dataDir: string; cacheDir: string };
 }
 
 function integer(name: string, fallback: number, min: number, max: number): number {
@@ -52,10 +54,16 @@ export function loadConfig(): ForemanConfig {
   const rawCommands=process.env.FOREMAN_VALIDATION_COMMANDS?.trim();
   if(rawCommands){try{const value=JSON.parse(rawCommands);if(!Array.isArray(value))throw new Error();validationCommands=value.map((item:unknown)=>{if(!item||typeof item!=='object')throw new Error();const x=item as Record<string,unknown>;if(typeof x.name!=='string'||!x.name.trim()||typeof x.command!=='string'||!x.command||!Array.isArray(x.args)||x.args.some(arg=>typeof arg!=='string')||(x.cwd!==undefined&&typeof x.cwd!=='string'))throw new Error();return {name:x.name,command:x.command,args:x.args as string[],...(typeof x.cwd==='string'?{cwd:x.cwd}:{})};});}catch{throw new Error('FOREMAN_VALIDATION_COMMANDS must be a JSON array of {name,command,args,cwd?}');}}
   const workspaceAllowedScope=(process.env.FOREMAN_WORKSPACE_ALLOWED_SCOPE??'').split(',').map(x=>x.trim()).filter(Boolean);
+  const sandboxMode = parseSandboxMode(process.env.FOREMAN_VALIDATION_SANDBOX);
+  if (!sandboxMode) throw new Error('FOREMAN_VALIDATION_SANDBOX must be "bwrap" or "none"');
+  if (sandboxMode === 'none') process.stderr.write('WARNING: FOREMAN_VALIDATION_SANDBOX=none: Worker-authored validation commands run directly on this host with your credentials and network access\n');
+  const sandboxRoPaths = (process.env.FOREMAN_VALIDATION_SANDBOX_RO_PATHS ?? '').split(',').map(x => x.trim()).filter(Boolean);
+  if (sandboxRoPaths.some(path => !isAbsolute(path))) throw new Error('FOREMAN_VALIDATION_SANDBOX_RO_PATHS must be a comma-separated list of absolute paths');
+  const dataDir = resolve(process.env.FOREMAN_DATA_DIR?.trim() || '.foreman-data');
   return {
     host: process.env.FOREMAN_HOST?.trim() || '127.0.0.1',
     port: integer('FOREMAN_PORT', 4399, 1, 65535),
-    dataDir: resolve(process.env.FOREMAN_DATA_DIR?.trim() || '.foreman-data'),
+    dataDir,
     uhpBaseUrl: optionalHttpUrl('UHP_BASE_URL'),
     uhpHarnessId,
     uhpModel,
@@ -68,6 +76,7 @@ export function loadConfig(): ForemanConfig {
     workspaceAllowedScope,
     validationCommands,
     validationTimeoutMs: integer('FOREMAN_VALIDATION_TIMEOUT_MS', 120000, 1, 600000),
-    validationMaxOutputBytes: integer('FOREMAN_VALIDATION_MAX_OUTPUT_BYTES', 1048576, 1, 16777216)
+    validationMaxOutputBytes: integer('FOREMAN_VALIDATION_MAX_OUTPUT_BYTES', 1048576, 1, 16777216),
+    validationSandbox: { mode: sandboxMode, roPaths: sandboxRoPaths.map(path => resolve(path)), dataDir, cacheDir: resolve(dataDir, 'validation-cache') }
   };
 }

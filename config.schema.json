@@ -19,6 +19,8 @@
     "FOREMAN_WORKSPACE_ALLOWED_SCOPE": { "type": "string", "description": "Comma-separated exact paths or directory prefixes ending in / allowed for Worker changes" },
     "FOREMAN_VALIDATION_COMMANDS": { "type": "string", "description": "JSON array of validation command objects with explicit command and args" },
     "FOREMAN_VALIDATION_TIMEOUT_MS": { "type": "integer", "minimum": 1, "maximum": 600000, "default": 120000 },
-    "FOREMAN_VALIDATION_MAX_OUTPUT_BYTES": { "type": "integer", "minimum": 1, "maximum": 16777216, "default": 1048576 }
+    "FOREMAN_VALIDATION_MAX_OUTPUT_BYTES": { "type": "integer", "minimum": 1, "maximum": 16777216, "default": 1048576 },
+    "FOREMAN_VALIDATION_SANDBOX": { "type": "string", "enum": ["bwrap", "none"], "default": "bwrap", "description": "bwrap runs every validation command inside a bubblewrap sandbox and fails closed when it is unavailable; none runs them unsandboxed on the host (unsafe opt-out)" },
+    "FOREMAN_VALIDATION_SANDBOX_RO_PATHS": { "type": "string", "description": "Comma-separated absolute paths (for example a toolchain under your home directory) mounted read-only into the validation sandbox" }
   }
 }
