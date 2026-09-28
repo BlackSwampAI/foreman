@@ -470,7 +470,7 @@ main>footer .foot-right{float:right;margin:0;color:var(--muted)}
 
 /* ── Decision panel: first block of the centre column whenever there is something to decide (Approve enabled) or to do next (already approved); while it cannot be acted on it keeps its DOM position. */
 .decision-panel{padding:0 0 var(--sp-3);border-color:#245d90;background:linear-gradient(180deg,#0a2138,var(--panel) 70%)}
-.decision-panel:not(:has(.decision-approve-row button:disabled)){order:-1}
+.decision-panel:not(:has(.decision-approve-row button:disabled)),.decision-panel[data-digest="loading"],.decision-panel[data-digest="error"]{order:-1}
 .decision-panel>:not(.card-title){margin-inline:var(--sp-4)}
 .decision-panel .card-title{flex-wrap:wrap;gap:var(--sp-2) var(--sp-4);margin-bottom:var(--sp-3);padding:var(--sp-3) var(--sp-4);border-bottom:1px solid var(--line)}
 .decision-panel .card-title h2{margin:0;font-size:var(--fs-lg)}

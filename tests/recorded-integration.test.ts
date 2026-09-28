@@ -8,6 +8,7 @@ import { Controller, type UhpAdapter } from '../src/controller.js';
 import { JsonStore } from '../src/store.js';
 import { promoteSnapshotToGit } from '../src/git-promotion.js';
 import { formatReviewDiff } from '../src/verified-workspace.js';
+import { decisionDigest } from './decision-helper.js';
 
 const dirs:string[]=[];
 const bundle=resolve('tests/fixtures/recorded-worker-base.bundle');
@@ -37,7 +38,7 @@ describe('recorded Worker integration fixture (simulated Reviewer; no live model
     await fixture.controller.replayRecordedWorkerOutput(fixture.runId,fixture.workerId,fixture.recorded);
     const recommendation:any=await fixture.controller.requestReviewer(fixture.runId,'simulated_fixture');
     expect(recommendation).toMatchObject({provenance:'simulated_fixture',verdict:'recommend',reviewMode:'read_only'});
-    return fixture.controller.approveRun(fixture.runId,{approved:true,rationale:'Accepted the verified recorded result after inspecting its simulated review.'});
+    return fixture.controller.approveRun(fixture.runId,{approved:true,evidenceDigest:await decisionDigest(fixture.controller,fixture.runId),rationale:'Accepted the verified recorded result after inspecting its simulated review.'});
   }
 
   it('keeps the human decision immutable and distinct from an explicitly applied Git result',async()=>{
@@ -45,7 +46,7 @@ describe('recorded Worker integration fixture (simulated Reviewer; no live model
     const approval:any=await approveRecordedRun(fixture);
     expect(approval).toMatchObject({approved:true,decision:'approved',evidenceCommit:fixture.recorded.baseCommit});
     expect((await fixture.store.load()).projects[0]!.tasks[0]!.runs[0]!.promotion).toMatchObject({status:'not_started'});
-    await expect(fixture.controller.approveRun(fixture.runId,{approved:false,rationale:'Attempt to replace approval'})).rejects.toThrow('A human decision is final for this run');
+    await expect(fixture.controller.approveRun(fixture.runId,{approved:false,evidenceDigest:approval.evidenceDigest,rationale:'Attempt to replace approval'})).rejects.toThrow('A human decision is final for this run');
 
     const promoted:any=await fixture.controller.promoteRun(fixture.runId,{destinationBranch:'foreman/results/controller-success'});
     expect(promoted.approval).toEqual(approval);
@@ -161,9 +162,10 @@ describe('recorded Worker integration fixture (simulated Reviewer; no live model
     const replayed=await afterReviewRestart.replayRecordedWorkerOutput(fixture.runId,fixture.workerId,fixture.recorded);
     expect(replayed).toMatchObject({workerEvidence:{provenance:'recorded_replay',acceptance:'not_decided'},validation:{status:'passed'}});
     await expect(afterReviewRestart.requestReviewer(fixture.runId)).rejects.toThrow('already exists');
-    const rejected=await afterReviewRestart.approveRun(fixture.runId,{approved:false,rationale:'Human rejected after inspecting simulated recommendation'});
+    const reviewedDigest=await decisionDigest(afterReviewRestart,fixture.runId);
+    const rejected=await afterReviewRestart.approveRun(fixture.runId,{approved:false,evidenceDigest:reviewedDigest,rationale:'Human rejected after inspecting simulated recommendation'});
     expect(rejected).toMatchObject({decision:'rejected',approved:false});
-    await expect(afterReviewRestart.approveRun(fixture.runId,{approved:true,rationale:'Attempt to replace the recorded human rejection'})).rejects.toThrow('A human decision is final for this run');
+    await expect(afterReviewRestart.approveRun(fixture.runId,{approved:true,evidenceDigest:reviewedDigest,rationale:'Attempt to replace the recorded human rejection'})).rejects.toThrow('A human decision is final for this run');
     await expect(afterReviewRestart.assign(fixture.runId,'planner','new assignment after human rejection')).rejects.toThrow('No assignments are allowed after the human decision');
   });
 
@@ -191,5 +193,98 @@ describe('recorded Worker integration fixture (simulated Reviewer; no live model
     await expect(outscope.controller.replayRecordedWorkerOutput(outscope.runId,outscope.workerId,badScope)).rejects.toThrow('outside the allowed scope');
     expect((await outscope.store.load()).projects[0]!.tasks[0]!.runs[0]!.workerEvidence).toBeUndefined();
     expect(outscope.uhpCalls.filter(x=>x.role==='reviewer')).toHaveLength(0);
+  });
+});
+
+describe('human decision is bound to the evidence digest the operator reviewed',()=>{
+  const staleMessage='The evidence changed since you reviewed it; refresh and review the current result before deciding.';
+  async function atCheckpoint(verdict:'recommend'|'reject'='recommend') {
+    const fixture=await setup(true,verdict);
+    await fixture.controller.replayRecordedWorkerOutput(fixture.runId,fixture.workerId,fixture.recorded);
+    await fixture.controller.requestReviewer(fixture.runId,'simulated_fixture');
+    return fixture;
+  }
+  const savedRun=async(fixture:Awaited<ReturnType<typeof setup>>):Promise<any>=>(await fixture.store.load()).projects[0]!.tasks[0]!.runs[0]!;
+  const decisionEvents=async(fixture:Awaited<ReturnType<typeof setup>>)=>(await fixture.store.load()).events.filter(e=>e.type==='run.human_approved'||e.type==='run.human_rejected');
+
+  it('serves the evidence identity and the exact digest that approval records',async()=>{
+    const fixture=await atCheckpoint();
+    const evidence=await fixture.controller.decisionEvidence(fixture.runId);
+    const run=await savedRun(fixture);
+    expect(evidence).toEqual({runId:fixture.runId,evidenceDigest:expect.stringMatching(/^[0-9a-f]{64}$/),pinnedBaseCommit:fixture.recorded.baseCommit,workerResponseId:fixture.recorded.responseId,validationId:run.validation.id,recommendationId:run.reviewerRecommendation.id});
+    expect(await fixture.controller.decisionEvidence(fixture.runId)).toEqual(evidence);
+    const approval:any=await fixture.controller.approveRun(fixture.runId,{approved:true,evidenceDigest:evidence.evidenceDigest});
+    expect(approval).toMatchObject({approved:true,decision:'approved',evidenceDigest:evidence.evidenceDigest,evidenceCommit:fixture.recorded.baseCommit});
+    expect((await savedRun(fixture)).promotion).toMatchObject({status:'not_started',evidenceDigest:evidence.evidenceDigest});
+  });
+
+  it('accepts an uppercase copy of the digest and records the canonical lowercase value',async()=>{
+    const fixture=await atCheckpoint();
+    const {evidenceDigest}=await fixture.controller.decisionEvidence(fixture.runId);
+    const approval:any=await fixture.controller.approveRun(fixture.runId,{approved:true,evidenceDigest:evidenceDigest.toUpperCase()});
+    expect(approval.evidenceDigest).toBe(evidenceDigest);
+  });
+
+  it('rejects a missing or malformed digest with 400 for both approval and rejection and records nothing',async()=>{
+    const fixture=await atCheckpoint();
+    const {evidenceDigest}=await fixture.controller.decisionEvidence(fixture.runId);
+    const before=await savedRun(fixture);
+    // Input validation comes before any run lookup, so even an unknown run reports the missing digest.
+    await expect(fixture.controller.approveRun('does-not-exist',{approved:true} as any)).rejects.toMatchObject({statusCode:400});
+    for(const approved of [true,false]){
+      const missing:any={approved};
+      await expect(fixture.controller.approveRun(fixture.runId,missing)).rejects.toMatchObject({statusCode:400});
+      for(const bad of ['',evidenceDigest.slice(1),`${evidenceDigest}0`,'z'.repeat(64),` ${evidenceDigest}`,42,null,{digest:evidenceDigest}]){
+        await expect(fixture.controller.approveRun(fixture.runId,{approved,evidenceDigest:bad as any})).rejects.toMatchObject({statusCode:400});
+      }
+    }
+    const after=await savedRun(fixture);
+    expect(after.approval).toBeUndefined();expect(after.status).toBe(before.status);expect(after.workerEvidence.acceptance).toBe('not_decided');expect(after.promotion).toBeUndefined();
+    expect(await decisionEvents(fixture)).toEqual([]);
+  });
+
+  it('refuses a digest from before a Reviewer retry with 409, records no decision, and accepts the refreshed digest',async()=>{
+    const fixture=await atCheckpoint('reject');
+    const reviewed=await fixture.controller.decisionEvidence(fixture.runId);
+    // A real evidence change: the operator's tab still shows the first recommendation while the Reviewer is retried.
+    await fixture.controller.retryReviewer(fixture.runId);
+    await expect(fixture.controller.decisionEvidence(fixture.runId)).rejects.toMatchObject({statusCode:409});
+    await fixture.controller.requestReviewer(fixture.runId,'simulated_fixture');
+    const current=await fixture.controller.decisionEvidence(fixture.runId);
+    expect(current.recommendationId).not.toBe(reviewed.recommendationId);
+    expect(current.evidenceDigest).not.toBe(reviewed.evidenceDigest);
+    for(const approved of [true,false])await expect(fixture.controller.approveRun(fixture.runId,{approved,evidenceDigest:reviewed.evidenceDigest})).rejects.toMatchObject({statusCode:409,message:staleMessage});
+    const run=await savedRun(fixture);
+    expect(run.approval).toBeUndefined();expect(run.workerEvidence.acceptance).toBe('not_decided');expect(run.status).toBe('awaiting_approval');expect(run.promotion).toBeUndefined();
+    expect(await decisionEvents(fixture)).toEqual([]);
+    await expect(fixture.controller.approveRun(fixture.runId,{approved:true,evidenceDigest:current.evidenceDigest})).resolves.toMatchObject({approved:true,evidenceDigest:current.evidenceDigest});
+  });
+
+  it('requires the digest for rejection as well and binds the rejection to it',async()=>{
+    const fixture=await atCheckpoint('reject');
+    const {evidenceDigest}=await fixture.controller.decisionEvidence(fixture.runId);
+    await expect(fixture.controller.approveRun(fixture.runId,{approved:false,rationale:'no digest'} as any)).rejects.toMatchObject({statusCode:400});
+    expect((await savedRun(fixture)).approval).toBeUndefined();
+    const rejected:any=await fixture.controller.approveRun(fixture.runId,{approved:false,evidenceDigest,rationale:'Not what I reviewed'});
+    expect(rejected).toMatchObject({approved:false,decision:'rejected',evidenceDigest});
+    expect((await decisionEvents(fixture)).map(e=>e.type)).toEqual(['run.human_rejected']);
+  });
+
+  it('does not serve a digest unless the run is at a decision checkpoint',async()=>{
+    const noWorker=await setup(true,'recommend',false);
+    await expect(noWorker.controller.decisionEvidence('does-not-exist')).rejects.toMatchObject({statusCode:404});
+    await expect(noWorker.controller.decisionEvidence(noWorker.runId)).rejects.toMatchObject({statusCode:409,message:expect.stringContaining('Human decision requires')});
+    const noReviewer=await setup();
+    await noReviewer.controller.replayRecordedWorkerOutput(noReviewer.runId,noReviewer.workerId,noReviewer.recorded);
+    await expect(noReviewer.controller.decisionEvidence(noReviewer.runId)).rejects.toMatchObject({statusCode:409});
+    await expect(noReviewer.controller.approveRun(noReviewer.runId,{approved:true,evidenceDigest:'0'.repeat(64)})).rejects.toMatchObject({statusCode:409});
+
+    const active=await atCheckpoint();
+    await active.store.mutate(s=>{s.projects[0]!.tasks[0]!.runs[0]!.controller={startedAt:new Date().toISOString(),active:true,phase:'reviewing',budgets:{roleTurns:{planner:1,orchestrator:1,worker:1,reviewer:1},workerAttempts:1}};});
+    await expect(active.controller.decisionEvidence(active.runId)).rejects.toMatchObject({statusCode:409,message:expect.stringContaining('decision checkpoint')});
+
+    const decided=await atCheckpoint();
+    await decided.controller.approveRun(decided.runId,{approved:true,evidenceDigest:await decisionDigest(decided.controller,decided.runId)});
+    await expect(decided.controller.decisionEvidence(decided.runId)).rejects.toMatchObject({statusCode:409,message:'A human decision is final for this run'});
   });
 });

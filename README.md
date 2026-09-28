@@ -13,7 +13,7 @@ Human ↔ Planner  →  Orchestrator  →  Worker  →  checks  →  Reviewer  �
 3. **Worker.** The Worker edits an isolated workspace seeded from the pinned Git base. Foreman fetches the complete snapshot, byte-compares it against the pinned commit, enforces allowed scope, and computes the exact diff.
 4. **Checks.** Foreman runs every configured validation command in a disposable workspace. An empty result (no file changes) fails the result gate even if commands pass.
 5. **Reviewer.** The Reviewer reads the verified diff and check results in read-only mode. Its recommendation is advisory; it cannot modify the result. A `request_changes` or `reject` verdict triggers a bounded Orchestrator → Worker → Reviewer correction while budget remains.
-6. **Your decision.** The "Ready for your review" panel shows a checklist, the checks pipeline (local Foreman checks and remote GitHub CI), and an Approve / Reject pair. Approval records an immutable decision bound to the evidence. It does not change Git.
+6. **Your decision.** The "Ready for your review" panel shows a checklist, the checks pipeline (local Foreman checks and remote GitHub CI), and an Approve / Reject pair. Approval records an immutable decision bound to the evidence digest you reviewed. It does not change Git.
 7. **Promote → GitHub.** Approved results can be promoted to a local commit, pushed, opened as a PR, and merged, each as a separate confirmed action.
 
 ## Quick start
@@ -87,7 +87,7 @@ When a run reaches `awaiting_approval`, the **Ready for your review** panel appe
 - **Approve result** / **Reject** buttons.
 - A stepper: Review → Approve → Promote → Push → PR → Merge.
 
-**Approve result** records an immutable decision bound to the evidence digest. It does not change Git.
+**Approve result** records an immutable decision bound to the evidence digest you reviewed: the panel loads the digest for the evidence it displays (`GET /api/runs/:id/decision`) and sends it with Approve or Reject. If the evidence changed after that (a validation retry, a correction cycle, another tab), Foreman refuses the decision with a message asking you to review the current result. It does not change Git.
 
 **Promote approved result** creates a local commit rooted at the pinned base and a result branch. Your checkout is unchanged.
 
