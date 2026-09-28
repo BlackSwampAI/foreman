@@ -42,11 +42,11 @@ async function setup(t, options = {}) {
   if (options.noAgyModel) delete env.AGY_MODEL;
   if (!options.agyWorkerEffort) delete env.AGY_WORKER_EFFORT;
   if (options.agyEnabled) Object.assign(env,{AGY_CONFIG_DIR:join(dir,'agy-auth'),...(options.noAgyModel?{}:{AGY_MODEL:options.agyModel ?? 'gemini-3.8-flash-medium'}),AGY_BIN:agy});
-  let proc = spawn(process.execPath, [join(here, 'server.mjs')], { env, stdio: 'ignore' });
+  let proc = spawn(process.execPath, [join(here, 'server.mjs')], { env, cwd: dir, stdio: 'ignore' });
   t.after(async () => { if (proc.exitCode === null) { proc.kill('SIGTERM'); await new Promise(r => proc.once('exit', r)); } await rm(dir, { recursive: true, force: true }); });
   const base = `http://127.0.0.1:${port}`;
   for (let i=0;i<100;i++) { try { const r=await fetch(`${base}/v1/uhp`); if(r.ok) break; } catch {} await new Promise(r=>setTimeout(r,20)); }
-  return { base, dir, env, baseCommit: options.baseCommit ?? fixture?.baseCommit, sourceRepo: options.sourceRepo ?? fixture?.repo, countFor: workspaceId=>join(env.LOCAL_CLI_UHP_WORK,workspaceId,'.fixture-cli-count'), restart: async () => { proc.kill('SIGTERM'); await new Promise(r => proc.once('exit', r)); proc = spawn(process.execPath, [join(here, 'server.mjs')], { env, stdio: 'ignore' }); for(let i=0;i<100;i++){try{if((await fetch(`${base}/v1/uhp`)).ok)break;}catch{} await new Promise(r=>setTimeout(r,20));} } };
+  return { base, dir, env, baseCommit: options.baseCommit ?? fixture?.baseCommit, sourceRepo: options.sourceRepo ?? fixture?.repo, countFor: workspaceId=>join(env.LOCAL_CLI_UHP_WORK,workspaceId,'.fixture-cli-count'), restart: async () => { proc.kill('SIGTERM'); await new Promise(r => proc.once('exit', r)); proc = spawn(process.execPath, [join(here, 'server.mjs')], { env, cwd: dir, stdio: 'ignore' }); for(let i=0;i<100;i++){try{if((await fetch(`${base}/v1/uhp`)).ok)break;}catch{} await new Promise(r=>setTimeout(r,20));} } };
 }
 async function submit(base, harness, model, key, baseCommit, workspaceId, input = 'Say bounded answer') {
   const seeded=workspaceId ? {workspace_id:workspaceId} : await (await fetch(`${base}/extensions/foreman-workspace/v1/workspaces`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({base_commit:baseCommit})})).json();
@@ -238,7 +238,7 @@ test('AGY success with an empty response distinguishes headless soft denial from
   const events=await submit(base,'antigravity-cli','gemini-3.8-flash-medium','agy-soft-denied-key',baseCommit); const response=events.at(-1).response;
   assert.equal(events.at(-1).type,'response.failed',JSON.stringify(events));
   assert.equal(response.output_text,''); assert.equal(response.usage.input_tokens,14);
-  assert.deepEqual(response.metadata.agy_diagnostic,{permission_mode:'request-review',observed_agent:'foreman-worker',cwd:'assigned_workspace',available_tools:['ask_permission','run_command','write_to_file','view_file','list_dir','replace_file_content','multi_replace_file_content','finish'],available_tools_semantics:'headless_init_tools_available_to_cli_not_profile_allowlist',tool_events:[{step_index:1,name:'list_dir',state:'DONE',error_category:'permission_denied'}],tool_lifecycle_update_count:1,distinct_tool_step_count:1,soft_denial_observed:true,result_status:'SUCCESS',response_empty:true,response_characters:0,streamed_agent_text_characters:0,requested_agent:'foreman-worker',agent_definition_sha256:response.metadata.agy_diagnostic.agent_definition_sha256,requested_execution_mode:'accept-edits',outcome:'soft_denied_without_response'});
+  assert.deepEqual(response.metadata.agy_diagnostic,{permission_mode:'request-review',observed_agent:'foreman-worker',cwd:'assigned_workspace',available_tools:['ask_permission','run_command','write_to_file','view_file','list_dir','replace_file_content','multi_replace_file_content','finish'],available_tools_semantics:'headless_init_tools_available_to_cli_not_profile_allowlist',tool_events:[{step_index:1,name:'list_dir',state:'DONE',error_category:'permission_denied',denied_path:'unknown'}],tool_lifecycle_update_count:1,distinct_tool_step_count:1,soft_denial_observed:true,result_status:'SUCCESS',response_empty:true,response_characters:0,streamed_agent_text_characters:0,requested_agent:'foreman-worker',agent_definition_sha256:response.metadata.agy_diagnostic.agent_definition_sha256,requested_execution_mode:'accept-edits',outcome:'soft_denied_without_response'});
   assert.match(response.metadata.agy_diagnostic.agent_definition_sha256,/^[a-f0-9]{64}$/);
   assert.deepEqual(response.metadata.agy_worker_tool_policy.unsafe_tool_events,['list_dir']);
   assert.equal(response.metadata.agy_worker_tool_policy.execution_observations_passed,false);
@@ -271,7 +271,7 @@ test('AGY Worker permits selected custom agent with global tool catalog, but rej
   const {base,baseCommit}=await setup(t,{agyEnabled:true,agyBody:body});
   const events=await submit(base,'antigravity-cli','gemini-3.8-flash-medium','agy-command-advertised-key',baseCommit); const response=events.at(-1).response;
   assert.equal(events.at(-1).type,'response.failed',JSON.stringify(events));
-  assert.equal(response.error.message,'AGY Worker selected the wrong agent or executed an out-of-profile tool');
+  assert.equal(response.error.message,"The Worker used AGY's `run_command` tool, which Foreman's Worker profile doesn't allow; retry, or switch the Worker model.");
   assert.deepEqual(response.metadata.agy_worker_tool_policy.unsafe_tool_events,['run_command']);
   assert.equal(response.metadata.agy_worker_tool_policy.execution_observations_passed,false);
   assert.equal(response.metadata.agy_diagnostic.observed_agent,'foreman-worker');
@@ -292,7 +292,7 @@ test('AGY lifecycle updates collapse by step while ACTIVE unsafe attempts remain
   const events=await submit(base,'antigravity-cli','gemini-3.8-flash-medium','agy-lifecycle-dedup-key',baseCommit); const response=events.at(-1).response;
   assert.equal(events.at(-1).type,'response.failed',JSON.stringify(events));
   assert.deepEqual(response.metadata.agy_diagnostic.tool_events,[
-    {step_index:3,name:'view_file',state:'ERROR',error_category:'permission_denied'},
+    {step_index:3,name:'view_file',state:'ERROR',error_category:'permission_denied',denied_path:'unknown'},
     {step_index:4,name:'view_file',state:'DONE'},
     {step_index:5,name:'run_command',state:'ACTIVE'},
   ]);
@@ -313,10 +313,28 @@ test('AGY Worker rejects a different init.agent even when it executes only an al
   const {base,baseCommit}=await setup(t,{agyEnabled:true,agyBody:body});
   const events=await submit(base,'antigravity-cli','gemini-3.8-flash-medium','agy-wrong-agent-key',baseCommit); const response=events.at(-1).response;
   assert.equal(events.at(-1).type,'response.failed',JSON.stringify(events));
-  assert.equal(response.error.message,'AGY Worker selected the wrong agent or executed an out-of-profile tool');
+  assert.equal(response.error.message,'AGY Worker selected the wrong agent; retry, or switch the Worker model');
   assert.equal(response.metadata.agy_worker_tool_policy.selected_agent,'default');
   assert.equal(response.metadata.agy_worker_tool_policy.selected_agent_matches,false);
   assert.deepEqual(response.metadata.agy_worker_tool_policy.unsafe_tool_events,[]);
+});
+
+test('AGY Worker reports an agent problem before an unsafe tool when both occur', async t => {
+  const shell=`{event:'step_update',step_update:{conversation_id:'agy-both',step_index:1,state:'ACTIVE',step_type:'tool',tool_name:'run_command',tool_info:{name:'run_command'}}}`;
+  const result=`{event:'result',result:{conversation_id:'agy-both',status:'SUCCESS',response:'No work performed.',model:'gemini-3.8-flash-medium'}}`;
+  const cases=[
+    {key:'agy-wrong-agent-and-shell-key',init:`{event:'init',conversation_id:'agy-both',agent:'default',init:{cwd:'/workspace',model:'gemini-3.8-flash-medium',tools:['run_command']}}`,message:'AGY Worker selected the wrong agent; retry, or switch the Worker model',selected:'default'},
+    {key:'agy-no-init-and-shell-key',init:undefined,message:'AGY Worker did not emit an initialization event identifying the selected agent',selected:'unreported'},
+  ];
+  for (const {key,init,message,selected} of cases) {
+    const body=`if(process.argv[2]==='models'){console.log('gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)');process.exit(0)}${init?`console.log(JSON.stringify(${init}));`:''}console.log(JSON.stringify(${shell}));console.log(JSON.stringify(${result}));`;
+    const {base,baseCommit}=await setup(t,{agyEnabled:true,agyBody:body});
+    const events=await submit(base,'antigravity-cli','gemini-3.8-flash-medium',key,baseCommit); const response=events.at(-1).response;
+    assert.equal(events.at(-1).type,'response.failed',JSON.stringify(events));
+    assert.equal(response.error.message,message,key);
+    assert.equal(response.metadata.agy_worker_tool_policy.selected_agent,selected,key);
+    assert.deepEqual(response.metadata.agy_worker_tool_policy.unsafe_tool_events,['run_command'],key);
+  }
 });
 
 test('AGY Worker reports missing initialization separately from a mismatched agent', async t => {
@@ -612,7 +630,7 @@ test('Codex Worker edits only its seeded workspace; Foreman verifies the complet
   const parent = await mkdtemp(join(tmpdir(),'foreman-codex-boundary-')); t.after(()=>rm(parent,{recursive:true,force:true}));
   const sentinel=join(parent,'outside-sentinel'); await writeFile(sentinel,'FOREMAN-CODEX-OUTSIDE-SENTINEL');
   const codexBody = `import {readFileSync,writeFileSync} from 'node:fs'; const path=${JSON.stringify(sentinel)}; let read='allowed',write='allowed'; try{readFileSync(path,'utf8')}catch{read='denied'} try{writeFileSync(path,'CHANGED')}catch{write='denied'} writeFileSync('README.md',${JSON.stringify('# Fixture\n\nCodex changed the assigned README.\n')}); writeFileSync('.boundary-result.json',JSON.stringify({read,write})); console.log(JSON.stringify({type:'thread.started',thread_id:'codex-worker-thread'})); console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'Updated README.md in the assigned workspace.'}})); console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:11,output_tokens:7}}));`;
-  const claudeBody=`let prompt='';process.stdin.setEncoding('utf8');process.stdin.on('data',chunk=>prompt+=chunk);process.stdin.on('end',()=>{const model='claude-actual';const result=prompt.includes('Return exactly one JSON object and no prose: {"workerTask":"..."}')?JSON.stringify({workerTask:'Change README.md with one short sentence.'}):'Planner recommends a concise README note.';console.log(JSON.stringify({type:'system',subtype:'init',model,session_id:'judgment-session'}));console.log(JSON.stringify({type:'result',subtype:'success',result,model,session_id:'judgment-session',usage:{input_tokens:5,output_tokens:2}}));});`;
+  const claudeBody=`let prompt='';process.stdin.setEncoding('utf8');process.stdin.on('data',chunk=>prompt+=chunk);process.stdin.on('end',()=>{const model='claude-actual';const result=prompt.includes('"workerTask"')&&prompt.includes('"targetFiles"')?JSON.stringify({workerTask:'Change README.md with one short sentence.',targetFiles:['README.md']}):'Planner recommends a concise README note.';console.log(JSON.stringify({type:'system',subtype:'init',model,session_id:'judgment-session'}));console.log(JSON.stringify({type:'result',subtype:'success',result,model,session_id:'judgment-session',usage:{input_tokens:5,output_tokens:2}}));});`;
   const {base,env}=await setup(t,{sourceRepo:fixture.repo,baseCommit:fixture.baseCommit,codexBody,claudeBody});
   const uhp = new UhpClient({baseUrl:base,timeoutMs:20_000});
   const controller = new Controller(new JsonStore(join(parent,'foreman-state.json')),uhp,false,true);

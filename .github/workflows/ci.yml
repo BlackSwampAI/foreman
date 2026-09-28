@@ -17,7 +17,7 @@ jobs:
   verify:
     name: Verify
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Check out repository
@@ -36,11 +36,35 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Validation commands and the local bridge run inside bubblewrap sandboxes,
+      # so the sandbox must work before any test step.
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+
+      # ubuntu-24.04 blocks unprivileged user namespaces through AppArmor, which
+      # makes bwrap fail. The key is absent on kernels without that restriction.
+      - name: Allow unprivileged user namespaces
+        run: |
+          if sysctl kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          else
+            echo "kernel.apparmor_restrict_unprivileged_userns is not present; nothing to relax"
+          fi
+
+      - name: Smoke-test bubblewrap
+        run: bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid true
+
       - name: Typecheck
         run: pnpm typecheck
 
       - name: Run tests
         run: pnpm test
+
+      - name: Bridge tests
+        run: pnpm test:bridge
+        timeout-minutes: 8
 
       - name: Build
         run: pnpm build
