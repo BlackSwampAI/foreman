@@ -9,7 +9,7 @@ import { Controller } from './controller.js';
 import { JsonStore } from './store.js';
 import { UhpClient } from './uhp.js';
 import { HindsightClient } from './hindsight.js';
-import { LocalBridge } from './local-bridge.js';
+import { LocalBridge, bearerFetch } from './local-bridge.js';
 import { browseRepositories, repositoryName } from './repository-browser.js';
 import { inspectRepository } from './repository-inspector.js';
 import { deleteWorkspaceSetup, findSavedProjectForRepository, loadWorkspaceSetup, saveWorkspaceSetup, validateWorkspaceSetup } from './workspace-setup.js';
@@ -24,21 +24,21 @@ if(workspacePolicyConfigured&&(!config.workspaceSourceRepo||!config.workspaceBri
 const store=new JsonStore(resolve(config.dataDir,'state.json'));
 const github=new GitHubIntegration(store,config.dataDir);
 const uhpToken=process.env.UHP_TOKEN;
-const uhp=config.uhpBaseUrl ? new UhpClient({baseUrl:config.uhpBaseUrl,...(uhpToken?{token:uhpToken}:{}),harnessId:config.uhpHarnessId,model:config.uhpModel,timeoutMs:Math.max(config.requestTimeoutMs,45_000)}) : {
+const uhp=config.uhpBaseUrl ? new UhpClient({baseUrl:config.uhpBaseUrl,...(uhpToken?{token:uhpToken,fetch:bearerFetch(uhpToken)}:{}),harnessId:config.uhpHarnessId,model:config.uhpModel,timeoutMs:Math.max(config.requestTimeoutMs,45_000)}) : {
   async submit():Promise<never>{throw new Error('UHP is not configured (set UHP_BASE_URL)');},
   async cancel():Promise<never>{throw new Error('UHP is not configured (set UHP_BASE_URL)');}
 };
 const hindsight=config.hindsightBaseUrl?new HindsightClient({baseUrl:config.hindsightBaseUrl,token:process.env.HINDSIGHT_TOKEN}):undefined;
 const controller=new Controller(store,uhp,!!config.hindsightBaseUrl,!!config.uhpBaseUrl,config.uhpHarnessId&&config.uhpModel?{harnessId:config.uhpHarnessId,model:config.uhpModel}:undefined,hindsight,Math.ceil(config.taskTimeoutMs/1000),Math.ceil(config.workerTimeoutMs/1000),300);
-if(config.workspaceSourceRepo&&config.workspaceAllowedScope.length&&config.validationCommands.length)controller.configureVerifiedWorkspace({repoPath:config.workspaceSourceRepo,allowedScope:config.workspaceAllowedScope,commands:config.validationCommands,bridgeBaseUrl:config.workspaceBridgeUrl,timeoutMs:config.validationTimeoutMs,maxOutputBytes:config.validationMaxOutputBytes,sandbox:config.validationSandbox});
+if(config.workspaceSourceRepo&&config.workspaceAllowedScope.length&&config.validationCommands.length)controller.configureVerifiedWorkspace({repoPath:config.workspaceSourceRepo,allowedScope:config.workspaceAllowedScope,commands:config.validationCommands,bridgeBaseUrl:config.workspaceBridgeUrl,timeoutMs:config.validationTimeoutMs,maxOutputBytes:config.validationMaxOutputBytes,sandbox:config.validationSandbox,bridgeToken:config.workspaceBridgeToken});
 const projectControllers=new Map<string,{controller:Controller;bridge:LocalBridge;workspace:Awaited<ReturnType<typeof validateWorkspaceSetup>>}>();
 const createProjectRuntime=async(projectId:string,workspace:Awaited<ReturnType<typeof validateWorkspaceSetup>>)=>{
-  const bridge=new LocalBridge({dataDir:resolve(config.dataDir,'local-bridges')});
+  const bridge=new LocalBridge({dataDir:resolve(config.dataDir,'local-bridges'),onHealthChange:health=>process.stderr.write(`Local bridge for ${projectId} is ${health.state}${health.message?`: ${health.message}`:''}\n`)});
   try {
     const status=await bridge.start(workspace.repoPath,projectId);
-    const projectUhp=new UhpClient({baseUrl:status.baseUrl,timeoutMs:Math.max(config.requestTimeoutMs,45_000)});
+    const projectUhp=new UhpClient({baseUrl:status.baseUrl,token:status.token,fetch:bearerFetch(status.token),timeoutMs:Math.max(config.requestTimeoutMs,45_000)});
     const scoped=new Controller(store,projectUhp,!!config.hindsightBaseUrl,true,undefined,hindsight,Math.ceil(config.taskTimeoutMs/1000),Math.ceil(config.workerTimeoutMs/1000),300,projectId);
-    scoped.configureVerifiedWorkspace({repoPath:workspace.repoPath,allowedScope:workspace.allowedScope,commands:workspace.validationCommands,bridgeBaseUrl:status.baseUrl,timeoutMs:config.validationTimeoutMs,maxOutputBytes:config.validationMaxOutputBytes,sandbox:config.validationSandbox});
+    scoped.configureVerifiedWorkspace({repoPath:workspace.repoPath,allowedScope:workspace.allowedScope,commands:workspace.validationCommands,bridgeBaseUrl:status.baseUrl,timeoutMs:config.validationTimeoutMs,maxOutputBytes:config.validationMaxOutputBytes,sandbox:config.validationSandbox,bridgeToken:status.token});
     projectControllers.set(projectId,{controller:scoped,bridge,workspace});
     return {scoped,bridge,status};
   } catch(error) { await bridge.stop(); throw error; }
@@ -116,9 +116,9 @@ const server=createServer(async(req,res)=>{
       const runtime=projectControllers.get(projectId);
       const unavailable={status:'unavailable' as const};
       const fallback={harnesses:['claude-code','codex-cli','antigravity-cli'].map(harnessId=>({harnessId,status:'unavailable' as const,windows:{fiveHour:unavailable,weekly:unavailable}}))};
-      const baseUrl=runtime?.bridge.status?.baseUrl;
-      if(!baseUrl){json(res,200,fallback);return;}
-      try{json(res,200,await new UhpClient({baseUrl,timeoutMs:15_000}).usage());return;}
+      const bridgeStatus=runtime?.bridge.status;
+      if(!bridgeStatus){json(res,200,{...fallback,bridgeStatus:runtime?.bridge.health.state??'unavailable'});return;}
+      try{json(res,200,await new UhpClient({baseUrl:bridgeStatus.baseUrl,token:bridgeStatus.token,fetch:bearerFetch(bridgeStatus.token),timeoutMs:15_000}).usage());return;}
       catch{json(res,200,fallback);return;}
     }
     const activeController=await controllerForPath(path,url.searchParams,req.method);
@@ -129,9 +129,10 @@ const server=createServer(async(req,res)=>{
       const savedState=await store.load(),existingId=await findSavedProjectForRepository(config.dataDir,savedState.projects,workspace.repoPath);
       if(existingId){
         let runtime=projectControllers.get(existingId);
+        if(runtime&&runtime.bridge.health.state==='unavailable'){await runtime.bridge.stop();projectControllers.delete(existingId);runtime=undefined;}
         if(runtime){
-          const bridgeBaseUrl=runtime.bridge.status?.baseUrl;if(!bridgeBaseUrl)throw Object.assign(new Error('Local repository bridge is unavailable for this project'),{statusCode:503});
-          runtime.controller.configureVerifiedWorkspace({repoPath:workspace.repoPath,allowedScope:workspace.allowedScope,commands:workspace.validationCommands,bridgeBaseUrl,timeoutMs:config.validationTimeoutMs,maxOutputBytes:config.validationMaxOutputBytes,sandbox:config.validationSandbox});
+          const bridgeBaseUrl=runtime.bridge.status?.baseUrl;if(!bridgeBaseUrl)throw Object.assign(new Error(`Local repository bridge is ${runtime.bridge.health.state}; retry shortly`),{statusCode:503});
+          runtime.controller.configureVerifiedWorkspace({repoPath:workspace.repoPath,allowedScope:workspace.allowedScope,commands:workspace.validationCommands,bridgeBaseUrl,timeoutMs:config.validationTimeoutMs,maxOutputBytes:config.validationMaxOutputBytes,sandbox:config.validationSandbox,bridgeToken:runtime.bridge.status?.token});
           const saved=await saveWorkspaceSetup(config.dataDir,existingId,{repoPath:workspace.repoPath,allowedScope:workspace.allowedScope,validationCommands:workspace.validationCommands});
           projectControllers.set(existingId,{...runtime,workspace:saved});
         }else{
@@ -147,7 +148,7 @@ const server=createServer(async(req,res)=>{
       catch(error){projectControllers.delete(projectId);await bridge.stop();throw error;}
     }
     const setupMatch=path.match(/^\/api\/projects\/([^/]+)\/workspace-setup$/);
-    if(req.method==='GET'&&setupMatch){const projectId=decodeURIComponent(setupMatch[1]!);let workspace;try{workspace=await loadWorkspaceSetup(config.dataDir,projectId);}catch{throw Object.assign(new Error('Saved repository is unavailable; reopen the repository to continue'),{statusCode:503});}if(!workspace)throw Object.assign(new Error('Workspace setup not found'),{statusCode:404});json(res,200,{...workspace,bridgeStatus:projectControllers.get(projectId)?.bridge.status?'ready':'unavailable'});return;}
+    if(req.method==='GET'&&setupMatch){const projectId=decodeURIComponent(setupMatch[1]!);let workspace;try{workspace=await loadWorkspaceSetup(config.dataDir,projectId);}catch{throw Object.assign(new Error('Saved repository is unavailable; reopen the repository to continue'),{statusCode:503});}if(!workspace)throw Object.assign(new Error('Workspace setup not found'),{statusCode:404});const bridgeHealth=projectControllers.get(projectId)?.bridge.health;json(res,200,{...workspace,bridgeStatus:bridgeHealth?.state??'unavailable',...(bridgeHealth?{bridgeHealth}:{})});return;}
     if(req.method==='GET'&&path==='/api/state'){json(res,200,stateForUi(await activeController.state()));return;}
     if(req.method==='GET'&&path==='/api/status'){json(res,200,await activeController.serviceStatus());return;}
     if(req.method==='GET'&&path==='/api/events'){

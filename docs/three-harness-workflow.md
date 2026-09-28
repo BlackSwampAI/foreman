@@ -61,7 +61,14 @@ configuration. Validation commands run in a disposable validation workspace
 with bounded time and output. Only configured commands run. Do not use a
 valuable checkout as the task repository.
 
-Start the bridge in one terminal from the repository root:
+Choose a bridge token first (see [Bridge authentication](#bridge-authentication)):
+
+```sh
+export LOCAL_CLI_UHP_TOKEN="$(node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))")"
+echo "$LOCAL_CLI_UHP_TOKEN"   # you will paste this into Foreman's .env below
+```
+
+Start the bridge in that terminal from the repository root:
 
 ```sh
 cd investigations/local-cli-uhp
@@ -84,7 +91,36 @@ listed on the proof host and completed the live Worker turn. If it is absent on
 another host, configure an explicitly listed Flash model instead. Any
 discovered AGY Flash model can be selected per role and per run in Foreman's
 UI. Do not let the bridge silently substitute a model. The bridge listens on
-loopback and has no authentication; keep it local.
+loopback only. If it reports `WARNING: LOCAL_CLI_UHP_TOKEN is not set` it is
+running unauthenticated; see the next section.
+
+### Bridge authentication
+
+The bridge drives your signed-in CLIs and holds full copies of the repository,
+so it can be protected with a bearer token. It has two modes:
+
+- **Token set (recommended).** With `LOCAL_CLI_UHP_TOKEN` set (1-512 printable
+  ASCII characters, no spaces; 32 random bytes as hex is a good choice), every
+  request must carry `Authorization: Bearer <token>`, including `/v1/uhp`
+  discovery and the workspace extension routes. The token is compared in
+  constant time. A missing or wrong token gets `401` before any other work is
+  done. Foreman itself uses this mode for the per-project bridges it starts,
+  with a fresh random token per start.
+- **Token unset (legacy manual mode).** The bridge accepts requests from any
+  local process, and prints one `WARNING: LOCAL_CLI_UHP_TOKEN is not set` line at
+  startup. The `smoke.mjs`, `workspace-smoke.mjs`, `codex-worker-smoke.mjs` and
+  `reviewer-smoke.mjs` scripts under `investigations/local-cli-uhp/` send no
+  token, so they need a bridge in this mode.
+
+In both modes the bridge checks the `Host` header of every request: only
+`127.0.0.1:<port>`, `localhost:<port>` and `[::1]:<port>` (case-insensitive, one
+trailing dot tolerated) are accepted, anything else gets `403`. This blocks DNS
+rebinding from web pages, and it does not depend on the token.
+
+When the bridge has a token, give Foreman the same value (see below) in both
+`UHP_TOKEN` (UHP calls) and `FOREMAN_WORKSPACE_BRIDGE_TOKEN` (workspace
+seed, overlay and snapshot calls). Foreman never logs either value or returns
+them from its API.
 
 In another terminal, configure the same repo and validation policy for Foreman,
 then build and start the UI/API service:
@@ -98,8 +134,10 @@ Set these entries in `.env` (retain the loopback URL and adjust paths/checks):
 
 ```dotenv
 UHP_BASE_URL=http://127.0.0.1:8787
+UHP_TOKEN=<the value of LOCAL_CLI_UHP_TOKEN>
 FOREMAN_WORKSPACE_SOURCE_REPO=/absolute/path/to/disposable-repo
 FOREMAN_WORKSPACE_BRIDGE_URL=http://127.0.0.1:8787
+FOREMAN_WORKSPACE_BRIDGE_TOKEN=<the value of LOCAL_CLI_UHP_TOKEN>
 FOREMAN_WORKSPACE_ALLOWED_SCOPE=README.md
 FOREMAN_VALIDATION_COMMANDS=[{"name":"build","command":"pnpm","args":["build"]}]
 ```
@@ -114,7 +152,10 @@ pnpm start
 
 Open `http://127.0.0.1:4399`. The bridge and Foreman have separate processes
 and configuration; `.env` configures Foreman, while the shell variables above
-configure the bridge. Hindsight is optional and advisory.
+configure the bridge. If you started the bridge without a token, leave
+`UHP_TOKEN` and `FOREMAN_WORKSPACE_BRIDGE_TOKEN` out. Foreman does not restart
+a bridge you started yourself; if it stops, start it again. Hindsight is
+optional and advisory.
 
 If AGY reports that it needs sign-in, use the interactive sign-in flow offered
 by the installed `agy` CLI in a terminal as the same host user, then restart

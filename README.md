@@ -30,7 +30,7 @@ Open `http://127.0.0.1:4399` and choose **Open repository**. Pick a local Git re
 
 The selected repository must have a committed HEAD. Uncommitted source changes are visible but runs start from the pinned commit. The folder browser shows folders on the server machine; if Foreman runs remotely, the paths are on that machine.
 
-No `.env` file or separate bridge command is needed for the standard local flow. Foreman starts its own per-project bridge process.
+No `.env` file or separate bridge command is needed for the standard local flow. Foreman starts its own per-project bridge process, protects it with a random token, logs it, and restarts it if it crashes; see [Local bridge](#local-bridge).
 
 For the manual bridge workflow (custom CLIs, external UHP servers, or disposable-repo testing), see [the host CLI workflow guide](docs/three-harness-workflow.md).
 
@@ -135,7 +135,7 @@ The standard local flow requires no environment variables. The following setting
 | `FOREMAN_DATA_DIR` | `.foreman-data` | Durable state directory. |
 | `UHP_BASE_URL` | — | External UHP server base URL. Without this, Foreman uses its own per-project bridge. |
 | `UHP_HARNESS_ID`, `UHP_MODEL` | — | Optional explicit initial harness/model for the external UHP server. Must be set together. |
-| `UHP_TOKEN` | — | Optional bearer credential for the external UHP server. |
+| `UHP_TOKEN` | — | Optional bearer credential for the external UHP server, sent on every request to `UHP_BASE_URL` including discovery. For a manual bridge started with `LOCAL_CLI_UHP_TOKEN`, use the same value. |
 | `HINDSIGHT_BASE_URL` | — | Hindsight API base URL. Outages show degraded memory status and do not stop workflow. |
 | `HINDSIGHT_TOKEN` | — | Optional credential for Hindsight. |
 | `FOREMAN_REQUEST_TIMEOUT_MS` | `120000` | Initial HTTP connection timeout (max 120,000 ms). Does not limit turn duration. |
@@ -143,6 +143,7 @@ The standard local flow requires no environment variables. The following setting
 | `FOREMAN_WORKER_TIMEOUT_MS` | `600000` | Turn timeout for Worker roles (max 900,000 ms). |
 | `FOREMAN_WORKSPACE_SOURCE_REPO` | — | Local Git repository for snapshot verification. Required with the manual bridge workflow. |
 | `FOREMAN_WORKSPACE_BRIDGE_URL` | — | Loopback URL for an external workspace bridge. |
+| `FOREMAN_WORKSPACE_BRIDGE_TOKEN` | — | Optional bearer token for that bridge, for a bridge started with `LOCAL_CLI_UHP_TOKEN` (use the same value). Requires `FOREMAN_WORKSPACE_BRIDGE_URL`; printable ASCII without spaces. It is only ever sent to that loopback URL and is never logged or returned by the API. |
 | `FOREMAN_WORKSPACE_ALLOWED_SCOPE` | — | Comma-separated exact paths or directory prefixes ending in `/` allowed in Worker results. |
 | `FOREMAN_VALIDATION_COMMANDS` | — | JSON array of `{"name","command","args","cwd?","network?"}` entries run in the disposable validation workspace. `network` is `true` or `false`; validation runs offline unless it is `true`, and a package-manager install without the field defaults to `true`. See [Validation sandbox](#validation-sandbox). |
 | `FOREMAN_VALIDATION_TIMEOUT_MS` | `120000` | Per-command time limit (max 600,000 ms). |
@@ -152,9 +153,20 @@ The standard local flow requires no environment variables. The following setting
 
 Planner and Orchestrator turn timeouts are fixed at 300 seconds and are not configurable via environment variable. The optional configuration shape is recorded in `config.schema.json`.
 
+## Local bridge
+
+In the standard flow Foreman runs one bridge per project, `investigations/local-cli-uhp/server.mjs`, on a random `127.0.0.1` port. The bridge drives your signed-in Claude Code, Codex and Antigravity CLIs and holds full copies of the repository, so Foreman protects and supervises it:
+
+- **Authentication.** Each start gets a fresh random 32-byte bearer token, passed to the bridge in its environment and sent by Foreman on every call: UHP requests, workspace seed, overlay and snapshot, and usage. The bridge answers `401` to any request without it, before doing any work (`/v1/uhp` discovery included), and `403` to any request whose `Host` is not `127.0.0.1`, `localhost` or `[::1]` on its port, so neither another local process nor a web page using DNS rebinding can read the repository or use your subscriptions. The token is never logged and never appears in events or `/api/*` responses.
+- **Log.** The bridge's stdout and stderr go to `<data dir>/local-bridges/<key>/bridge.log` (mode 0600). At every (re)start, a log over 5 MB is moved to `bridge.log.1`, replacing any older one, so at most one old file is kept.
+- **Restart.** If the bridge exits unexpectedly, Foreman restarts it on the same port with the same token, so URLs and credentials already handed out stay valid, after 1 s, then 2 s, 4 s and so on up to 30 s. Anything the bridge was running is marked failed by the bridge, and Foreman's normal reconciliation shows it as failed; nothing is replayed. After 5 consecutive runs that each end within 60 s of starting, including restarts that cannot bind the port, Foreman gives up. A stopped project, such as a deleted one, is never restarted.
+- **Status.** `GET /api/projects/:id/workspace-setup` reports `bridgeStatus` (`ready`, `restarting` or `unavailable`) and a `bridgeHealth` object with the last exit code or signal, the restart count and the log path. `GET /api/projects/:id/usage` reports the same `bridgeStatus` while the bridge is not ready. Foreman also prints each change to its own stderr. Reopening the repository starts a fresh bridge for a project that was given up on.
+
+For a bridge you start yourself (`UHP_BASE_URL`), see [the host CLI workflow guide](docs/three-harness-workflow.md#bridge-authentication): set `LOCAL_CLI_UHP_TOKEN` on the bridge and the same value as `UHP_TOKEN` and `FOREMAN_WORKSPACE_BRIDGE_TOKEN` for Foreman. Without a token that bridge accepts any local process and warns at startup, and Foreman does not supervise it.
+
 ## Security
 
-Foreman has no login; it relies on binding to `127.0.0.1` and on request checks that stop other web pages from driving it through your browser. Every request must carry a `Host` of `localhost`, `127.0.0.1` or `[::1]` (or the `FOREMAN_HOST` value) on `FOREMAN_PORT`, which blocks DNS rebinding. Every request other than `GET` and `HEAD` must also carry an `Origin` that matches `Host`, and a `Sec-Fetch-Site`, if sent, must be `same-origin`; otherwise it gets a 403. Scripts that call the API directly (for example with `curl`) must therefore send `-H 'Origin: http://127.0.0.1:4399'` on writes. `pnpm dev:ui` rewrites `Origin` on proxied requests to `http://127.0.0.1:4399`. GitHub write actions additionally require an explicit confirmation token. Binding to a non-loopback address with `FOREMAN_HOST` exposes an unauthenticated control plane to that network; don't.
+Foreman has no login; it relies on binding to `127.0.0.1` and on request checks that stop other web pages from driving it through your browser. Every request must carry a `Host` of `localhost`, `127.0.0.1` or `[::1]` (or the `FOREMAN_HOST` value) on `FOREMAN_PORT`, which blocks DNS rebinding. Every request other than `GET` and `HEAD` must also carry an `Origin` that matches `Host`, and a `Sec-Fetch-Site`, if sent, must be `same-origin`; otherwise it gets a 403. Scripts that call the API directly (for example with `curl`) must therefore send `-H 'Origin: http://127.0.0.1:4399'` on writes. `pnpm dev:ui` rewrites `Origin` on proxied requests to `http://127.0.0.1:4399`. GitHub write actions additionally require an explicit confirmation token. Binding to a non-loopback address with `FOREMAN_HOST` exposes an unauthenticated control plane to that network; don't. The per-project bridge behind it has its own token and `Host` checks; see [Local bridge](#local-bridge).
 
 ## Data and cleanup
 

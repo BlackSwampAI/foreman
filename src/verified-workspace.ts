@@ -19,14 +19,22 @@ export interface ValidationObservation { name: string; command: string; args: st
 export interface ControllerValidationEvidence { passed: boolean; checks: ValidationObservation[] }
 const SHA=/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
 
+/** Per-call bridge options. A bare number is the timeout in ms; `token` is the bridge's bearer token, sent only to the validated loopback bridge URL and never echoed in errors. */
+export interface BridgeRequestOptions { timeoutMs?: number; token?: string }
+export interface BridgeSnapshotOptions extends BridgeRequestOptions { maxResponseBytes?: number }
+function bridgeTimeout(options:number|BridgeRequestOptions):number{return typeof options==='number'?options:options.timeoutMs??15_000;}
+function bridgeHeaders(options:number|BridgeRequestOptions,extra:Record<string,string>={}):Record<string,string>{const token=typeof options==='number'?undefined:options.token;return {...(token?{authorization:`Bearer ${token}`}:{}),...extra};}
+function bridgeFailure(what:string,status:number):Error{return new Error(`Workspace bridge ${what} (${status})${status===401?': the bridge requires a valid bearer token':status===403?': the bridge refused the request (Host check)':''}`);}
+
 /** Fetch a bridge snapshot from an explicitly loopback-only bridge endpoint. */
-export async function fetchBridgeSnapshot(baseUrl:string,workspaceId:string,expectedBase:string,timeoutMs=15_000,maxResponseBytes=300*1024*1024):Promise<BridgeSnapshotEnvelope>{
+export async function fetchBridgeSnapshot(baseUrl:string,workspaceId:string,expectedBase:string,options:number|BridgeSnapshotOptions=15_000,maxResponseBytesArg=300*1024*1024):Promise<BridgeSnapshotEnvelope>{
+  const timeoutMs=bridgeTimeout(options),maxResponseBytes=typeof options==='object'&&options.maxResponseBytes!==undefined?options.maxResponseBytes:maxResponseBytesArg;
   const base=new URL(baseUrl);
   if(!['http:','https:'].includes(base.protocol)||base.username||base.password||base.search||base.hash||!['localhost','127.0.0.1','[::1]','::1'].includes(base.hostname)) throw new Error('Workspace bridge URL must be loopback-only and contain no credentials, query, or fragment');
   if(!workspaceId||workspaceId.includes('/')||workspaceId.includes('\\'))throw new Error('Invalid bridge workspace ID');
   const endpoint=new URL(`/extensions/foreman-workspace/v1/workspaces/${encodeURIComponent(workspaceId)}/snapshot`,base);
-  const response=await fetch(endpoint,{signal:AbortSignal.timeout(timeoutMs)});
-  if(!response.ok)throw new Error(`Workspace bridge snapshot request failed (${response.status})`);
+  const response=await fetch(endpoint,{headers:bridgeHeaders(options),signal:AbortSignal.timeout(timeoutMs)});
+  if(!response.ok)throw bridgeFailure('snapshot request failed',response.status);
   const declared=Number(response.headers.get('content-length')??0);if(declared>maxResponseBytes)throw new Error('Workspace bridge response exceeds size limit');
   if(!response.body)throw new Error('Workspace bridge response has no body');
   const reader=response.body.getReader(),chunks:Uint8Array[]=[];let size=0;
@@ -40,25 +48,26 @@ export async function fetchBridgeSnapshot(baseUrl:string,workspaceId:string,expe
 
 export interface OverlayEntry { path: string; contentBase64?: string; mode?: string; delete?: true }
 
-export async function overlayBridgeWorkspace(baseUrl:string,workspaceId:string,entries:OverlayEntry[],timeoutMs=15_000):Promise<{workspaceId:string;applied:number}>{
+export async function overlayBridgeWorkspace(baseUrl:string,workspaceId:string,entries:OverlayEntry[],options:number|BridgeRequestOptions=15_000):Promise<{workspaceId:string;applied:number}>{
   if(!workspaceId||workspaceId.includes('/')||workspaceId.includes('\\'))throw new Error('Invalid bridge workspace ID');
   const endpoint=bridgeEndpoint(baseUrl,`/extensions/foreman-workspace/v1/workspaces/${encodeURIComponent(workspaceId)}/overlay`);
-  const response=await fetch(endpoint,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({entries}),signal:AbortSignal.timeout(timeoutMs)});
-  if(!response.ok)throw new Error(`Workspace bridge overlay request failed (${response.status})`);
+  const response=await fetch(endpoint,{method:'POST',headers:bridgeHeaders(options,{'content-type':'application/json'}),body:JSON.stringify({entries}),signal:AbortSignal.timeout(bridgeTimeout(options))});
+  if(!response.ok)throw bridgeFailure('overlay request failed',response.status);
   const body=await boundedJson(response,64*1024) as Record<string,unknown>;
   if(typeof body.workspace_id!=='string'||typeof body.applied!=='number')throw new Error('Workspace bridge returned an invalid overlay result');
   return {workspaceId:body.workspace_id,applied:body.applied};
 }
-export async function seedBridgeWorkspace(baseUrl:string,pinnedBaseCommit:string,timeoutMs=15_000):Promise<{workspaceId:string;baseCommit:string}>{
+export async function seedBridgeWorkspace(baseUrl:string,pinnedBaseCommit:string,options:number|BridgeRequestOptions=15_000):Promise<{workspaceId:string;baseCommit:string}>{
   if(!SHA.test(pinnedBaseCommit))throw new Error('A full pinned base commit SHA is required');
-  const advertisedResponse=await fetch(bridgeEndpoint(baseUrl,'/v1/uhp'),{signal:AbortSignal.timeout(timeoutMs)});
-  if(!advertisedResponse.ok)throw new Error(`Workspace bridge discovery failed (${advertisedResponse.status})`);
+  const timeoutMs=bridgeTimeout(options);
+  const advertisedResponse=await fetch(bridgeEndpoint(baseUrl,'/v1/uhp'),{headers:bridgeHeaders(options),signal:AbortSignal.timeout(timeoutMs)});
+  if(!advertisedResponse.ok)throw bridgeFailure('discovery failed',advertisedResponse.status);
   const advertised=await boundedJson(advertisedResponse,64*1024) as any;
   const capability=advertised?.capabilities?.extensions?.foreman_workspace_bridge_v1;
   if(capability?.version!==1||capability.seed!==true||capability.complete_snapshot!==true||capability.execution_boundary!=='bubblewrap')throw new Error('Bridge does not advertise the complete snapshot and bubblewrap workspace extension');
   const endpoint=bridgeEndpoint(baseUrl,'/extensions/foreman-workspace/v1/workspaces');
-  const response=await fetch(endpoint,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({base_commit:pinnedBaseCommit}),signal:AbortSignal.timeout(timeoutMs)});
-  if(!response.ok)throw new Error(`Workspace bridge seed request failed (${response.status})`);
+  const response=await fetch(endpoint,{method:'POST',headers:bridgeHeaders(options,{'content-type':'application/json'}),body:JSON.stringify({base_commit:pinnedBaseCommit}),signal:AbortSignal.timeout(timeoutMs)});
+  if(!response.ok)throw bridgeFailure('seed request failed',response.status);
   const body=await boundedJson(response,64*1024) as Record<string,unknown>;
   if(typeof body.workspace_id!=='string'||typeof body.base_commit!=='string'||body.base_commit.toLowerCase()!==pinnedBaseCommit.toLowerCase())throw new Error('Workspace bridge returned an invalid seed result');
   return {workspaceId:body.workspace_id,baseCommit:body.base_commit};

@@ -16,6 +16,7 @@ export interface ForemanConfig {
   workerTimeoutMs: number;
   workspaceSourceRepo?: string;
   workspaceBridgeUrl?: string;
+  workspaceBridgeToken?: string;
   workspaceAllowedScope: string[];
   validationCommands: Array<{name:string;command:string;args:string[];cwd?:string;network:boolean}>;
   validationTimeoutMs: number;
@@ -44,12 +45,22 @@ function optionalHttpUrl(name: string): string | undefined {
   return value.toString().replace(/\/$/, '');
 }
 
+/** A bearer credential: printable ASCII without spaces, so it is always a valid header value and never needs to appear in an error. */
+function optionalToken(name: string): string | undefined {
+  const raw = process.env[name]?.trim();
+  if (!raw) return undefined;
+  if (!/^[\x21-\x7e]{1,512}$/.test(raw)) throw new Error(`${name} must be 1-512 printable ASCII characters without spaces`);
+  return raw;
+}
+
 /** Load an optional local .env and validate the supported service configuration. */
 export function loadConfig(): ForemanConfig {
   if (existsSync('.env')) loadEnvFile('.env');
   const uhpHarnessId = process.env.UHP_HARNESS_ID?.trim() || undefined;
   const uhpModel = process.env.UHP_MODEL?.trim() || undefined;
   if (Boolean(uhpHarnessId) !== Boolean(uhpModel)) throw new Error('UHP_HARNESS_ID and UHP_MODEL must be configured together');
+  const workspaceBridgeToken = optionalToken('FOREMAN_WORKSPACE_BRIDGE_TOKEN');
+  if (workspaceBridgeToken && !process.env.FOREMAN_WORKSPACE_BRIDGE_URL?.trim()) throw new Error('FOREMAN_WORKSPACE_BRIDGE_TOKEN requires FOREMAN_WORKSPACE_BRIDGE_URL');
   let validationCommands: ForemanConfig['validationCommands'] = [];
   const rawCommands=process.env.FOREMAN_VALIDATION_COMMANDS?.trim();
   if(rawCommands){try{const value=JSON.parse(rawCommands);if(!Array.isArray(value))throw new Error();validationCommands=value.map((item:unknown)=>{if(!item||typeof item!=='object')throw new Error();const x=item as Record<string,unknown>;if(typeof x.name!=='string'||!x.name.trim()||typeof x.command!=='string'||!x.command||!Array.isArray(x.args)||x.args.some(arg=>typeof arg!=='string')||(x.cwd!==undefined&&typeof x.cwd!=='string')||(x.network!==undefined&&typeof x.network!=='boolean'))throw new Error();return {name:x.name,command:x.command,args:x.args as string[],...(typeof x.cwd==='string'?{cwd:x.cwd}:{}),network:(x.network as boolean|undefined)??defaultNetworkAccess(x.command,x.args as string[])};});}catch{throw new Error('FOREMAN_VALIDATION_COMMANDS must be a JSON array of {name,command,args,cwd?,network?} where network is true or false');}}
@@ -73,6 +84,7 @@ export function loadConfig(): ForemanConfig {
     workerTimeoutMs: integer('FOREMAN_WORKER_TIMEOUT_MS', 600000, 1000, 900000),
     workspaceSourceRepo: process.env.FOREMAN_WORKSPACE_SOURCE_REPO?.trim() || undefined,
     workspaceBridgeUrl: process.env.FOREMAN_WORKSPACE_BRIDGE_URL?.trim() || undefined,
+    workspaceBridgeToken,
     workspaceAllowedScope,
     validationCommands,
     validationTimeoutMs: integer('FOREMAN_VALIDATION_TIMEOUT_MS', 120000, 1, 600000),
