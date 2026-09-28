@@ -6,6 +6,7 @@
  */
 import React from 'react';
 import { parseChecksSummary } from './check-output.js';
+import { Badge, type Tone } from './badge.js';
 
 // Minimal type mirrors ValidationObservation in main.tsx.
 export interface StationObservation {
@@ -74,12 +75,13 @@ function ciConclusion(check: GithubCheckEntry): 'passed' | 'failed' | 'running' 
 
 type StationStatus = 'queued' | 'running' | 'passed' | 'failed' | 'skipped';
 
-function statusToneClass(status: StationStatus): string {
-  if (status === 'passed') return 'tone-passed';
-  if (status === 'failed') return 'tone-failed';
-  if (status === 'running') return 'tone-running';
-  return 'tone-neutral';
+function stationTone(status: StationStatus): Tone {
+  if (status === 'passed') return 'passed';
+  if (status === 'failed') return 'failed';
+  if (status === 'running') return 'running';
+  return 'neutral';
 }
+const statusToneClass = (status: StationStatus): string => `tone-${stationTone(status)}`;
 
 function statusLabel(status: StationStatus, timedOut?: boolean): string {
   if (timedOut) return 'Timed out';
@@ -115,9 +117,8 @@ export function ChecksPipeline({ observations, running, ciChecks, ciChecksNotCon
       <div className="checks-stations" role="list">
         {showRunningPlaceholder && (
           <div className="check-station tone-running" role="listitem" aria-label="Validation running…">
-            <span className="station-status-icon" aria-hidden="true">↻</span>
             <span className="station-name">Validating…</span>
-            <span className={`status-pill tone-running`} aria-label="Status: Running">Running</span>
+            <Badge tone="running" aria-label="Status: Running">Running</Badge>
           </div>
         )}
         {localStations.map(({ obs, status, summary }) => {
@@ -126,14 +127,11 @@ export function ChecksPipeline({ observations, running, ciChecks, ciChecksNotCon
           return (
             <details className={`check-station check-station-detail ${statusToneClass(status)}`} key={obs.name} role="listitem">
               <summary aria-label={ariaLabel}>
-                <span className="station-status-icon" aria-hidden="true">
-                  {status === 'passed' ? '✓' : status === 'failed' ? '✕' : status === 'running' ? '↻' : '○'}
-                </span>
                 <span className="station-name">{obs.name}</span>
                 {dur && <span className="station-duration">{dur}</span>}
-                <span className={`status-pill ${statusToneClass(status)}`} aria-label={`Status: ${statusLabel(status, obs.timedOut)}`}>
+                <Badge tone={stationTone(status)} aria-label={`Status: ${statusLabel(status, obs.timedOut)}`}>
                   {statusLabel(status, obs.timedOut)}
-                </span>
+                </Badge>
               </summary>
               <div className="station-details">
                 <code>$ {obs.command} {obs.args.join(' ')}</code>
@@ -160,11 +158,10 @@ export function ChecksPipeline({ observations, running, ciChecks, ciChecksNotCon
                 return (
                   <details className={`check-station check-station-detail ${statusToneClass(ciStatus)}`} key={check.name} role="listitem">
                     <summary aria-label={ariaLabel}>
-                      <span className="station-status-icon" aria-hidden="true">✕</span>
                       <span className="station-name">{check.name}</span>
-                      <span className={`status-pill ${statusToneClass(ciStatus)}`} aria-label={`Status: ${statusLabel(ciStatus)}`}>
+                      <Badge tone={stationTone(ciStatus)} aria-label={`Status: ${statusLabel(ciStatus)}`}>
                         {statusLabel(ciStatus)}
-                      </span>
+                      </Badge>
                     </summary>
                     <div className="station-details">
                       {check.failures!.map((failure, idx) => {
@@ -194,13 +191,10 @@ export function ChecksPipeline({ observations, running, ciChecks, ciChecksNotCon
               }
               return (
                 <div className={`check-station ${statusToneClass(ciStatus)}`} key={check.name} role="listitem" aria-label={ariaLabel}>
-                  <span className="station-status-icon" aria-hidden="true">
-                    {ciStatus === 'passed' ? '✓' : ciStatus === 'failed' ? '✕' : ciStatus === 'running' ? '↻' : '○'}
-                  </span>
                   <span className="station-name">{check.name}</span>
-                  <span className={`status-pill ${statusToneClass(ciStatus)}`} aria-label={`Status: ${statusLabel(ciStatus)}`}>
+                  <Badge tone={stationTone(ciStatus)} aria-label={`Status: ${statusLabel(ciStatus)}`}>
                     {statusLabel(ciStatus)}
-                  </span>
+                  </Badge>
                 </div>
               );
             })}

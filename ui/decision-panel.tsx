@@ -7,6 +7,7 @@
  */
 import React from 'react';
 import { ChecksPipeline, type StationObservation, type GithubCheckEntry } from './checks-pipeline.js';
+import { Badge, type Tone } from './badge.js';
 
 export interface DecisionPanelProps {
   /** Number of files changed (from workerEvidence.changes.length). */
@@ -94,10 +95,19 @@ function verdictText(verdict: DecisionPanelProps['reviewerVerdict']): string {
   return 'No Reviewer recommendation yet';
 }
 
-function verdictTone(verdict: DecisionPanelProps['reviewerVerdict']): 'tone-passed' | 'tone-failed' | 'tone-neutral' {
-  if (verdict === 'recommend') return 'tone-passed';
-  if (verdict === 'request_changes' || verdict === 'reject') return 'tone-failed';
-  return 'tone-neutral';
+function verdictTone(verdict: DecisionPanelProps['reviewerVerdict']): Tone {
+  if (verdict === 'recommend') return 'passed';
+  if (verdict === 'request_changes' || verdict === 'reject') return 'failed';
+  return 'warning';
+}
+
+/** Short badge text for the Reviewer row; the full sentence stays in the row label. */
+function verdictBadge(verdict: DecisionPanelProps['reviewerVerdict']): string {
+  if (verdict === 'recommend')       return 'Recommends';
+  if (verdict === 'request_changes') return 'Requests changes';
+  if (verdict === 'reject')          return 'Rejects';
+  if (verdict === 'unparsed')        return 'Unreadable';
+  return 'Pending';
 }
 
 export function DecisionPanel(props: DecisionPanelProps): React.ReactElement {
@@ -112,8 +122,8 @@ export function DecisionPanel(props: DecisionPanelProps): React.ReactElement {
   const steps = buildStepper(props);
   const currentStep = steps.find(s => s.status === 'current');
 
-  const changesTone = filesChanged > 0 ? 'tone-passed' : 'tone-neutral';
-  const checksTone  = validationPassed ? 'tone-passed' : validationTotalCount > 0 ? 'tone-failed' : 'tone-neutral';
+  const changesTone: Tone = filesChanged > 0 ? 'passed' : 'neutral';
+  const checksTone: Tone  = validationPassed ? 'passed' : validationTotalCount > 0 ? 'failed' : 'neutral';
   const reviewTone  = verdictTone(reviewerVerdict);
 
   return (
@@ -152,9 +162,9 @@ export function DecisionPanel(props: DecisionPanelProps): React.ReactElement {
       {!approved && (
         <ul className="decision-checklist" aria-label="Review checklist">
           <li className="decision-check-item">
-            <span className={`status-pill ${changesTone}`} aria-label={`Changes: ${filesChanged > 0 ? 'present' : 'none'}`}>
-              {filesChanged > 0 ? '✓' : '○'}
-            </span>
+            <Badge tone={changesTone} aria-label={`Changes: ${filesChanged > 0 ? 'present' : 'none'}`}>
+              {filesChanged > 0 ? 'Present' : 'None'}
+            </Badge>
             <span className="decision-check-label">
               <strong>Changes</strong>
               {' — '}
@@ -170,9 +180,9 @@ export function DecisionPanel(props: DecisionPanelProps): React.ReactElement {
           </li>
 
           <li className="decision-check-item">
-            <span className={`status-pill ${checksTone}`} aria-label={`Checks: ${validationPassed ? 'passed' : 'failed'}`}>
-              {validationPassed ? '✓' : '✕'}
-            </span>
+            <Badge tone={checksTone} aria-label={`Checks: ${validationPassed ? 'passed' : 'failed'}`}>
+              {validationPassed ? 'Passed' : validationTotalCount > 0 ? 'Failed' : 'None'}
+            </Badge>
             <span className="decision-check-label">
               <strong>Checks</strong>
               {' — '}
@@ -183,9 +193,9 @@ export function DecisionPanel(props: DecisionPanelProps): React.ReactElement {
           </li>
 
           <li className="decision-check-item">
-            <span className={`status-pill ${reviewTone}`} aria-label={`Reviewer: ${verdictText(reviewerVerdict)}`}>
-              {reviewerVerdict === 'recommend' ? '✓' : reviewerVerdict === 'request_changes' || reviewerVerdict === 'reject' ? '✕' : '○'}
-            </span>
+            <Badge tone={reviewTone} aria-label={`Reviewer: ${verdictText(reviewerVerdict)}`}>
+              {verdictBadge(reviewerVerdict)}
+            </Badge>
             <span className="decision-check-label">
               <strong>Reviewer</strong>
               {' — '}

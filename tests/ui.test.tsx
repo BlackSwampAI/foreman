@@ -6,6 +6,7 @@ import { DecisionPanel, type DecisionPanelProps } from '../ui/decision-panel.js'
 import { ChecksPipeline, type StationObservation, type GithubCheckEntry } from '../ui/checks-pipeline.js';
 import { parseChecksSummary } from '../ui/check-output.js';
 import { PrDraftPanel, type PrDraftData } from '../ui/pr-draft.js';
+import { Badge, toneForStatus } from '../ui/badge.js';
 
 describe('debounce helper',()=>{
   beforeEach(()=>{ vi.useFakeTimers(); });
@@ -214,7 +215,7 @@ describe('project Planner UI',()=>{
     const treeIndex=html.indexOf('class="tree card"'),treeContentIndex=html.indexOf('class="tree-content"',treeIndex),inspectorIndex=html.indexOf('aria-label="Inspector"'),liveIndex=html.indexOf('aria-label="Live Response"'),githubIndex=html.indexOf('aria-label="GitHub"');
     expect(treeIndex).toBeGreaterThan(-1);expect(treeContentIndex).toBeGreaterThan(treeIndex);expect(html).toContain('<summary>Repository details</summary>');expect(html).toContain('>History</button>');expect(html).toContain('>Usage</button>');
     expect(html).toContain('class="usage-dock" aria-label="Harness and measured usage"');expect(html).toContain('Project</span><b>No measured usage reported</b>');expect(html).toContain('Selected run</span><b>No measured usage reported</b>');expect(html).toContain('role="group" aria-label="Codex 5 hour usage"');expect(html).toContain('aria-valuenow="27"');expect(html).not.toContain('aria-label="Harness usage"');expect(html).not.toContain('Project details · usage &amp; activity');expect(inspectorIndex).toBeGreaterThan(treeContentIndex);expect(liveIndex).toBeGreaterThan(inspectorIndex);expect(githubIndex).toBeGreaterThan(liveIndex);expect(html.match(/aria-label="Live Response"/g)).toHaveLength(1);expect(html.match(/aria-label="GitHub"/g)).toHaveLength(1);expect(html).not.toContain('Hierarchy from local state');
-    expect(html).toContain('role="separator" aria-orientation="vertical" aria-label="Resize project tree"');expect(html).toContain('aria-valuemin="180" aria-valuemax="360" aria-valuenow="220" tabindex="0"');expect(html).toContain('title="Live task"');expect(html).toContain('style="--tree-width:220px"');
+    expect(html).toContain('role="separator" aria-orientation="vertical" aria-label="Resize project tree"');expect(html).toContain('aria-valuemin="180" aria-valuemax="360" aria-valuenow="248" tabindex="0"');expect(html).toContain('title="Live task"');expect(html).toContain('style="--tree-width:248px"');
   });
   it('keeps quotas in the sidebar and offers a dedicated Usage view',()=>{
     const state:State={projects:[{id:'prj_usage_groups',name:'Usage groups'}],roles:[]};
@@ -303,21 +304,19 @@ describe('task status pills',()=>{
   });
   it('renders tone-passed pill for awaiting_approval when validation passed and reviewer recommended',()=>{
     const html=renderToStaticMarkup(createElement(App,{initialState:makeState('active','awaiting_approval',{validation:{id:'v1',passed:true,status:'passed',checks:[]},reviewerRecommendation:{id:'rec1',provenance:'uhp_response',reviewerAssignmentId:'asgn1',verdict:'recommend',createdAt:'2026-01-01T00:00:00.000Z'}})}));
-    expect(html).toContain('class="status-pill tone-passed"');
-    expect(html).toContain('>Awaiting Approval<');
+    expect(html).toContain('class="status-pill tone-passed">Awaiting Approval<');
   });
-  it('renders tone-neutral pill for awaiting_approval when validation not passed',()=>{
+  it('renders tone-warning pill for awaiting_approval when validation not passed',()=>{
     const html=renderToStaticMarkup(createElement(App,{initialState:makeState('active','awaiting_approval',{validation:{id:'v2',passed:false,status:'failed',checks:[]}})}));
-    expect(html).toContain('class="status-pill tone-neutral"');
-    expect(html).toContain('>Awaiting Approval<');
+    expect(html).toContain('class="status-pill tone-warning">Awaiting Approval<');
   });
-  it('renders tone-neutral pill for awaiting_approval when reviewer requested changes',()=>{
+  it('renders tone-warning pill for awaiting_approval when reviewer requested changes',()=>{
     const html=renderToStaticMarkup(createElement(App,{initialState:makeState('active','awaiting_approval',{validation:{id:'v3',passed:true,status:'passed',checks:[]},reviewerRecommendation:{id:'rec2',provenance:'uhp_response',reviewerAssignmentId:'asgn2',verdict:'request_changes',createdAt:'2026-01-01T00:00:00.000Z'}})}));
-    expect(html).toContain('class="status-pill tone-neutral"');
+    expect(html).toContain('class="status-pill tone-warning">Awaiting Approval<');
   });
-  it('renders tone-neutral pill for awaiting_approval when reviewer verdict is unparsed',()=>{
+  it('renders tone-warning pill for awaiting_approval when reviewer verdict is unparsed',()=>{
     const html=renderToStaticMarkup(createElement(App,{initialState:makeState('active','awaiting_approval',{validation:{id:'v4',passed:true,status:'passed',checks:[]},reviewerRecommendation:{id:'rec3',provenance:'uhp_response',reviewerAssignmentId:'asgn3',verdict:'unparsed',createdAt:'2026-01-01T00:00:00.000Z'}})}));
-    expect(html).toContain('class="status-pill tone-neutral"');
+    expect(html).toContain('class="status-pill tone-warning">Awaiting Approval<');
   });
   it('renders tone-neutral pill for a cancelled run',()=>{
     const html=renderToStaticMarkup(createElement(App,{initialState:makeState('cancelled','cancelled')}));
@@ -779,5 +778,64 @@ describe('PR draft panel',()=>{
     const html=renderToStaticMarkup(createElement(PrDraftPanel,{runId:'run1',draft:undefined,onGenerate:()=>{},onSave:()=>{},error:'Network error'}));
     expect(html).toContain('Network error');
     expect(html).toContain('class="pr-draft-error"');
+  });
+});
+
+// ── Badge system ───────────────────────────────────────────────────────────
+
+describe('badge system',()=>{
+  it('renders every badge as one base class plus one tone class',()=>{
+    expect(renderToStaticMarkup(createElement(Badge,{tone:'warning'},'Pending'))).toBe('<span class="status-pill tone-warning">Pending</span>');
+    expect(renderToStaticMarkup(createElement(Badge,{count:true,'aria-label':'3 runs'},'3'))).toBe('<span class="status-pill tone-neutral is-count" aria-label="3 runs">3</span>');
+  });
+
+  it('maps each status to exactly one tone regardless of spelling',()=>{
+    for(const status of ['running','Active','planning','in progress','waiting_guidance','Validating'])expect(toneForStatus(status),status).toBe('running');
+    for(const status of ['completed','approved','promoted','succeeded','passed','applied','recommend','MERGED','clean','done'])expect(toneForStatus(status),status).toBe('passed');
+    for(const status of ['failed','blocked','rejected','reject','request_changes','changes_requested','timed_out','CHANGES_REQUESTED','error'])expect(toneForStatus(status),status).toBe('failed');
+    for(const status of ['awaiting_approval','pending','proposed','unverified','unparsed','REVIEW_REQUIRED'])expect(toneForStatus(status),status).toBe('warning');
+    expect(toneForStatus('OPEN')).toBe('info');
+    for(const status of ['ready','cancelled','queued','not_started','abandoned','unknown','waiting',undefined,''])expect(toneForStatus(status),String(status)).toBe('neutral');
+  });
+
+  // Renders three very different runs and checks that no badge label appears in two different tones.
+  const now='2026-09-27T12:00:00.000Z';
+  const worker={id:'asgn_w',roleId:'worker',status:'succeeded',createdAt:now};
+  const evidence={workerAssignmentId:'asgn_w',responseId:'resp_w',pinnedBaseCommit:'a'.repeat(40),completeSnapshot:{reportedComplete:true,reportedErrors:0,entryCount:3},scopeVerified:true,allowedScope:['src/'],changes:[{path:'src/a.ts',kind:'modified'}],reviewDiff:'diff --git a/src/a.ts b/src/a.ts'};
+  const obs=(name:string,passed:boolean)=>({name,command:'pnpm',args:[name],exitCode:passed?0:1,timedOut:false,output:'',outputTruncated:false,passed});
+  const badgeState=(runs:Array<Record<string,unknown>>,tasks:Array<Record<string,unknown>>=[]):State=>({projects:[{id:'prj_badges',name:'Badge project',tasks:[...runs.map((run,i)=>({id:`tsk_${i}`,title:`Task ${i}`,status:'active',runs:[run]})),...tasks]}],roles:[]} as unknown as State);
+  const failedRun={id:'run_failed',status:'failed',controller:{startedAt:now,phase:'stopped',active:false,stoppedReason:'Validation failed',budgets:{roleTurns:{planner:3,orchestrator:3,worker:2,reviewer:2},workerAttempts:2}},assignments:[worker,{id:'asgn_o',roleId:'orchestrator',status:'failed',createdAt:now}],workerEvidence:evidence,validation:{id:'v_f',status:'failed',passed:false,checks:[],observations:[obs('lint',true),obs('tests',false)],createdAt:now}};
+  const awaitingRun={id:'run_await',status:'awaiting_approval',controller:{startedAt:now,phase:'awaiting_approval',active:false,budgets:{roleTurns:{planner:3,orchestrator:3,worker:2,reviewer:2},workerAttempts:2}},assignments:[worker,{id:'asgn_r',roleId:'reviewer',status:'succeeded',createdAt:now}],workerEvidence:evidence,validation:{id:'v_p',status:'passed',passed:true,checks:[],observations:[obs('lint',true),obs('tests',true)],createdAt:now},reviewerRecommendation:{id:'rec_a',provenance:'uhp_response',reviewerAssignmentId:'asgn_r',verdict:'request_changes',rationale:'Add a test.',createdAt:now}};
+  const promotedRun={id:'run_done',status:'completed',assignments:[worker],workerEvidence:evidence,validation:{id:'v_d',status:'passed',passed:true,checks:[],observations:[obs('lint',true)],createdAt:now},reviewerRecommendation:{id:'rec_d',provenance:'uhp_response',reviewerAssignmentId:'asgn_r',verdict:'recommend',createdAt:now},approval:{id:'appr',approved:true,createdAt:now},promotion:{status:'applied',resultCommit:'b'.repeat(40),destinationBranch:'foreman/x'}};
+  const runningRun={id:'run_live',status:'running',controller:{startedAt:now,phase:'validating',active:true,budgets:{roleTurns:{planner:3,orchestrator:3,worker:2,reviewer:2},workerAttempts:2}},assignments:[{id:'asgn_w2',roleId:'worker',status:'running',createdAt:now}]};
+  const pillTones=(html:string)=>[...html.matchAll(/<span class="status-pill (tone-[a-z]+)"[^>]*>([^<]+)<\/span>/g)].map(m=>[m[2]!,m[1]!] as const);
+
+  it('never shows the same badge label in two different tones',()=>{
+    const seen=new Map<string,Set<string>>();
+    for(const selected of ['tsk_0','tsk_1','tsk_2','tsk_3']){
+      const state=badgeState([failedRun,awaitingRun,promotedRun,runningRun],[{id:'tsk_ready',title:'Ready task',status:'ready',runs:[]}]);
+      // The first task in the list is the selected one, so rotate the wanted task to the front.
+      const tasks=[...state.projects[0]!.tasks!].sort((a,b)=>(a.id===selected?-1:b.id===selected?1:0));
+      const html=renderToStaticMarkup(createElement(App,{initialState:{...state,projects:[{...state.projects[0]!,tasks}]}}));
+      for(const [label,tone] of pillTones(html)){const tones=seen.get(label)??new Set<string>();tones.add(tone);seen.set(label,tones);}
+    }
+    for(const [label,tones] of seen)expect([...tones],`${label} appears in more than one tone`).toHaveLength(1);
+    const tone=(label:string)=>[...(seen.get(label)??[])][0];
+    expect(tone('Failed')).toBe('tone-failed');expect(tone('Blocked')).toBe('tone-failed');expect(tone('Passed')).toBe('tone-passed');expect(tone('Succeeded')).toBe('tone-passed');
+    expect(tone('Completed')).toBe('tone-passed');expect(tone('Running')).toBe('tone-running');expect(tone('Ready')).toBe('tone-neutral');expect(tone('Recommend')).toBe('tone-passed');
+    expect(tone('Request Changes')).toBe('tone-failed');expect(tone('Applied')).toBe('tone-passed');expect(tone('Pending')).toBe('tone-warning');
+  });
+
+  it('uses the same tone for a run row, its task pill and the Orchestrator header',()=>{
+    const html=renderToStaticMarkup(createElement(App,{initialState:badgeState([failedRun])}));
+    // Tree task pill (Blocked), tree run row (Failed) and header (Failed) are all danger.
+    expect(html).toContain('class="status-pill tone-failed">Blocked<');
+    expect((html.match(/class="status-pill tone-failed">Failed</g)??[]).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('renders decision-panel checklist verdicts as badges with short labels',()=>{
+    const html=renderToStaticMarkup(createElement(DecisionPanel,{...baseDecisionProps,reviewerVerdict:'request_changes',reviewerRecommends:false}));
+    expect(html).toContain('class="status-pill tone-failed" aria-label="Reviewer: Reviewer asks for changes">Requests changes<');
+    expect(html).toContain('class="status-pill tone-passed" aria-label="Checks: passed">Passed<');
   });
 });
