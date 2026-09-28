@@ -101,7 +101,7 @@ Foreman can generate a Planner-drafted PR title and body via `POST /api/runs/:id
 
 When the workspace bridge is configured and the harness is Claude Code or Codex, Planner and Orchestrator receive a read-only snapshot of the repository in their working directory. They can use Read, Grep, and Glob to inspect code before proposing tasks or work. The snapshot is seeded via the same bridge used for Worker workspaces, with no write access granted.
 
-If the snapshot cannot be seeded (bridge unavailable, or Antigravity CLI selected), Foreman falls back to a deterministic repository digest: the file tree at the relevant commit, a `package.json` summary, the first 60 lines of README, and rarity-weighted keyword hits from the task description. The digest is bounded to approximately 24 KB.
+If the snapshot cannot be seeded (bridge unavailable, or Antigravity CLI selected), Foreman falls back to a deterministic repository digest: the file tree at the relevant commit, a `package.json` summary, the first 60 lines of README, and rarity-weighted keyword hits from the task description. The digest is sized from the prompt budget that remains after the mandatory parts of the prompt (the instructions and your full message for the Planner; the instructions, operator note, and task title for the Orchestrator), capped at 12 KB. Foreman trims its own context to make room and truncates the file tree and other digest sections to fit. If less than about 1.5 KB remains, the digest is omitted, the prompt says so, and the `repoAccess` reason records it. The digest therefore never pushes a turn over the 15,000-byte prompt limit.
 
 A `repoAccess` badge on each assignment shows whether the role used a live snapshot or a digest.
 

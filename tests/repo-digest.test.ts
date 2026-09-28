@@ -191,4 +191,43 @@ describe('buildRepoDigest — size bound', () => {
     const small = await buildRepoDigest({ repoPath: dir, commit, allowedScope: [], maxBytes: 512 });
     expect(Buffer.byteLength(small.text, 'utf8')).toBeLessThanOrEqual(512);
   });
+
+  it('truncates the file tree to fit a small maxBytes instead of dropping it', async () => {
+    const dir = await makeGitRepo();
+    await mkdir(join(dir, 'src'), { recursive: true });
+    for (let i = 0; i < 150; i++) await writeFile(join(dir, 'src', `file-with-a-long-name-${i}.ts`), `export const value${i} = ${i};\n`);
+    await writeFile(join(dir, 'README.md'), '# Big\n' + 'readme line\n'.repeat(100));
+    const commit = await commitAll(dir);
+    const full = await buildRepoDigest({ repoPath: dir, commit, allowedScope: [] });
+    expect(full.text).not.toContain('tree lines omitted');
+    const small = await buildRepoDigest({ repoPath: dir, commit, allowedScope: [], maxBytes: 1024 });
+    expect(Buffer.byteLength(small.text, 'utf8')).toBeLessThanOrEqual(1024);
+    expect(small.text).toContain('## Repository file tree');
+    expect(small.text).toContain('src/');
+    expect(small.text).toMatch(/… \d+ more tree lines omitted/);
+  });
+
+  it('never exceeds maxBytes, including when the budget is too small for any section', async () => {
+    const dir = await makeGitRepo();
+    await mkdir(join(dir, 'src'), { recursive: true });
+    for (let i = 0; i < 50; i++) await writeFile(join(dir, 'src', `file-${i}.ts`), `export const retry${i} = ${i};\n`);
+    await writeFile(join(dir, 'package.json'), JSON.stringify({ name: 'x', dependencies: Object.fromEntries(Array.from({ length: 100 }, (_, i) => [`dependency-${i}`, '1'])) }));
+    await writeFile(join(dir, 'README.md'), '# Big\n' + 'readme line\n'.repeat(100));
+    const commit = await commitAll(dir);
+    for (const maxBytes of [0, 20, 100, 300, 700, 1500, 3000, 6000]) {
+      const result = await buildRepoDigest({ repoPath: dir, commit, allowedScope: ['src/', 'package.json', 'README.md'], keywords: ['retry'], maxBytes });
+      expect(Buffer.byteLength(result.text, 'utf8'), `maxBytes=${maxBytes}`).toBeLessThanOrEqual(maxBytes);
+    }
+  });
+
+  it('cuts multi-byte text on a character boundary', async () => {
+    const dir = await makeGitRepo();
+    await writeFile(join(dir, 'README.md'), '# Ünïcödé\n' + '日本語のドキュメント 🚀\n'.repeat(60));
+    const commit = await commitAll(dir);
+    for (const maxBytes of [900, 901, 902, 903, 1000, 1001]) {
+      const result = await buildRepoDigest({ repoPath: dir, commit, allowedScope: [], maxBytes });
+      expect(Buffer.byteLength(result.text, 'utf8')).toBeLessThanOrEqual(maxBytes);
+      expect(result.text).not.toContain('\uFFFD');
+    }
+  });
 });
