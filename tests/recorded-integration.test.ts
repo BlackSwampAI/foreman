@@ -7,7 +7,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Controller, type UhpAdapter } from '../src/controller.js';
 import { JsonStore } from '../src/store.js';
 import { promoteSnapshotToGit } from '../src/git-promotion.js';
-import { formatReviewDiff } from '../src/verified-workspace.js';
+import { snapshotGitCommit } from '../src/git-workspace.js';
+import { formatReviewDiff, fullSnapshotEntries, snapshotDigest } from '../src/verified-workspace.js';
 import { decisionDigest } from './decision-helper.js';
 import { defaultNetworkAccess } from '../src/validation-sandbox.js';
 
@@ -99,7 +100,7 @@ describe('recorded Worker integration fixture (simulated Reviewer; no live model
     const destinationBranch='refs/heads/foreman/results/recovered';
     await fixture.store.mutate(s=>{const current=s.projects[0]!.tasks[0]!.runs[0]!;current.promotion={status:'promoting',operationId,evidenceDigest:current.approval!.evidenceDigest,destinationBranch,updatedAt:new Date().toISOString()};});
     const evidence=run.workerEvidence;
-    const firstGitResult=await promoteSnapshotToGit({repoPath:fixture.repoPath,pinnedBaseCommit:fixture.recorded.baseCommit,entries:evidence.entries,allowedScope:evidence.allowedScope,operationId,destinationBranch,commitMessage:`Foreman approved result ${fixture.runId}`});
+    const firstGitResult=await promoteSnapshotToGit({repoPath:fixture.repoPath,pinnedBaseCommit:fixture.recorded.baseCommit,entries:await fullSnapshotEntries(fixture.repoPath,evidence),allowedScope:evidence.allowedScope,operationId,destinationBranch,commitMessage:`Foreman approved result ${fixture.runId}`});
     // Simulate a process crash after the ref update: persistent Foreman state still says promoting.
     const recovered=new Controller(new JsonStore(fixture.store.filePath),{submit:async()=>{throw new Error('promotion recovery must not submit any model call');},cancel:async()=>({status:'cancelled'})});
     recovered.configureVerifiedWorkspace({repoPath:fixture.repoPath,allowedScope:['README.md'],commands:[{name:'recorded README assertion',command:process.execPath,args:['-e',"const fs=require('fs');if(!fs.readFileSync('README.md','utf8').includes('Bridge smoke'))process.exit(2);console.log('recorded README assertion passed')"]}]});
@@ -199,6 +200,39 @@ describe('recorded Worker integration fixture (simulated Reviewer; no live model
     expect(rejected).toMatchObject({decision:'rejected',approved:false});
     await expect(afterReviewRestart.approveRun(fixture.runId,{approved:true,evidenceDigest:reviewedDigest,rationale:'Attempt to replace the recorded human rejection'})).rejects.toThrow('A human decision is final for this run');
     await expect(afterReviewRestart.assign(fixture.runId,'planner','new assignment after human rejection')).rejects.toThrow('No assignments are allowed after the human decision');
+  });
+
+  it('stores new evidence as the pinned base plus changes with an integrity record, and still approves and promotes it',async()=>{
+    const fixture=await setup();
+    const approval:any=await approveRecordedRun(fixture);
+    const run:any=(await fixture.store.load()).projects[0]!.tasks[0]!.runs[0]!,evidence=run.workerEvidence;
+    // Nothing but the changed bytes is persisted: no entries, an explicit format marker, and the count and digest of the full tree.
+    expect(evidence.entries).toBeUndefined();
+    expect(evidence).toMatchObject({snapshotFormat:'base_plus_changes',acceptance:'accepted',completeSnapshot:{reportedComplete:true,reportedErrors:0,entryCount:4,snapshotDigest:expect.stringMatching(/^[a-f0-9]{64}$/)}});
+    expect(evidence.changes.map((c:any)=>`${c.kind}:${c.path}`)).toEqual(['modify:README.md']);
+    const base=(await snapshotGitCommit(fixture.repoPath,fixture.recorded.baseCommit)).entries,raw=await readFile(fixture.store.filePath,'utf8');
+    expect(base).toHaveLength(4);
+    for(const unchanged of base.filter(e=>e.path!=='README.md'))expect(raw).not.toContain(unchanged.contentBase64);
+    const entries=await fullSnapshotEntries(fixture.repoPath,evidence);
+    expect(entries).toHaveLength(4);expect(snapshotDigest(entries)).toBe(evidence.completeSnapshot.snapshotDigest);
+    expect(entries.filter(e=>e.path!=='README.md')).toEqual(base.filter(e=>e.path!=='README.md'));
+    // The human decision binds a digest over the new record (including the snapshot digest) and promotion recomputes the same one.
+    expect(approval.evidenceDigest).toMatch(/^[a-f0-9]{64}$/);
+    const promoted:any=await fixture.controller.promoteRun(fixture.runId,{destinationBranch:'foreman/results/new-format'});
+    expect(promoted.promotion).toMatchObject({status:'applied',evidenceDigest:approval.evidenceDigest,destinationBranch:'foreman/results/new-format'});
+    const result=(await snapshotGitCommit(fixture.repoPath,promoted.promotion.resultCommit)).entries;
+    expect([...result].sort((a,b)=>a.path<b.path?-1:1)).toEqual(entries);
+    expect((await fixture.store.load()).projects[0]!.tasks[0]!.runs[0]!.workerEvidence).toEqual(evidence);
+  });
+
+  it('binds the snapshot digest and changes of new evidence: altering either after approval blocks promotion',async()=>{
+    for(const tamper of [(e:any)=>{e.completeSnapshot.snapshotDigest='0'.repeat(64);},(e:any)=>{e.changes[0].after.contentBase64=Buffer.from('forged readme\n').toString('base64');},(e:any)=>{e.completeSnapshot.entryCount=5;}]){
+      const fixture=await setup();
+      await approveRecordedRun(fixture);
+      await fixture.store.mutate(s=>{tamper(s.projects[0]!.tasks[0]!.runs[0]!.workerEvidence);});
+      await expect(fixture.controller.promoteRun(fixture.runId,{destinationBranch:'foreman/results/tampered-new-format'})).rejects.toThrow('Approval evidence binding no longer matches stored evidence');
+      expect((await fixture.store.load()).projects[0]!.tasks[0]!.runs[0]!.promotion).toMatchObject({status:'not_started'});
+    }
   });
 
   it('records failed controller validation and blocks Reviewer progression until retry passes',async()=>{

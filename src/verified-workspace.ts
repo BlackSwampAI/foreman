@@ -11,8 +11,9 @@ export interface BridgeSnapshotEntry { path: string; kind: 'file'|'symlink'; mod
 export interface BridgeSnapshotEnvelope { complete: boolean; base_commit: string; entries: BridgeSnapshotEntry[]; errors: unknown[] }
 export interface ChangeEvidence { kind: SnapshotChange['kind']; path: string; previousPath?: string; before?: SnapshotEntry; after?: SnapshotEntry }
 export interface VerifiedWorkerWorkspace {
-  provenance: 'bridge_snapshot'|'recorded_replay'; pinnedBaseCommit: string; completeSnapshot: { reportedComplete: true; reportedErrors: 0; entryCount: number };
-  scopeVerified: true; allowedScope: string[]; entries: SnapshotEntry[]; changes: ChangeEvidence[]; reviewDiff: string;
+  provenance: 'bridge_snapshot'|'recorded_replay'; pinnedBaseCommit: string; completeSnapshot: { reportedComplete: true; reportedErrors: 0; entryCount: number; snapshotDigest?: string };
+  /** Legacy and freshly verified evidence carry the complete tree in `entries`. `base_plus_changes` evidence omits it: the tree is the pinned base with `changes` applied, checked by `entryCount` and `snapshotDigest` (see `fullSnapshotEntries`). */
+  snapshotFormat?: 'base_plus_changes'; scopeVerified: true; allowedScope: string[]; entries?: SnapshotEntry[]; changes: ChangeEvidence[]; reviewDiff: string;
 }
 export interface ValidationCommand { name: string; command: string; args: string[]; cwd?: string; /** Keep the host network for this command. Unset means a recognised package-manager install gets it and everything else runs offline (`defaultNetworkAccess`); an explicit boolean always wins. */ network?: boolean }
 export interface ValidationObservation { name: string; command: string; args: string[]; exitCode: number|null; signal?: string; timedOut: boolean; output: string; outputTruncated: boolean; startedAt: string; finishedAt: string; sandbox: 'bwrap'|'none'; /** True when the command could reach the network: it asked for it, or nothing isolated it (sandbox none). */ network: boolean }
@@ -108,15 +109,7 @@ export async function reconstructRecordedSnapshot(input:{repoPath:string;pinnedB
   if(input.recordedEvidence.baseCommit?.toLowerCase()!==input.pinnedBaseCommit.toLowerCase()||input.recordedEvidence.scopeVerified!==true||input.recordedEvidence.completeSnapshot?.reportedComplete!==true||input.recordedEvidence.completeSnapshot.reportedErrors!==0) throw new Error('Recorded evidence provenance or completeness does not match the pinned base');
   const base=await import('./git-workspace.js').then(m=>m.snapshotGitCommit(input.repoPath,input.pinnedBaseCommit));
   const result=new Map(base.entries.map(e=>[e.path,e]));
-  for(const change of input.recordedEvidence.changes){
-    const before=change.before?{...fromRecordedEntry(change.before),path:change.kind==='rename'?String(change.previousPath):change.path}:undefined,after=change.after?{...fromRecordedEntry(change.after),path:change.path}:undefined;
-    const actual=change.kind==='add'?undefined:result.get(change.kind==='rename'?String(change.previousPath):change.path);
-    if((actual===undefined)!==(before===undefined)||(actual&&before&&!sameEntry(actual,before)))throw new Error(`Recorded before bytes do not match pinned base: ${change.path}`);
-    if(change.kind==='add'||change.kind==='modify'){if(!after)throw new Error('Recorded change omitted after bytes');result.set(change.path,after);}
-    else if(change.kind==='delete'){result.delete(change.path);}
-    else if(change.kind==='rename'){if(!change.previousPath||!after)throw new Error('Recorded rename is incomplete');result.delete(change.previousPath);result.set(change.path,after);}
-    else throw new Error('Unknown recorded change kind');
-  }
+  applyChangesToTree(result,input.recordedEvidence.changes.map(change=>({kind:change.kind,path:change.path,previousPath:change.previousPath,before:change.before?{...fromRecordedEntry(change.before),path:change.kind==='rename'?String(change.previousPath):change.path}:undefined,after:change.after?{...fromRecordedEntry(change.after),path:change.path}:undefined})),'Recorded');
   const verified=await verifyGitSnapshotScope(input.repoPath,input.pinnedBaseCommit,[...result.values()],input.allowedScope);
   const changes=verified.changes.map(c=>({kind:c.kind,path:c.path,...(c.previousPath?{previousPath:c.previousPath}:{}),...(c.before?{before:c.before}:{}),...(c.after?{after:c.after}:{})}));
   const reviewDiff=formatReviewDiff(changes);
@@ -125,14 +118,72 @@ export async function reconstructRecordedSnapshot(input:{repoPath:string;pinnedB
   return {provenance:'recorded_replay',pinnedBaseCommit:verified.commit,completeSnapshot:{reportedComplete:true,reportedErrors:0,entryCount:result.size},scopeVerified:true,allowedScope:verified.allowedScope,entries:[...result.values()],changes,reviewDiff};
 }
 
+/** Marker for evidence that stores `changes` plus an integrity record instead of the complete `entries`. Legacy records carry `entries` and no marker. */
+const SNAPSHOT_FORMAT_BASE_PLUS_CHANGES='base_plus_changes' as const;
+/** sha256 over the canonical full tree: entries sorted by path, one line of [path, mode, sha256(bytes)] each, under a version tag. */
+export function snapshotDigest(entries:readonly SnapshotEntry[]):string{
+  const digest=createHash('sha256').update('foreman-snapshot-v1\n');
+  for(const entry of [...entries].sort(comparePaths))digest.update(`${JSON.stringify([entry.path,mode(entry),hash(entry)])}\n`);
+  return digest.digest('hex');
+}
+/** Drop `entries` from freshly verified evidence and record what the tree that pinned base + changes rebuild must satisfy. */
+export function compactSnapshotEvidence<T extends VerifiedWorkerWorkspace>(verified:T):Omit<T,'entries'|'completeSnapshot'|'snapshotFormat'>&{completeSnapshot:T['completeSnapshot']&{snapshotDigest:string};snapshotFormat:typeof SNAPSHOT_FORMAT_BASE_PLUS_CHANGES}{
+  const {entries,completeSnapshot,snapshotFormat:_format,...rest}=verified;
+  if(!Array.isArray(entries))throw new Error('Only freshly verified evidence with its complete entries can be compacted');
+  return {...rest,completeSnapshot:{...completeSnapshot,entryCount:entries.length,snapshotDigest:snapshotDigest(entries)},snapshotFormat:SNAPSHOT_FORMAT_BASE_PLUS_CHANGES};
+}
+/**
+ * The complete result tree for any evidence record. Legacy records return their stored entries untouched.
+ * `base_plus_changes` records rebuild it from the pinned Git base plus their exact changes and must match the recorded entry count and digest.
+ */
+export async function fullSnapshotEntries(repoPath:string,evidence:Pick<VerifiedWorkerWorkspace,'pinnedBaseCommit'|'changes'|'completeSnapshot'|'snapshotFormat'|'entries'>):Promise<SnapshotEntry[]>{
+  if(evidence.snapshotFormat===undefined){
+    if(!Array.isArray(evidence.entries))throw new Error('Worker evidence has neither stored snapshot entries nor a reconstructable snapshot format');
+    return evidence.entries;
+  }
+  if(evidence.snapshotFormat!==SNAPSHOT_FORMAT_BASE_PLUS_CHANGES)throw new Error(`Unknown Worker evidence snapshot format: ${String(evidence.snapshotFormat)}`);
+  if(evidence.entries!==undefined)throw new Error('Reconstructable Worker evidence must not also store snapshot entries');
+  const {entryCount,snapshotDigest:expected}=evidence.completeSnapshot;
+  if(!Number.isSafeInteger(entryCount)||typeof expected!=='string'||!/^[a-f0-9]{64}$/.test(expected))throw new Error('Worker evidence omitted its snapshot entry count or digest');
+  if(!Array.isArray(evidence.changes))throw new Error('Worker evidence omitted its exact changes');
+  const base=await import('./git-workspace.js').then(m=>m.snapshotGitCommit(repoPath,evidence.pinnedBaseCommit));
+  const result=new Map(base.entries.map(e=>[e.path,e]));
+  applyChangesToTree(result,evidence.changes,'Stored');
+  const entries=[...result.values()].sort(comparePaths);
+  if(entries.length!==entryCount)throw new Error(`Reconstructed Worker snapshot has ${entries.length} entries but the evidence recorded ${entryCount}`);
+  if(snapshotDigest(entries)!==expected)throw new Error('Reconstructed Worker snapshot digest does not match the evidence snapshot digest');
+  return entries;
+}
+/** Apply exact change evidence to a base tree in place, requiring every "before" to equal what the tree holds. */
+function applyChangesToTree(result:Map<string,SnapshotEntry>,changes:ReadonlyArray<{kind:string;path:string;previousPath?:string;before?:SnapshotEntry;after?:SnapshotEntry}>,label:'Recorded'|'Stored'):void{
+  for(const change of changes){
+    const actual=change.kind==='add'?undefined:result.get(change.kind==='rename'?String(change.previousPath):change.path);
+    if((actual===undefined)!==(change.before===undefined)||(actual&&change.before&&!sameEntry(actual,change.before)))throw new Error(`${label} before bytes do not match pinned base: ${change.path}`);
+    if(change.kind==='add'||change.kind==='modify'){
+      if(!change.after)throw new Error(`${label} change omitted after bytes`);
+      if(change.kind==='add'?result.has(change.path):!actual)throw new Error(`${label} ${change.kind} conflicts with the tree at: ${change.path}`);
+      result.set(change.path,{...change.after,path:change.path});
+    } else if(change.kind==='delete'){
+      if(!actual)throw new Error(`${label} delete targets a missing path: ${change.path}`);
+      result.delete(change.path);
+    } else if(change.kind==='rename'){
+      if(!change.previousPath||!change.after||!actual)throw new Error(`${label} rename is incomplete`);
+      if(result.has(change.path))throw new Error(`${label} rename conflicts with the tree at: ${change.path}`);
+      result.delete(change.previousPath);result.set(change.path,{...change.after,path:change.path});
+    } else throw new Error(`Unknown ${label.toLowerCase()} change kind`);
+  }
+}
+function comparePaths(a:SnapshotEntry,b:SnapshotEntry):number{return a.path<b.path?-1:a.path>b.path?1:0;}
+
 export async function materializeVerifiedWorkspace(repoPath:string,evidence:VerifiedWorkerWorkspace):Promise<{workspacePath:string;cleanup:()=>Promise<void>}>{
   if(evidence.scopeVerified!==true||!evidence.completeSnapshot.reportedComplete||evidence.completeSnapshot.reportedErrors!==0) throw new Error('Workspace evidence is not complete and scope-verified');
-  const checked=await verifyGitSnapshotScope(repoPath,evidence.pinnedBaseCommit,evidence.entries,evidence.allowedScope);
+  const entries=await fullSnapshotEntries(repoPath,evidence);
+  const checked=await verifyGitSnapshotScope(repoPath,evidence.pinnedBaseCommit,entries,evidence.allowedScope);
   if(!checked.scopeVerified||JSON.stringify(checked.changes)!==JSON.stringify(evidence.changes.map(change=>({kind:change.kind,path:change.path,...(change.previousPath?{previousPath:change.previousPath}:{}),...(change.before?{before:change.before}:{}),...(change.after?{after:change.after}:{})})))) throw new Error('Workspace evidence no longer matches its pinned base');
   const root=await mkdtemp(join(tmpdir(),'foreman-validation-'));
   try {
-    const byPath=new Map(evidence.entries.map(entry=>[entry.path,entry]));
-    for(const entry of evidence.entries){
+    const byPath=new Map(entries.map(entry=>[entry.path,entry]));
+    for(const entry of entries){
       const parts=entry.path.split('/');
       for(let i=1;i<parts.length;i++){const parent=byPath.get(parts.slice(0,i).join('/'));if(parent?.kind==='symlink')throw new Error(`Snapshot has a symlink path conflict: ${entry.path}`);}
       if(entry.kind==='symlink'){
@@ -142,7 +193,7 @@ export async function materializeVerifiedWorkspace(repoPath:string,evidence:Veri
         const relative=resolved.slice(root.length+1);let prefix='';for(const part of relative.split(sep)){if(!part)continue;prefix=prefix?`${prefix}/${part}`:part;if(byPath.get(prefix)?.kind==='symlink')throw new Error(`Symlink target crosses another symlink: ${entry.path}`);}
       }
     }
-    for(const entry of evidence.entries){
+    for(const entry of entries){
       const full=resolve(root,entry.path);if(!full.startsWith(root+sep))throw new Error(`Unsafe workspace path: ${entry.path}`);
       await mkdir(dirname(full),{recursive:true});
       if(entry.kind==='symlink'){
