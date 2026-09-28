@@ -8,6 +8,7 @@
 import React from 'react';
 import { ChecksPipeline, type StationObservation, type GithubCheckEntry } from './checks-pipeline.js';
 import { Badge, type Tone } from './badge.js';
+import type { DecisionDigestView, DecisionOutcome } from './decision-digest.js';
 
 export interface DecisionPanelProps {
   /** Number of files changed (from workerEvidence.changes.length). */
@@ -32,10 +33,20 @@ export interface DecisionPanelProps {
   reviewerRecommends: boolean;
   /** True while an API request is in flight. */
   pending: boolean;
-  /** Fire when the user clicks Approve. */
-  onApprove: () => void;
-  /** Fire when the user clicks Reject. */
-  onReject: () => void;
+  /**
+   * Evidence digest for the evidence on screen (`useDecisionDigest`). Approve
+   * and Reject stay disabled until it is ready.
+   */
+  digest: DecisionDigestView;
+  /** True while the controller is running; decisions are paused until it stops. */
+  controllerActive?: boolean;
+  /**
+   * Fire when the user clicks Approve, with the digest fetched for the evidence
+   * on screen. Resolve `{ conflict }` when the server answered 409.
+   */
+  onApprove: (evidenceDigest: string) => Promise<DecisionOutcome | void> | void;
+  /** Fire when the user clicks Reject; same contract as `onApprove`. */
+  onReject: (evidenceDigest: string) => Promise<DecisionOutcome | void> | void;
 
   // ── Stepper state ──────────────────────────────────────────────────────────
   /** Whether the run has a human approval recorded. */
@@ -110,14 +121,56 @@ function verdictBadge(verdict: DecisionPanelProps['reviewerVerdict']): string {
   return 'Pending';
 }
 
+/** Loading / failure text for the evidence digest, or undefined when there is nothing to say. */
+function digestStatusText(digest: DecisionDigestView): string | undefined {
+  if (digest.status === 'loading') return 'Loading the evidence digest…';
+  if (digest.status === 'error') return `Evidence digest unavailable: ${(digest.error ?? 'unknown error').replace(/[.\s]+$/, '')}.`;
+  return undefined;
+}
+
+/** The server refused the digest: the evidence changed since it was reviewed. */
+function DecisionConflict({ message }: { message: string }): React.ReactElement {
+  return (
+    <div className="workflow-stop decision-conflict" role="alert">
+      <b>Your decision was not recorded</b>
+      <span>{message}</span>
+    </div>
+  );
+}
+
+/** Digest status for other places that offer Approve/Reject (the Human decision evidence block). */
+export function DecisionDigestNotice({ digest }: { digest: DecisionDigestView }): React.ReactElement | null {
+  const status = digestStatusText(digest);
+  if (!status && !digest.conflict) return null;
+  return (
+    <>
+      {digest.conflict && <DecisionConflict message={digest.conflict} />}
+      {status && (
+        <small className={digest.status === 'error' ? 'assignment-error' : undefined} role="status">
+          {status}{' '}
+          {digest.status === 'error' && <button type="button" className="outline small" onClick={digest.retry}>Retry</button>}
+        </small>
+      )}
+    </>
+  );
+}
+
 export function DecisionPanel(props: DecisionPanelProps): React.ReactElement {
   const {
     filesChanged, allowedScope, validationPassedCount, validationTotalCount,
     validationPassed, observations, reviewerVerdict, reviewerRationaleSnippet,
     approvable, reviewerRecommends, pending, onApprove, onReject,
     approved, promotedBranch, branchPushed, prOpen, prUrl, prMerged,
-    ciChecks, ciChecksNotConfigured,
+    ciChecks, ciChecksNotConfigured, controllerActive, digest,
   } = props;
+
+  // Both decisions go out with the digest fetched for the evidence on screen, and never before it is ready.
+  const digestReady = digest.status === 'ready';
+  const decide = (approve: boolean) => { void digest.decide((evidenceDigest) => (approve ? onApprove : onReject)(evidenceDigest)); };
+  // The reason shown next to the buttons; only for a result that could otherwise be decided.
+  const digestNote = !approvable ? undefined
+    : digestStatusText(digest)
+    ?? (digest.status === 'idle' && controllerActive ? 'Decisions are paused while the controller is running.' : undefined);
 
   const steps = buildStepper(props);
   const currentStep = steps.find(s => s.status === 'current');
@@ -127,7 +180,7 @@ export function DecisionPanel(props: DecisionPanelProps): React.ReactElement {
   const reviewTone  = verdictTone(reviewerVerdict);
 
   return (
-    <section className="decision-panel card" aria-labelledby="decision-panel-title">
+    <section className="decision-panel card" aria-labelledby="decision-panel-title" data-digest={approvable ? digest.status : 'idle'}>
       <div className="card-title">
         <h2 id="decision-panel-title">Ready for your review</h2>
         <div className="decision-stepper" aria-label="Delivery progress">
@@ -215,14 +268,16 @@ export function DecisionPanel(props: DecisionPanelProps): React.ReactElement {
         />
       )}
 
+      {!approved && digest.conflict && <DecisionConflict message={digest.conflict} />}
+
       {/* Approve / Reject controls — only when awaiting approval */}
       {!approved && (
         <div className="decision-approve-row">
           <button
             type="button"
             className={reviewerRecommends ? 'primary' : 'outline'}
-            disabled={pending || !approvable}
-            onClick={onApprove}
+            disabled={pending || !approvable || !digestReady}
+            onClick={() => decide(true)}
             aria-label={reviewerRecommends ? 'Approve result' : 'Approve result despite Reviewer recommendation'}
           >
             {pending ? 'Approving…' : 'Approve result'}
@@ -230,16 +285,21 @@ export function DecisionPanel(props: DecisionPanelProps): React.ReactElement {
           <button
             type="button"
             className="outline"
-            disabled={pending || !approvable}
-            onClick={onReject}
+            disabled={pending || !approvable || !digestReady}
+            onClick={() => decide(false)}
             aria-label="Reject result"
           >
             Reject result
           </button>
-          <p className="decision-approve-note">
-            {reviewerRecommends
+          {approvable && digest.status === 'error' && (
+            <button type="button" className="outline" onClick={digest.retry} aria-label="Retry loading the evidence digest">
+              Retry
+            </button>
+          )}
+          <p className="decision-approve-note" aria-live="polite">
+            {digestNote ?? (reviewerRecommends
               ? 'Approving records your decision only. Nothing is committed to Git until you promote it.'
-              : 'The Reviewer has not recommended approving. Approving accepts the current result as-is.'}
+              : 'The Reviewer has not recommended approving. Approving accepts the current result as-is.')}
           </p>
         </div>
       )}

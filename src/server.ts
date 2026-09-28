@@ -219,6 +219,7 @@ const server=createServer(async(req,res)=>{
     m=path.match(/^\/api\/runs\/([^/]+)\/reviewer-correction\/resume$/);if(req.method==='POST'&&m){json(res,202,await activeController.resumeReviewerCorrection(decodeURIComponent(m[1]!)));return;}
     m=path.match(/^\/api\/runs\/([^/]+)\/reviewer-correction\/continue$/);if(req.method==='POST'&&m){json(res,202,await activeController.continueReviewerCorrection(decodeURIComponent(m[1]!)));return;}
     m=path.match(/^\/api\/runs\/([^/]+)\/initial-proposal\/resume$/);if(req.method==='POST'&&m){json(res,202,await activeController.resumeInitialProposal(decodeURIComponent(m[1]!)));return;}
+    m=path.match(/^\/api\/runs\/([^/]+)\/decision$/);if(req.method==='GET'&&m){json(res,200,await activeController.decisionEvidence(decodeURIComponent(m[1]!)));return;}
     m=path.match(/^\/api\/runs\/([^/]+)\/approve$/);if(req.method==='POST'&&m){json(res,200,await activeController.approveRun(decodeURIComponent(m[1]!),await body(req)));return;}
     m=path.match(/^\/api\/runs\/([^/]+)\/abandon-result$/);if(req.method==='POST'&&m){json(res,200,await activeController.abandonApprovedResult(decodeURIComponent(m[1]!),await body(req)));return;}
     m=path.match(/^\/api\/runs\/([^/]+)\/promotion$/);if(req.method==='POST'&&m){json(res,200,await activeController.promoteRun(decodeURIComponent(m[1]!),await body(req)));return;}

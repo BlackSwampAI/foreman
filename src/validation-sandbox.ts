@@ -35,6 +35,8 @@ export interface SandboxPlanInput {
   cwd?: string;
   command: string;
   args: readonly string[];
+  /** Keep the host network namespace. Only an explicit `true` does; anything else runs in an empty namespace with just a loopback. */
+  network?: boolean;
   /** Host environment values that are carried into the sandbox. */
   env: { path: string; lang: string; lcAll: string };
   /** Operator home directory. */
@@ -53,6 +55,18 @@ const real = (path: string): string | undefined => { try { return realpathSync(p
 const isDirectory = (path: string): boolean => { try { return statSync(path).isDirectory(); } catch { return false; } };
 const isFile = (path: string): boolean => { try { return statSync(path).isFile(); } catch { return false; } };
 const within = (path: string, root: string): boolean => path === root || path.startsWith(root === '/' ? '/' : `${root}/`);
+
+const INSTALL_SUBCOMMANDS = new Set(['install', 'i', 'ci', 'add']);
+
+/**
+ * Network default for a validation command that carries no `network` flag (saved workspace setups, env configs, API clients written before the flag existed):
+ * true for a package-manager install (`pnpm`, `npm` or `yarn` with first argument install, i, ci or add, and bare `yarn`), false for everything else.
+ */
+export function defaultNetworkAccess(command: string, args: readonly string[]): boolean {
+  const name = command.trim();
+  if (name === 'yarn' && args.length === 0) return true;
+  return (name === 'pnpm' || name === 'npm' || name === 'yarn') && INSTALL_SUBCOMMANDS.has(args[0] ?? '');
+}
 
 /** Parse FOREMAN_VALIDATION_SANDBOX; empty means the default, anything unrecognised is undefined. */
 export function parseSandboxMode(raw: string | undefined): ValidationSandboxMode | undefined {
@@ -152,6 +166,8 @@ export function buildSandboxArgs(input: SandboxPlanInput): string[] {
   };
   return [
     '--die-with-parent', '--new-session', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--cap-drop', 'ALL',
+    // A private network namespace hides the host's loopback services (Foreman's own API, the bridge), cloud metadata and abstract Unix sockets; bwrap brings up its own lo.
+    ...(input.network === true ? [] : ['--unshare-net']),
     '--ro-bind', '/', '/',
     ...hidden.flatMap(path => ['--tmpfs', path]),
     '--proc', '/proc', '--dev', '/dev',
@@ -173,7 +189,7 @@ export async function ensureSandboxCache(cacheDir: string): Promise<void> {
 
 const usableBwrap = new Set<string>();
 
-/** Run a trivial command through the same isolation flags to prove bwrap can really create the sandbox here. */
+/** Run a trivial command through the same isolation flags (including the private network namespace) to prove bwrap can really create the sandbox here. */
 export function probeBwrap(bwrapPath = 'bwrap'): Promise<{ ok: true } | { ok: false; detail: string }> {
   if (usableBwrap.has(bwrapPath)) return Promise.resolve({ ok: true });
   return new Promise(resolvePromise => {
@@ -184,7 +200,7 @@ export function probeBwrap(bwrapPath = 'bwrap'): Promise<{ ok: true } | { ok: fa
       if (result.ok) usableBwrap.add(bwrapPath);
       resolvePromise(result);
     };
-    const child = spawn(bwrapPath, ['--die-with-parent', '--new-session', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--cap-drop', 'ALL', '--ro-bind', '/', '/', '--tmpfs', '/tmp', '--proc', '/proc', '--dev', '/dev', '--', '/bin/sh', '-c', ':'], { stdio: ['ignore', 'ignore', 'pipe'], env: { PATH: process.env.PATH ?? '' } });
+    const child = spawn(bwrapPath, ['--die-with-parent', '--new-session', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-net', '--cap-drop', 'ALL', '--ro-bind', '/', '/', '--tmpfs', '/tmp', '--proc', '/proc', '--dev', '/dev', '--', '/bin/sh', '-c', ':'], { stdio: ['ignore', 'ignore', 'pipe'], env: { PATH: process.env.PATH ?? '' } });
     const timer = setTimeout(() => { child.kill('SIGKILL'); finish({ ok: false, detail: 'timed out' }); }, 10_000);
     child.stderr.on('data', chunk => { if (stderr.length < 2000) stderr += chunk; });
     child.once('error', error => finish({ ok: false, detail: error.message }));

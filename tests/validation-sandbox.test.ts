@@ -2,12 +2,13 @@ import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { accessSync, constants, existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
-import { createServer } from 'node:http';
+import { createServer as createTcpServer, type AddressInfo } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadConfig } from '../src/config.js';
-import { SANDBOX_UNAVAILABLE_MESSAGE, buildSandboxArgs, parseSandboxMode, probeBwrap, validationSandboxStatus, type SandboxPlanInput } from '../src/validation-sandbox.js';
+import { SANDBOX_UNAVAILABLE_MESSAGE, buildSandboxArgs, defaultNetworkAccess, parseSandboxMode, probeBwrap, validationSandboxStatus, type SandboxPlanInput } from '../src/validation-sandbox.js';
+import { normalizeValidationCommands } from '../src/controller.js';
 import { validateWorkerOutput, verifyWorkerSnapshot, type ValidationCommand } from '../src/verified-workspace.js';
 
 vi.setConfig({ testTimeout: 30_000 });
@@ -153,16 +154,6 @@ describe('validation sandbox (bubblewrap)', () => {
     expect(second.output.trim()).toBe('cached');
   });
 
-  it('can still reach the network (installs need it): a loopback server answers', async () => {
-    const server = createServer((_req, res) => res.end('pong'));
-    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
-    try {
-      const { port } = server.address() as import('node:net').AddressInfo;
-      const check = await run(await fixture(), node("fetch('http://127.0.0.1:'+process.argv[1]).then(r=>r.text()).then(t=>console.log(t),e=>{console.log('ERR '+e.cause?.code);process.exit(1)})", String(port)));
-      expect(check).toMatchObject({ exitCode: 0, output: 'pong\n' });
-    } finally { await new Promise(resolve => server.close(resolve)); }
-  });
-
   it('re-exposes a toolchain that lives under the hidden home directory', async () => {
     const home = await scratch(homedir(), '.foreman-sandbox-toolchain-');
     const prefix = join(home, 'versions', 'v1'), bin = join(prefix, 'bin');
@@ -228,6 +219,151 @@ describe('validation sandbox (bubblewrap)', () => {
   it('reports the sandbox as usable on this host', async () => {
     expect(await probeBwrap()).toEqual({ ok: true });
     expect(await validationSandboxStatus()).toEqual({ mode: 'bwrap', available: true });
+  });
+});
+
+/** A TCP (or, with `abstractName`, abstract-namespace Unix) listener on the host that counts connections. */
+async function hostListener(abstractName?: string) {
+  let connections = 0;
+  const server = createTcpServer(socket => { connections++; socket.end('pong'); });
+  await new Promise<void>(resolve => abstractName ? server.listen(`\0${abstractName}`, resolve) : server.listen(0, '127.0.0.1', resolve));
+  return { port: abstractName ? 0 : (server.address() as AddressInfo).port, connections: () => connections, close: () => new Promise<void>(resolve => server.close(() => resolve())) };
+}
+const CONNECT_TCP = "const c=require('net').connect({host:process.argv[1],port:Number(process.argv[2])});let data='';c.on('data',d=>data+=d);c.on('end',()=>console.log(JSON.stringify({data})));c.on('error',e=>console.log(JSON.stringify({error:e.code})))";
+const CONNECT_ABSTRACT = "const c=require('net').connect({path:'\\0'+process.argv[1]});let data='';c.on('data',d=>data+=d);c.on('end',()=>console.log(JSON.stringify({data})));c.on('error',e=>console.log(JSON.stringify({error:e.code})))";
+/** Bind and connect to loopback from inside: a raw TCP echo, then an HTTP request, as a test suite would. */
+const LOOPBACK = "const net=require('net'),http=require('http'),os=require('os');const tcp=net.createServer(s=>s.end('inside')).listen(0,'127.0.0.1',()=>{const c=net.connect({host:'127.0.0.1',port:tcp.address().port});let data='';c.on('data',d=>data+=d);c.on('end',()=>{tcp.close();const web=http.createServer((q,r)=>r.end('web')).listen(0,'127.0.0.1',()=>{fetch('http://127.0.0.1:'+web.address().port).then(r=>r.text()).then(body=>{web.close();console.log(JSON.stringify({data,body,interfaces:Object.keys(os.networkInterfaces())}))},e=>{console.log(JSON.stringify({error:String(e.cause&&e.cause.code)}));process.exit(1)})})});c.on('error',e=>{console.log(JSON.stringify({error:e.code}));process.exit(1)})})";
+
+describe('validation network policy (live bubblewrap)', () => {
+  it('cannot connect to a TCP listener on the host loopback unless the command asks for the network', async () => {
+    const listener = await hostListener();
+    try {
+      const f = await fixture();
+      for (const network of [undefined, false]) {
+        const check = await run(f, { ...node(CONNECT_TCP, '127.0.0.1', String(listener.port)), ...(network === undefined ? {} : { network }) });
+        expect(check, `network ${network}`).toMatchObject({ exitCode: 0, sandbox: 'bwrap', network: false });
+        expect(json(check.output)).toEqual({ error: 'ECONNREFUSED' });
+      }
+      expect(listener.connections()).toBe(0);
+
+      const allowed = await run(f, { ...node(CONNECT_TCP, '127.0.0.1', String(listener.port)), network: true });
+      expect(allowed).toMatchObject({ exitCode: 0, sandbox: 'bwrap', network: true });
+      expect(json(allowed.output)).toEqual({ data: 'pong' });
+      expect(listener.connections()).toBe(1);
+    } finally { await listener.close(); }
+  });
+
+  it('cannot reach the host abstract Unix sockets without the network, and can with it', async () => {
+    const name = `foreman-net-test-${process.pid}-${Date.now()}`, listener = await hostListener(name);
+    try {
+      const f = await fixture();
+      const denied = json((await run(f, node(CONNECT_ABSTRACT, name))).output);
+      expect(['ECONNREFUSED', 'ENOENT']).toContain(denied.error);
+      expect(listener.connections()).toBe(0);
+      expect(json((await run(f, { ...node(CONNECT_ABSTRACT, name), network: true })).output)).toEqual({ data: 'pong' });
+      expect(listener.connections()).toBe(1);
+    } finally { await listener.close(); }
+  });
+
+  it('has no route out (cloud metadata address, public addresses) and DNS lookups fail', async () => {
+    const f = await fixture();
+    const connect = "const c=require('net').connect({host:process.argv[1],port:Number(process.argv[2]),timeout:5000});c.on('connect',()=>{console.log(JSON.stringify({connected:true}));c.destroy()});c.on('timeout',()=>{console.log(JSON.stringify({error:'TIMEOUT'}));c.destroy()});c.on('error',e=>console.log(JSON.stringify({error:e.code})))";
+    for (const [host, port] of [['169.254.169.254', '80'], ['8.8.8.8', '53'], ['1.1.1.1', '443']]) {
+      expect(json((await run(f, node(connect, host!, port!))).output), `${host}:${port}`).toEqual({ error: 'ENETUNREACH' });
+    }
+    const lookup = json((await run(f, node("require('dns').lookup('example.com',(e,a)=>console.log(JSON.stringify({error:e&&e.code,address:a})))"))).output);
+    expect(['ENOTFOUND', 'EAI_AGAIN']).toContain(lookup.error);
+    expect(lookup.address).toBeUndefined();
+  });
+
+  it('keeps loopback up inside the private namespace: bind, connect and HTTP to 127.0.0.1 work without network', async () => {
+    const check = await run(await fixture(), node(LOOPBACK));
+    expect(check).toMatchObject({ exitCode: 0, network: false });
+    expect(json(check.output)).toEqual({ data: 'inside', body: 'web', interfaces: ['lo'] });
+    // The namespace is the same when the command is explicitly offline, and loopback also works with network on.
+    const explicit = await run(await fixture(), { ...node(LOOPBACK), network: false });
+    expect(json(explicit.output)).toMatchObject({ data: 'inside', body: 'web', interfaces: ['lo'] });
+    const online = await run(await fixture(), { ...node(LOOPBACK), network: true });
+    expect(json(online.output)).toMatchObject({ data: 'inside', body: 'web' });
+  });
+
+  it('decides per command and records the decision on every observation', async () => {
+    const listener = await hostListener();
+    try {
+      const f = await fixture(), probe = (name: string, network?: boolean): ValidationCommand => ({ ...node(CONNECT_TCP, '127.0.0.1', String(listener.port)), name, ...(network === undefined ? {} : { network }) });
+      const result = await validateWorkerOutput({ repoPath: f.repo, evidence: f.evidence, commands: [probe('install', true), probe('tests', false), probe('lint')], timeoutMs: 20_000 });
+      expect(result.checks.map(check => [check.name, check.network, json(check.output).data ?? json(check.output).error])).toEqual([['install', true, 'pong'], ['tests', false, 'ECONNREFUSED'], ['lint', false, 'ECONNREFUSED']]);
+      expect(listener.connections()).toBe(1);
+    } finally { await listener.close(); }
+  });
+
+  it('applies the install default at execution time: a legacy command list with no network fields gives only the install the network', async () => {
+    const listener = await hostListener();
+    try {
+      // Fake pnpm/npm/yarn that connect to the host listener (the port is read from a file inside the re-exposed toolchain prefix), so no real install runs.
+      const home = await scratch(homedir(), '.foreman-sandbox-legacy-'), prefix = join(home, 'versions', 'v1'), bin = join(prefix, 'bin'), lib = join(prefix, 'lib');
+      await mkdir(bin, { recursive: true }); await mkdir(lib);
+      await writeFile(join(lib, 'port'), String(listener.port));
+      await writeFile(join(lib, 'probe.js'), "const c=require('net').connect({host:'127.0.0.1',port:Number(require('fs').readFileSync(__dirname+'/port','utf8'))});let d='';c.on('data',x=>d+=x);c.on('end',()=>console.log(JSON.stringify({data:d})));c.on('error',e=>console.log(JSON.stringify({error:e.code})))");
+      for (const tool of ['pnpm', 'npm', 'yarn']) { await writeFile(join(bin, tool), `#!/bin/sh\nexec '${process.execPath}' '${join(lib, 'probe.js')}' "$@"\n`); await chmod(join(bin, tool), 0o755); }
+      vi.stubEnv('PATH', `${bin}:${process.env.PATH ?? ''}`);
+
+      const legacy: ValidationCommand[] = [
+        { name: 'pnpm install', command: 'pnpm', args: ['install', '--frozen-lockfile'] },
+        { name: 'npm ci', command: 'npm', args: ['ci'] },
+        { name: 'bare yarn', command: 'yarn', args: [] },
+        { name: 'yarn add', command: 'yarn', args: ['add', 'left-pad'] },
+        { name: 'pnpm test', command: 'pnpm', args: ['run', 'test'] },
+        { name: 'npm test', command: 'npm', args: ['test'] },
+        { name: 'yarn flags', command: 'yarn', args: ['--immutable'] },
+        { name: 'explicit off', command: 'pnpm', args: ['install'], network: false },
+        { name: 'explicit on', command: 'pnpm', args: ['run', 'test'], network: true },
+      ];
+      const before = structuredClone(legacy), f = await fixture();
+      const result = await validateWorkerOutput({ repoPath: f.repo, evidence: f.evidence, commands: legacy, timeoutMs: 20_000 });
+      expect(result.checks.map(check => [check.name, check.network, json(check.output).data ?? json(check.output).error])).toEqual([
+        ['pnpm install', true, 'pong'], ['npm ci', true, 'pong'], ['bare yarn', true, 'pong'], ['yarn add', true, 'pong'],
+        ['pnpm test', false, 'ECONNREFUSED'], ['npm test', false, 'ECONNREFUSED'], ['yarn flags', false, 'ECONNREFUSED'],
+        ['explicit off', false, 'ECONNREFUSED'], ['explicit on', true, 'pong'],
+      ]);
+      expect(listener.connections()).toBe(5);
+      // The stored command list is not rewritten: the default is decided when the command runs.
+      expect(legacy).toEqual(before);
+    } finally { await listener.close(); }
+  });
+
+  it('rejects a network flag that is not a boolean instead of guessing', async () => {
+    const f = await fixture(), marker = join(f.root, 'ran');
+    for (const network of ['true', 'false', 1, 0, null]) {
+      await expect(run(f, { ...node("require('fs').writeFileSync(process.argv[1],'ran')", marker), network: network as unknown as boolean }), JSON.stringify(network)).rejects.toThrow('network must be a boolean');
+    }
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it('mode none leaves the host network alone and says so on the observation', async () => {
+    const listener = await hostListener();
+    try {
+      const f = await fixture();
+      for (const network of [undefined, false]) {
+        const check = await run(f, { ...node(CONNECT_TCP, '127.0.0.1', String(listener.port)), ...(network === undefined ? {} : { network }) }, { sandbox: { mode: 'none' } });
+        expect(check).toMatchObject({ sandbox: 'none', network: true });
+        expect(json(check.output)).toEqual({ data: 'pong' });
+      }
+      expect(listener.connections()).toBe(2);
+    } finally { await listener.close(); }
+  });
+
+  it('probes bwrap with the private network namespace, so a host that cannot create one fails closed instead of running networked', async () => {
+    const dir = await scratch(tmpdir(), 'foreman-fake-bwrap-'), log = join(dir, 'argv'), recording = join(dir, 'bwrap-ok'), failing = join(dir, 'bwrap-no-netns');
+    await writeFile(recording, `#!/bin/sh\nprintf '%s\\n' "$@" > '${log}'\n`); await chmod(recording, 0o755);
+    expect(await probeBwrap(recording)).toEqual({ ok: true });
+    expect((await readFile(log, 'utf8')).split('\n')).toContain('--unshare-net');
+    await writeFile(failing, '#!/bin/sh\nfor arg in "$@"; do [ "$arg" = --unshare-net ] && { echo "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted" >&2; exit 1; }; done\nexit 0\n'); await chmod(failing, 0o755);
+    const f = await fixture(), marker = join(f.root, 'ran');
+    const command = node("require('fs').writeFileSync(process.argv[1],'ran')", marker);
+    await expect(run(f, command, { sandbox: { bwrapPath: failing } })).rejects.toThrow(/Validation sandbox unavailable.*RTM_NEWADDR/);
+    await expect(run(f, { ...command, network: true }, { sandbox: { bwrapPath: failing } })).rejects.toThrow(SANDBOX_UNAVAILABLE_MESSAGE);
+    expect(existsSync(marker)).toBe(false);
   });
 });
 
@@ -351,6 +487,36 @@ describe('sandbox mount plan (pure)', () => {
     expect(Object.keys(env).sort()).toEqual(['COREPACK_HOME', 'HOME', 'LANG', 'LC_ALL', 'PATH', 'TMPDIR', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'YARN_CACHE_FOLDER', 'npm_config_cache', 'npm_config_store_dir', 'pnpm_config_store_dir']);
     expect(withCache.indexOf('--clearenv')).toBeLessThan(withCache.indexOf('--setenv'));
   });
+
+  it('unshares the network namespace unless the command explicitly asks for the network', async () => {
+    const { input } = await plan();
+    for (const network of [undefined, false]) {
+      const args = buildSandboxArgs({ ...input, network });
+      expect(args, `network ${network}`).toContain('--unshare-net');
+      expect(args.indexOf('--unshare-net')).toBeLessThan(args.indexOf('--ro-bind'));
+    }
+    expect(buildSandboxArgs({ ...input, network: true })).not.toContain('--unshare-net');
+    // Only a real `true` opens the network: a truthy string or number does not.
+    for (const network of ['true', 1, {}]) expect(buildSandboxArgs({ ...input, network: network as unknown as boolean })).toContain('--unshare-net');
+    // The flag is the only difference between the two plans, and it is a bwrap option, not part of the sandboxed command's argv.
+    const offline = buildSandboxArgs(input), online = buildSandboxArgs({ ...input, network: true });
+    expect(offline.filter(arg => arg !== '--unshare-net')).toEqual(online);
+    expect(offline.indexOf('--unshare-net')).toBeLessThan(offline.indexOf('--'));
+    expect(buildSandboxArgs({ ...input, network: true, args: ['--unshare-net'] }).slice(-2)).toEqual(['true', '--unshare-net']);
+  });
+
+  it('recognises package-manager installs for the compatibility default and nothing else', () => {
+    const table: Array<[string, string[], boolean]> = [
+      ['pnpm', ['install', '--frozen-lockfile'], true], ['pnpm', ['i'], true], ['pnpm', ['ci'], true], ['pnpm', ['add', 'left-pad'], true],
+      ['npm', ['ci'], true], ['npm', ['install'], true], ['npm', ['i', '-D', 'x'], true], ['npm', ['add', 'x'], true],
+      ['yarn', [], true], ['yarn', ['install', '--immutable'], true], ['yarn', ['add', 'x'], true], [' pnpm ', ['install'], true],
+      ['pnpm', ['test'], false], ['pnpm', ['run', 'install'], false], ['pnpm', ['--filter', 'app', 'install'], false], ['pnpm', [], false], ['npm', [], false],
+      ['npm', ['run', 'build'], false], ['npm', ['test'], false], ['yarn', ['test'], false], ['yarn', ['--immutable'], false],
+      ['npx', ['install'], false], ['bun', ['install'], false], ['cargo', ['test'], false], ['go', ['test', './...'], false], ['python', ['-m', 'pytest'], false],
+      ['/usr/local/bin/pnpm', ['install'], false], ['sh', ['-c', 'pnpm install'], false], ['true', [], false],
+    ];
+    for (const [command, args, expected] of table) expect(defaultNetworkAccess(command, args), `${command} ${args.join(' ')}`).toBe(expected);
+  });
 });
 
 describe('sandbox configuration', () => {
@@ -377,5 +543,52 @@ describe('sandbox configuration', () => {
       vi.stubEnv('FOREMAN_VALIDATION_SANDBOX', 'bwrap'); vi.stubEnv('FOREMAN_VALIDATION_SANDBOX_RO_PATHS', 'relative/dir');
       expect(() => loadConfig()).toThrow('absolute paths');
     } finally { write.mockRestore(); }
+  });
+});
+
+describe('validation command network flag', () => {
+  const list = (...commands: unknown[]) => JSON.stringify(commands);
+
+  it('FOREMAN_VALIDATION_COMMANDS keeps an explicit flag and defaults an unflagged command by the install rule', () => {
+    vi.stubEnv('FOREMAN_VALIDATION_COMMANDS', list(
+      { name: 'Install', command: 'pnpm', args: ['install', '--frozen-lockfile'] },
+      { name: 'Install offline', command: 'npm', args: ['ci', '--offline'], network: false },
+      { name: 'Tests', command: 'pnpm', args: ['test'] },
+      { name: 'Cargo', command: 'cargo', args: ['test'], network: true },
+      { name: 'Sub', command: 'yarn', args: [], cwd: 'app' },
+    ));
+    expect(loadConfig().validationCommands).toEqual([
+      { name: 'Install', command: 'pnpm', args: ['install', '--frozen-lockfile'], network: true },
+      { name: 'Install offline', command: 'npm', args: ['ci', '--offline'], network: false },
+      { name: 'Tests', command: 'pnpm', args: ['test'], network: false },
+      { name: 'Cargo', command: 'cargo', args: ['test'], network: true },
+      { name: 'Sub', command: 'yarn', args: [], cwd: 'app', network: true },
+    ]);
+  });
+
+  it('FOREMAN_VALIDATION_COMMANDS accepts only true or false', () => {
+    for (const network of ['true', 'false', 1, 0, null, {}, []]) {
+      vi.stubEnv('FOREMAN_VALIDATION_COMMANDS', list({ name: 'Install', command: 'pnpm', args: ['install'], network }));
+      expect(() => loadConfig(), JSON.stringify(network)).toThrow('FOREMAN_VALIDATION_COMMANDS must be a JSON array of {name,command,args,cwd?,network?} where network is true or false');
+    }
+  });
+
+  it('task-start validation commands: explicit flag, install default, strict booleans', () => {
+    expect(normalizeValidationCommands([
+      { name: ' Install ', command: ' pnpm ', args: ['install'] },
+      { name: 'Tests', command: 'pnpm', args: ['test'] },
+      { name: 'Cargo', command: 'cargo', args: ['test'], network: true, cwd: 'crate' },
+      { name: 'Offline install', command: 'npm', args: ['ci'], network: false },
+    ])).toEqual([
+      { name: 'Install', command: 'pnpm', args: ['install'], network: true },
+      { name: 'Tests', command: 'pnpm', args: ['test'], network: false },
+      { name: 'Cargo', command: 'cargo', args: ['test'], cwd: 'crate', network: true },
+      { name: 'Offline install', command: 'npm', args: ['ci'], network: false },
+    ]);
+    for (const network of ['true', 'false', 1, 0, null, {}]) {
+      const attempt = () => normalizeValidationCommands([{ name: 'Install', command: 'pnpm', args: ['install'], network }]);
+      expect(attempt, JSON.stringify(network)).toThrow('network must be true or false');
+      expect(attempt, JSON.stringify(network)).toThrow(expect.objectContaining({ statusCode: 422 }));
+    }
   });
 });

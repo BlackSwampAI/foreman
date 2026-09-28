@@ -20,6 +20,8 @@ export interface StationObservation {
   passed?: boolean;
   startedAt?: string;
   finishedAt?: string;
+  /** True when the check ran with network access (an install, or no sandbox). */
+  network?: boolean;
 }
 
 export interface CiJobFailure {
@@ -123,12 +125,13 @@ export function ChecksPipeline({ observations, running, ciChecks, ciChecksNotCon
         )}
         {localStations.map(({ obs, status, summary }) => {
           const dur = durationLabel(obs.startedAt, obs.finishedAt);
-          const ariaLabel = `${obs.name}: ${statusLabel(status, obs.timedOut)}${summary ? ` — ${summary}` : ''}`;
+          const ariaLabel = `${obs.name}: ${statusLabel(status, obs.timedOut)}${summary ? ` — ${summary}` : ''}${obs.network === true ? ' — ran with network access' : ''}`;
           return (
             <details className={`check-station check-station-detail ${statusToneClass(status)}`} key={obs.name} role="listitem">
               <summary aria-label={ariaLabel}>
                 <span className="station-name">{obs.name}</span>
                 {dur && <span className="station-duration">{dur}</span>}
+                {obs.network === true && <Badge tone="info" title="This check ran with network access" aria-label="Ran with network access">Network</Badge>}
                 <Badge tone={stationTone(status)} aria-label={`Status: ${statusLabel(status, obs.timedOut)}`}>
                   {statusLabel(status, obs.timedOut)}
                 </Badge>

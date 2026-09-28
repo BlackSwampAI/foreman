@@ -1,11 +1,13 @@
-import { createElement } from 'react';
+import { createElement, type ReactElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App, debounce, type State, type TaskStartPreview } from '../ui/main.js';
-import { DecisionPanel, type DecisionPanelProps } from '../ui/decision-panel.js';
+import { DecisionPanel, DecisionDigestNotice, type DecisionPanelProps } from '../ui/decision-panel.js';
+import type { DecisionDigestView } from '../ui/decision-digest.js';
 import { ChecksPipeline, type StationObservation, type GithubCheckEntry } from '../ui/checks-pipeline.js';
 import { parseChecksSummary } from '../ui/check-output.js';
 import { PrDraftPanel, type PrDraftData } from '../ui/pr-draft.js';
+import { NetworkToggle, RepoChecksEditor, checksFromSuggestions, validationCommandsPayload, type RepoCheck } from '../ui/repo-checks.js';
 import { Badge, toneForStatus } from '../ui/badge.js';
 
 describe('debounce helper',()=>{
@@ -406,11 +408,18 @@ describe('usage dock refresh stability',()=>{
 
 // ── Shared fixture helpers ─────────────────────────────────────────────────
 
+/** Evidence-digest state as the panel receives it from useDecisionDigest. */
+const digestView=(over:Partial<DecisionDigestView>={}):DecisionDigestView=>({
+  status:'ready',
+  digest:{runId:'run-1',evidenceDigest:'a'.repeat(64),pinnedBaseCommit:'c'.repeat(40),workerResponseId:'resp-1',validationId:'val-1',recommendationId:'rec-1'},
+  retry:()=>{},decide:async()=>{},...over,
+});
+
 const baseDecisionProps:DecisionPanelProps={
   filesChanged:3,allowedScope:['src/'],validationPassedCount:2,validationTotalCount:2,
   validationPassed:true,observations:[],reviewerVerdict:'recommend',
   reviewerRationaleSnippet:'Looks good.',approvable:true,reviewerRecommends:true,
-  pending:false,onApprove:()=>{},onReject:()=>{},
+  pending:false,digest:digestView(),onApprove:()=>{},onReject:()=>{},
   approved:false,promoted:false,branchPushed:false,prOpen:false,prMerged:false,
 };
 
@@ -477,6 +486,117 @@ describe('decision panel',()=>{
     const html=renderToStaticMarkup(createElement(DecisionPanel,props));
     expect(html).not.toContain('>Approve result<');
     expect(html).not.toContain('>Reject result<');
+  });
+});
+
+// ── Decision panel: evidence digest states ─────────────────────────────────
+
+/** Opening tags of the Approve/Reject/Retry buttons, keyed by aria-label. */
+const decisionButtons=(html:string)=>{
+  const tag=(label:string)=>html.match(new RegExp(`<button[^>]*aria-label="${label}"[^>]*>`))?.[0];
+  return {approve:tag('Approve result'),reject:tag('Reject result'),retry:tag('Retry loading the evidence digest')};
+};
+
+describe('decision panel evidence digest',()=>{
+  it('enables Approve and Reject once the digest is ready',()=>{
+    const html=renderToStaticMarkup(createElement(DecisionPanel,baseDecisionProps));
+    const {approve,reject,retry}=decisionButtons(html);
+    expect(approve).toBeDefined();
+    expect(approve).not.toContain('disabled');
+    expect(reject).not.toContain('disabled');
+    expect(retry).toBeUndefined();
+    expect(html).toContain('Approving records your decision only');
+    expect(html).not.toContain('Loading the evidence digest');
+    expect(html).not.toContain('class="workflow-stop decision-conflict"');
+  });
+
+  it('disables both buttons with a reason while the digest is loading',()=>{
+    const html=renderToStaticMarkup(createElement(DecisionPanel,{...baseDecisionProps,digest:digestView({status:'loading',digest:undefined})}));
+    const {approve,reject,retry}=decisionButtons(html);
+    expect(approve).toContain('disabled=""');
+    expect(reject).toContain('disabled=""');
+    expect(retry).toBeUndefined();
+    expect(html).toContain('class="decision-approve-note" aria-live="polite">Loading the evidence digest…</p>');
+    expect(html).not.toContain('Approving records your decision only');
+    expect(html).toContain('data-digest="loading"');
+  });
+
+  it('disables both buttons and offers a retry when the digest failed',()=>{
+    const html=renderToStaticMarkup(createElement(DecisionPanel,{...baseDecisionProps,digest:digestView({status:'error',digest:undefined,error:'Run is not at a decision checkpoint.'})}));
+    const {approve,reject,retry}=decisionButtons(html);
+    expect(approve).toContain('disabled=""');
+    expect(reject).toContain('disabled=""');
+    expect(retry).toBeDefined();
+    expect(retry).not.toContain('disabled');
+    expect(html).toContain('Evidence digest unavailable: Run is not at a decision checkpoint.</p>');
+    expect(html).toContain('>Retry<');
+    expect(html).toContain('data-digest="error"');
+  });
+
+  it('shows the server message prominently after a 409 while the new digest loads, and re-enables once it arrives',()=>{
+    const message='The evidence changed since you reviewed it; refresh and review the current result before deciding.';
+    const reloading=renderToStaticMarkup(createElement(DecisionPanel,{...baseDecisionProps,digest:digestView({status:'loading',digest:undefined,conflict:message})}));
+    expect(reloading).toContain('<div class="workflow-stop decision-conflict" role="alert"><b>Your decision was not recorded</b><span>'+message+'</span></div>');
+    expect(decisionButtons(reloading).approve).toContain('disabled=""');
+    expect(decisionButtons(reloading).reject).toContain('disabled=""');
+
+    const ready=renderToStaticMarkup(createElement(DecisionPanel,{...baseDecisionProps,digest:digestView({conflict:message})}));
+    expect(ready).toContain(message);
+    expect(decisionButtons(ready).approve).not.toContain('disabled');
+    expect(decisionButtons(ready).reject).not.toContain('disabled');
+  });
+
+  it('keeps the buttons disabled while the controller runs, with a reason',()=>{
+    const html=renderToStaticMarkup(createElement(DecisionPanel,{...baseDecisionProps,controllerActive:true,digest:digestView({status:'idle',digest:undefined})}));
+    expect(decisionButtons(html).approve).toContain('disabled=""');
+    expect(decisionButtons(html).reject).toContain('disabled=""');
+    expect(html).toContain('Decisions are paused while the controller is running.');
+  });
+
+  it('does not add digest messaging to a result that is not approvable',()=>{
+    const html=renderToStaticMarkup(createElement(DecisionPanel,{...baseDecisionProps,approvable:false,digest:digestView({status:'loading',digest:undefined})}));
+    expect(html).not.toContain('Loading the evidence digest');
+    expect(html).toContain('data-digest="idle"');
+    expect(decisionButtons(html).approve).toContain('disabled=""');
+  });
+
+  it('shows no decision controls or digest messaging once approved',()=>{
+    const html=renderToStaticMarkup(createElement(DecisionPanel,{...baseDecisionProps,approved:true,digest:digestView({status:'idle',digest:undefined,conflict:'stale'})}));
+    expect(html).not.toContain('>Approve result<');
+    expect(html).not.toContain('decision-conflict');
+  });
+
+  it('sends the digest fetched for the evidence on screen when Approve or Reject is clicked',async()=>{
+    const view=digestView();
+    // Stands in for the store: hands the ready digest to the submit callback, like DecisionDigestStore.decide.
+    const decide=vi.fn(async(submit:(digest:string)=>unknown)=>{await submit(view.digest!.evidenceDigest);});
+    const onApprove=vi.fn(),onReject=vi.fn();
+    const findElement=(node:unknown,match:(props:Record<string,any>)=>boolean):{props:Record<string,any>}|undefined=>{
+      if(Array.isArray(node)){for(const child of node){const hit=findElement(child,match);if(hit)return hit;}return undefined;}
+      if(typeof node!=='object'||node===null||!('props' in node))return undefined;
+      const props=(node as {props:Record<string,any>}).props;
+      return match(props)?node as {props:Record<string,any>}:findElement(props.children,match);
+    };
+    const tree=DecisionPanel({...baseDecisionProps,onApprove,onReject,digest:{...view,decide}});
+
+    findElement(tree,p=>p['aria-label']==='Approve result')!.props.onClick();
+    expect(onApprove).toHaveBeenCalledExactlyOnceWith('a'.repeat(64));
+    expect(onReject).not.toHaveBeenCalled();
+    findElement(tree,p=>p['aria-label']==='Reject result')!.props.onClick();
+    expect(onReject).toHaveBeenCalledExactlyOnceWith('a'.repeat(64));
+    expect(decide).toHaveBeenCalledTimes(2);
+  });
+
+  it('renders the same digest states beside the Human decision buttons',()=>{
+    expect(renderToStaticMarkup(createElement(DecisionDigestNotice,{digest:digestView()}))).toBe('');
+    const loading=renderToStaticMarkup(createElement(DecisionDigestNotice,{digest:digestView({status:'loading',digest:undefined})}));
+    expect(loading).toContain('Loading the evidence digest…');
+    const failed=renderToStaticMarkup(createElement(DecisionDigestNotice,{digest:digestView({status:'error',digest:undefined,error:'boom'})}));
+    expect(failed).toContain('Evidence digest unavailable: boom.');
+    expect(failed).toContain('>Retry<');
+    const conflict=renderToStaticMarkup(createElement(DecisionDigestNotice,{digest:digestView({conflict:'The evidence changed'})}));
+    expect(conflict).toContain('role="alert"');
+    expect(conflict).toContain('The evidence changed');
   });
 });
 
@@ -577,6 +697,84 @@ describe('checks pipeline',()=>{
     const html=renderToStaticMarkup(createElement(ChecksPipeline,{observations:[],running:true}));
     expect(html).toContain('tone-running');
     expect(html).toContain('Validating');
+  });
+
+  it('badges only the checks that ran with network access',()=>{
+    const obs=[{...sampleObservation('install',true),network:true},{...sampleObservation('tests',true),network:false},sampleObservation('legacy',true)];
+    const html=renderToStaticMarkup(createElement(ChecksPipeline,{observations:obs}));
+    const station=(name:string)=>html.split('<details').find(part=>part.includes(`class="station-name">${name}<`))??'';
+    expect(html.match(/status-pill tone-info/g)).toHaveLength(1);
+    expect(station('install')).toContain('class="status-pill tone-info" title="This check ran with network access" aria-label="Ran with network access">Network<');
+    expect(station('install')).toContain('aria-label="install: Passed — ran with network access"');
+    expect(station('tests')).toContain('aria-label="tests: Passed"');
+    expect(station('tests')).not.toContain('Network');
+    expect(station('legacy')).not.toContain('Network');
+  });
+});
+
+// ── Open-repository dialog: validation command list ──────────────────────────
+
+type Node=ReactNode;
+/** Walk an element tree without rendering it, collecting elements of one component type. */
+const findElements=(node:Node,type:unknown):ReactElement<any>[]=>{
+  if(!node||typeof node!=='object')return [];
+  if(Array.isArray(node))return node.flatMap(child=>findElements(child,type));
+  const element=node as ReactElement<any>,own=element.type===type?[element]:[];
+  return [...own,...findElements(element.props?.children,type)];
+};
+
+describe('open-repository validation commands',()=>{
+  const suggestions=[{name:'Install dependencies',command:'pnpm',args:['install','--frozen-lockfile'],network:true,source:'ci' as const},{name:'Tests',command:'pnpm',args:['run','test'],source:'ci' as const}];
+
+  it('defaults each Network toggle from the suggestion and explains why it is off by default',()=>{
+    const checks=checksFromSuggestions(suggestions);
+    expect(checks.map(check=>check.network)).toEqual([true,false]);
+    const html=renderToStaticMarkup(createElement(RepoChecksEditor,{checks,onChange:()=>{}}));
+    const rows=html.split('class="repo-check"').slice(1);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toContain('<input type="checkbox" aria-label="Network access" checked=""/>');
+    expect(rows[1]).toContain('<input type="checkbox" aria-label="Network access"/>');
+    expect(html).toContain('Network is off by default so a check cannot reach services on this computer or cloud credentials.');
+    expect(html.match(/class="repo-check-network"/g)).toHaveLength(2);
+  });
+
+  it('round-trips the checkbox into the submitted validation commands',()=>{
+    let checks=checksFromSuggestions(suggestions);
+    const onChange=vi.fn((next:RepoCheck[])=>{checks=next;});
+    const toggles=()=>findElements(RepoChecksEditor({checks,onChange}),NetworkToggle);
+    expect(toggles().map(toggle=>toggle.props.checked)).toEqual([true,false]);
+    expect(validationCommandsPayload(checks)).toEqual([
+      {name:'Install dependencies',command:'pnpm',args:['install','--frozen-lockfile'],network:true},
+      {name:'Tests',command:'pnpm',args:['run','test'],network:false},
+    ]);
+    // Turn Tests on and Install off, as the checkboxes would.
+    toggles()[1]!.props.onChange(true);
+    expect(checks.map(check=>check.network)).toEqual([true,true]);
+    toggles()[0]!.props.onChange(false);
+    expect(onChange).toHaveBeenCalledTimes(2);
+    expect(toggles().map(toggle=>toggle.props.checked)).toEqual([false,true]);
+    expect(validationCommandsPayload(checks)).toEqual([
+      {name:'Install dependencies',command:'pnpm',args:['install','--frozen-lockfile'],network:false},
+      {name:'Tests',command:'pnpm',args:['run','test'],network:true},
+    ]);
+    // What the server stores is what was ticked.
+    expect(JSON.parse(JSON.stringify(validationCommandsPayload(checks))).map((command:{network:boolean})=>command.network)).toEqual([false,true]);
+  });
+
+  it('submits an explicit false for a new or edited command and keeps the flag when other fields change',()=>{
+    let checks:RepoCheck[]=[];
+    const editor=()=>RepoChecksEditor({checks,onChange:next=>{checks=next;}});
+    const addCheck=findElements(editor(),'button').find(button=>button.props.children==='Add check')!;
+    addCheck.props.onClick();
+    expect(checks).toEqual([{name:'',command:'',args:'',network:false}]);
+    // Each event fires on a fresh render, as React re-renders between events.
+    const type=(label:string,value:string)=>findElements(editor(),'input').find(input=>input.props['aria-label']===label)!.props.onChange({target:{value}});
+    type('Check name','Fetch');type('Executable','cargo');type('Arguments','fetch --locked');
+    findElements(editor(),NetworkToggle)[0]!.props.onChange(true);
+    type('Arguments','fetch');
+    expect(validationCommandsPayload(checks)).toEqual([{name:'Fetch',command:'cargo',args:['fetch'],network:true}]);
+    // Commands left blank are not submitted.
+    expect(validationCommandsPayload([...checks,{name:'',command:'  ',args:'',network:true}])).toHaveLength(1);
   });
 });
 

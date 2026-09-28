@@ -282,6 +282,59 @@ jobs:
     });
   });
 
+  describe('network flag on suggestions', () => {
+    /** A committed repository with exactly the given files (no default lockfile). */
+    async function repoWithFiles(files: Record<string, string>): Promise<string> {
+      const root = await mkdtemp(join(tmpdir(), 'foreman-inspector-net-'));
+      dirs.push(root);
+      git(root, 'init', '-q');
+      git(root, 'config', 'user.name', 'Test');
+      git(root, 'config', 'user.email', 'test@example.invalid');
+      for (const [name, content] of Object.entries(files)) {
+        await mkdir(dirname(join(root, name)), { recursive: true });
+        await writeFile(join(root, name), content);
+      }
+      git(root, 'add', '-A');
+      git(root, 'commit', '-qm', 'init');
+      return root;
+    }
+    const networkByName = (suggestions: Array<{ name: string; network?: boolean }>) => Object.fromEntries(suggestions.map(c => [c.name, c.network === true]));
+    const CI = 'on: [push]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: pnpm run lint\n      - run: pnpm test\n';
+
+    it('marks only the pnpm install network-enabled when the suggestions come from CI', async () => {
+      const repo = await repoWithPackage({ scripts: { lint: 'eslint', test: 'vitest' }, workflowFiles: { 'ci.yml': CI } });
+      const { suggestedValidationCommands } = await inspectRepository(repo);
+      expect(suggestedValidationCommands.map(c => c.args.join(' '))).toEqual(['install --frozen-lockfile', 'run lint', 'run test']);
+      expect(networkByName(suggestedValidationCommands)).toEqual({ 'Install dependencies': true, Lint: false, Tests: false });
+      expect(suggestedValidationCommands.find(c => c.name === 'Install dependencies')?.network).toBe(true);
+      for (const check of suggestedValidationCommands.filter(c => c.name !== 'Install dependencies')) expect(check.network === undefined || check.network === false).toBe(true);
+    });
+
+    it('does the same for the package-script fallback and for npm ci', async () => {
+      const pnpm = await inspectRepository(await repoWithPackage({ scripts: { test: 'vitest', typecheck: 'tsc', build: 'esbuild' } }));
+      expect(networkByName(pnpm.suggestedValidationCommands)).toEqual({ 'Install dependencies': true, Typecheck: false, Tests: false, Build: false });
+      const npm = await inspectRepository(await repoWithFiles({ 'package.json': JSON.stringify({ scripts: { test: 'vitest', build: 'tsc' } }), 'package-lock.json': '{}' }));
+      expect(npm.suggestedValidationCommands.map(c => [c.command, c.args.join(' ')])).toEqual([['npm', 'ci'], ['npm', 'run test'], ['npm', 'run build']]);
+      expect(networkByName(npm.suggestedValidationCommands)).toEqual({ 'Install dependencies': true, Tests: false, Build: false });
+    });
+
+    it('keeps a package repository without a lockfile fully offline', async () => {
+      const { suggestedValidationCommands } = await inspectRepository(await repoWithFiles({ 'package.json': JSON.stringify({ scripts: { test: 'vitest' } }) }));
+      expect(suggestedValidationCommands.map(c => c.name)).toEqual(['Tests']);
+      expect(networkByName(suggestedValidationCommands)).toEqual({ Tests: false });
+    });
+
+    it('lets cargo and go fetch dependencies but keeps python offline', async () => {
+      const cargo = await inspectRepository(await repoWithFiles({ 'Cargo.toml': '[package]\nname = "x"\n' }));
+      const go = await inspectRepository(await repoWithFiles({ 'go.mod': 'module x\n' }));
+      const python = await inspectRepository(await repoWithFiles({ 'pyproject.toml': '[project]\nname = "x"\n' }));
+      expect(cargo.suggestedValidationCommands).toMatchObject([{ command: 'cargo', args: ['test'], network: true }]);
+      expect(go.suggestedValidationCommands).toMatchObject([{ command: 'go', args: ['test', './...'], network: true }]);
+      expect(python.suggestedValidationCommands).toHaveLength(1);
+      expect(python.suggestedValidationCommands[0]?.network === true).toBe(false);
+    });
+  });
+
   describe('ciChecksNotConfigured', () => {
     it('returns CI scripts not covered by any configured command', () => {
       const ciScripts = ['format:check', 'lint', 'typecheck', 'test', 'build'];
