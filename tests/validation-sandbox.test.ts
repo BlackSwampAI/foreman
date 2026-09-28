@@ -49,11 +49,19 @@ async function waitFor(check: () => boolean, ms = 8000): Promise<boolean> { cons
 const hostRealpath = (path: string): string | undefined => { try { return realpathSync(path); } catch { return undefined; } };
 /** Directories strictly below `root` on the way to `file`, which lives under `root`. */
 const dirsBetween = (root: string, file: string): string[] => { const found: string[] = []; for (let dir = dirname(file); dir.length > root.length; dir = dirname(dir)) found.unshift(dir); return found; };
-/** Inside the sandbox: list everything under each root without following symlinks; any non-directory entry counts as a file. Also reports /etc/resolv.conf. */
+/**
+ * Inside the sandbox: list everything under each root without following symlinks; any non-directory entry counts as a file. Also reports /etc/resolv.conf.
+ * Callers pass only roots that exist on the host and are masked there (/run, or /var/run linking to it), so they always exist in the sandbox too;
+ * a missing root is reported as `error` and fails the comparison.
+ */
 const WALK_RUN = "const fs=require('fs'),path=require('path'),out={};for(const root of JSON.parse(process.argv[1])){const files=[],dirs=[];let error;const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory()){dirs.push(full);walk(full)}else files.push(full)}};try{walk(root)}catch(e){error=e.code}out[root]={files:files.sort(),dirs:dirs.sort(),error}}let resolv;try{resolv=fs.readFileSync('/etc/resolv.conf','utf8')}catch(e){resolv='ERR:'+e.code}console.log(JSON.stringify({out,resolv}))";
-/** Run `find` under `root` in a sandbox built straight from buildSandboxArgs, so the resolv.conf location can be faked. */
+/**
+ * Run `find` under `root` in a sandbox built straight from buildSandboxArgs, so the resolv.conf location can be faked.
+ * A root that does not exist inside the sandbox has nothing visible under it (a home under the folded /home mask, when nothing is re-exposed).
+ * That cannot hide a failure: bwrap or find errors still exit non-zero, and the cases that expect files fail on an empty result.
+ */
 function walkInSandbox(root: string, plan: Pick<SandboxPlanInput, 'workspacePath' | 'repoPath' | 'resolvConf'>) {
-  const args = buildSandboxArgs({ command: '/bin/sh', args: ['-c', 'find "$1" -mindepth 1 ! -type d; echo ---; find "$1" -mindepth 1 -type d', 'sh', root], env: { path: '/usr/bin:/bin', lang: 'C.UTF-8', lcAll: 'C.UTF-8' }, home: homedir(), tmpDir: tmpdir(), ...plan });
+  const args = buildSandboxArgs({ command: '/bin/sh', args: ['-c', '[ -e "$1" ] || exit 0; find "$1" -mindepth 1 ! -type d; echo ---; find "$1" -mindepth 1 -type d', 'sh', root], env: { path: '/usr/bin:/bin', lang: 'C.UTF-8', lcAll: 'C.UTF-8' }, home: homedir(), tmpDir: tmpdir(), ...plan });
   const result = spawnSync('bwrap', args, { encoding: 'utf8', env: { PATH: process.env.PATH ?? '' } });
   expect(result.status, result.stderr).toBe(0);
   const [files = '', directories = ''] = result.stdout.split('---\n');
