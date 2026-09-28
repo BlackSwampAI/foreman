@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import { loadEnvFile } from 'node:process';
-import { parseSandboxMode, type ValidationSandboxMode } from './validation-sandbox.js';
+import { defaultNetworkAccess, parseSandboxMode, type ValidationSandboxMode } from './validation-sandbox.js';
 
 export interface ForemanConfig {
   host: string;
@@ -17,7 +17,7 @@ export interface ForemanConfig {
   workspaceSourceRepo?: string;
   workspaceBridgeUrl?: string;
   workspaceAllowedScope: string[];
-  validationCommands: Array<{name:string;command:string;args:string[];cwd?:string}>;
+  validationCommands: Array<{name:string;command:string;args:string[];cwd?:string;network:boolean}>;
   validationTimeoutMs: number;
   validationMaxOutputBytes: number;
   validationSandbox: { mode: ValidationSandboxMode; roPaths: string[]; dataDir: string; cacheDir: string };
@@ -52,7 +52,7 @@ export function loadConfig(): ForemanConfig {
   if (Boolean(uhpHarnessId) !== Boolean(uhpModel)) throw new Error('UHP_HARNESS_ID and UHP_MODEL must be configured together');
   let validationCommands: ForemanConfig['validationCommands'] = [];
   const rawCommands=process.env.FOREMAN_VALIDATION_COMMANDS?.trim();
-  if(rawCommands){try{const value=JSON.parse(rawCommands);if(!Array.isArray(value))throw new Error();validationCommands=value.map((item:unknown)=>{if(!item||typeof item!=='object')throw new Error();const x=item as Record<string,unknown>;if(typeof x.name!=='string'||!x.name.trim()||typeof x.command!=='string'||!x.command||!Array.isArray(x.args)||x.args.some(arg=>typeof arg!=='string')||(x.cwd!==undefined&&typeof x.cwd!=='string'))throw new Error();return {name:x.name,command:x.command,args:x.args as string[],...(typeof x.cwd==='string'?{cwd:x.cwd}:{})};});}catch{throw new Error('FOREMAN_VALIDATION_COMMANDS must be a JSON array of {name,command,args,cwd?}');}}
+  if(rawCommands){try{const value=JSON.parse(rawCommands);if(!Array.isArray(value))throw new Error();validationCommands=value.map((item:unknown)=>{if(!item||typeof item!=='object')throw new Error();const x=item as Record<string,unknown>;if(typeof x.name!=='string'||!x.name.trim()||typeof x.command!=='string'||!x.command||!Array.isArray(x.args)||x.args.some(arg=>typeof arg!=='string')||(x.cwd!==undefined&&typeof x.cwd!=='string')||(x.network!==undefined&&typeof x.network!=='boolean'))throw new Error();return {name:x.name,command:x.command,args:x.args as string[],...(typeof x.cwd==='string'?{cwd:x.cwd}:{}),network:(x.network as boolean|undefined)??defaultNetworkAccess(x.command,x.args as string[])};});}catch{throw new Error('FOREMAN_VALIDATION_COMMANDS must be a JSON array of {name,command,args,cwd?,network?} where network is true or false');}}
   const workspaceAllowedScope=(process.env.FOREMAN_WORKSPACE_ALLOWED_SCOPE??'').split(',').map(x=>x.trim()).filter(Boolean);
   const sandboxMode = parseSandboxMode(process.env.FOREMAN_VALIDATION_SANDBOX);
   if (!sandboxMode) throw new Error('FOREMAN_VALIDATION_SANDBOX must be "bwrap" or "none"');

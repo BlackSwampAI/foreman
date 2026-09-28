@@ -17,7 +17,7 @@
     "FOREMAN_WORKSPACE_SOURCE_REPO": { "type": "string", "description": "Local Git source repository used for pinned Worker snapshot verification" },
     "FOREMAN_WORKSPACE_BRIDGE_URL": { "type": "string", "format": "uri", "description": "Loopback URL for the external workspace bridge" },
     "FOREMAN_WORKSPACE_ALLOWED_SCOPE": { "type": "string", "description": "Comma-separated exact paths or directory prefixes ending in / allowed for Worker changes" },
-    "FOREMAN_VALIDATION_COMMANDS": { "type": "string", "description": "JSON array of validation command objects with explicit command and args" },
+    "FOREMAN_VALIDATION_COMMANDS": { "type": "string", "description": "JSON array of validation command objects {name, command, args, cwd?, network?} with explicit command and args. network is true or false (no other value is accepted): validation commands run without network access unless it is true. When omitted, a pnpm, npm or yarn install (first argument install, i, ci or add, or bare yarn) defaults to true and every other command to false" },
     "FOREMAN_VALIDATION_TIMEOUT_MS": { "type": "integer", "minimum": 1, "maximum": 600000, "default": 120000 },
     "FOREMAN_VALIDATION_MAX_OUTPUT_BYTES": { "type": "integer", "minimum": 1, "maximum": 16777216, "default": 1048576 },
     "FOREMAN_VALIDATION_SANDBOX": { "type": "string", "enum": ["bwrap", "none"], "default": "bwrap", "description": "bwrap runs every validation command inside a bubblewrap sandbox and fails closed when it is unavailable; none runs them unsandboxed on the host (unsafe opt-out)" },

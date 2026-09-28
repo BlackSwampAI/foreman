@@ -222,7 +222,7 @@ export async function inspectRepository(selectedPath: string): Promise<{
       const pkgScripts = pkg.scripts ?? {};
       const lockfile = runner === 'pnpm' ? 'pnpm-lock.yaml' : 'package-lock.json';
       const installCmd: ValidationSuggestion | undefined = allFiles.includes(lockfile)
-        ? { name: 'Install dependencies', command: runner, args: runner === 'pnpm' ? ['install', '--frozen-lockfile'] : ['ci'], source: 'ci' }
+        ? { name: 'Install dependencies', command: runner, args: runner === 'pnpm' ? ['install', '--frozen-lockfile'] : ['ci'], network: true, source: 'ci' }
         : undefined;
 
       // Try CI workflow first — pass known script names so bare `pnpm X` is only
@@ -260,9 +260,10 @@ export async function inspectRepository(selectedPath: string): Promise<{
       }
     } catch { /* malformed package metadata has no automatic validation suggestion */ }
   } else if (allFiles.includes('Cargo.toml')) {
-    suggestedValidationCommands.push({ name: 'Tests', command: 'cargo', args: ['test'], source: 'package-script' });
+    // cargo and go fetch dependencies implicitly on first run, so they get the network like the install step; every other suggestion runs offline.
+    suggestedValidationCommands.push({ name: 'Tests', command: 'cargo', args: ['test'], network: true, source: 'package-script' });
   } else if (allFiles.includes('go.mod')) {
-    suggestedValidationCommands.push({ name: 'Tests', command: 'go', args: ['test', './...'], source: 'package-script' });
+    suggestedValidationCommands.push({ name: 'Tests', command: 'go', args: ['test', './...'], network: true, source: 'package-script' });
   } else if (allFiles.includes('pyproject.toml')) {
     suggestedValidationCommands.push({ name: 'Tests', command: 'python', args: ['-m', 'pytest'], source: 'package-script' });
   }

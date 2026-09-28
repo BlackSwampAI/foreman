@@ -1,12 +1,15 @@
 import { spawn } from 'node:child_process';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { isAbsolute, resolve, sep } from 'node:path';
+import { defaultNetworkAccess } from './validation-sandbox.js';
 
 export interface WorkspaceValidationCommand {
   name: string;
   command: string;
   args: string[];
   cwd?: string;
+  /** Keep the host network for this command. Validation runs offline unless this is true; saved setups without the flag default by `defaultNetworkAccess`. */
+  network?: boolean;
 }
 
 export interface WorkspaceSetupConfig {
@@ -129,13 +132,15 @@ function validateCommands(value: unknown): WorkspaceValidationCommand[] {
     if (typeof command.name !== 'string' || !command.name.trim() || command.name.length > 120 || names.has(command.name.trim())) throw new Error('Validation command names must be unique and non-empty');
     if (typeof command.command !== 'string' || !command.command.trim() || command.command.length > 1024 || command.command.includes('\0')) throw new Error('Validation commands require an executable name');
     if (!Array.isArray(command.args) || command.args.length > MAX_ARGS || command.args.some(arg => typeof arg !== 'string' || arg.length > MAX_ARG_LENGTH || arg.includes('\0'))) throw new Error(`Validation argv must contain at most ${MAX_ARGS} bounded string arguments`);
+    if (command.network !== undefined && typeof command.network !== 'boolean') throw new Error('Validation command network must be true or false');
     let cwd: string | undefined;
     if (command.cwd !== undefined) {
       if (typeof command.cwd !== 'string' || !command.cwd || command.cwd.startsWith('/') || command.cwd.includes('\\') || command.cwd.includes('\0') || command.cwd.split('/').some(part => !part || part === '.' || part === '..')) throw new Error('Validation command cwd must be a safe relative directory');
       cwd = command.cwd;
     }
     names.add(command.name.trim());
-    return { name: command.name.trim(), command: command.command.trim(), args: [...command.args] as string[], ...(cwd ? { cwd } : {}) };
+    const executable = command.command.trim(), args = [...command.args] as string[];
+    return { name: command.name.trim(), command: executable, args, ...(cwd ? { cwd } : {}), network: (command.network as boolean | undefined) ?? defaultNetworkAccess(executable, args) };
   });
 }
 

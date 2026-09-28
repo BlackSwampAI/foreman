@@ -1,4 +1,4 @@
-import { createElement } from 'react';
+import { createElement, type ReactElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App, debounce, type State, type TaskStartPreview } from '../ui/main.js';
@@ -7,6 +7,7 @@ import type { DecisionDigestView } from '../ui/decision-digest.js';
 import { ChecksPipeline, type StationObservation, type GithubCheckEntry } from '../ui/checks-pipeline.js';
 import { parseChecksSummary } from '../ui/check-output.js';
 import { PrDraftPanel, type PrDraftData } from '../ui/pr-draft.js';
+import { NetworkToggle, RepoChecksEditor, checksFromSuggestions, validationCommandsPayload, type RepoCheck } from '../ui/repo-checks.js';
 import { Badge, toneForStatus } from '../ui/badge.js';
 
 describe('debounce helper',()=>{
@@ -696,6 +697,84 @@ describe('checks pipeline',()=>{
     const html=renderToStaticMarkup(createElement(ChecksPipeline,{observations:[],running:true}));
     expect(html).toContain('tone-running');
     expect(html).toContain('Validating');
+  });
+
+  it('badges only the checks that ran with network access',()=>{
+    const obs=[{...sampleObservation('install',true),network:true},{...sampleObservation('tests',true),network:false},sampleObservation('legacy',true)];
+    const html=renderToStaticMarkup(createElement(ChecksPipeline,{observations:obs}));
+    const station=(name:string)=>html.split('<details').find(part=>part.includes(`class="station-name">${name}<`))??'';
+    expect(html.match(/status-pill tone-info/g)).toHaveLength(1);
+    expect(station('install')).toContain('class="status-pill tone-info" title="This check ran with network access" aria-label="Ran with network access">Network<');
+    expect(station('install')).toContain('aria-label="install: Passed — ran with network access"');
+    expect(station('tests')).toContain('aria-label="tests: Passed"');
+    expect(station('tests')).not.toContain('Network');
+    expect(station('legacy')).not.toContain('Network');
+  });
+});
+
+// ── Open-repository dialog: validation command list ──────────────────────────
+
+type Node=ReactNode;
+/** Walk an element tree without rendering it, collecting elements of one component type. */
+const findElements=(node:Node,type:unknown):ReactElement<any>[]=>{
+  if(!node||typeof node!=='object')return [];
+  if(Array.isArray(node))return node.flatMap(child=>findElements(child,type));
+  const element=node as ReactElement<any>,own=element.type===type?[element]:[];
+  return [...own,...findElements(element.props?.children,type)];
+};
+
+describe('open-repository validation commands',()=>{
+  const suggestions=[{name:'Install dependencies',command:'pnpm',args:['install','--frozen-lockfile'],network:true,source:'ci' as const},{name:'Tests',command:'pnpm',args:['run','test'],source:'ci' as const}];
+
+  it('defaults each Network toggle from the suggestion and explains why it is off by default',()=>{
+    const checks=checksFromSuggestions(suggestions);
+    expect(checks.map(check=>check.network)).toEqual([true,false]);
+    const html=renderToStaticMarkup(createElement(RepoChecksEditor,{checks,onChange:()=>{}}));
+    const rows=html.split('class="repo-check"').slice(1);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toContain('<input type="checkbox" aria-label="Network access" checked=""/>');
+    expect(rows[1]).toContain('<input type="checkbox" aria-label="Network access"/>');
+    expect(html).toContain('Network is off by default so a check cannot reach services on this computer or cloud credentials.');
+    expect(html.match(/class="repo-check-network"/g)).toHaveLength(2);
+  });
+
+  it('round-trips the checkbox into the submitted validation commands',()=>{
+    let checks=checksFromSuggestions(suggestions);
+    const onChange=vi.fn((next:RepoCheck[])=>{checks=next;});
+    const toggles=()=>findElements(RepoChecksEditor({checks,onChange}),NetworkToggle);
+    expect(toggles().map(toggle=>toggle.props.checked)).toEqual([true,false]);
+    expect(validationCommandsPayload(checks)).toEqual([
+      {name:'Install dependencies',command:'pnpm',args:['install','--frozen-lockfile'],network:true},
+      {name:'Tests',command:'pnpm',args:['run','test'],network:false},
+    ]);
+    // Turn Tests on and Install off, as the checkboxes would.
+    toggles()[1]!.props.onChange(true);
+    expect(checks.map(check=>check.network)).toEqual([true,true]);
+    toggles()[0]!.props.onChange(false);
+    expect(onChange).toHaveBeenCalledTimes(2);
+    expect(toggles().map(toggle=>toggle.props.checked)).toEqual([false,true]);
+    expect(validationCommandsPayload(checks)).toEqual([
+      {name:'Install dependencies',command:'pnpm',args:['install','--frozen-lockfile'],network:false},
+      {name:'Tests',command:'pnpm',args:['run','test'],network:true},
+    ]);
+    // What the server stores is what was ticked.
+    expect(JSON.parse(JSON.stringify(validationCommandsPayload(checks))).map((command:{network:boolean})=>command.network)).toEqual([false,true]);
+  });
+
+  it('submits an explicit false for a new or edited command and keeps the flag when other fields change',()=>{
+    let checks:RepoCheck[]=[];
+    const editor=()=>RepoChecksEditor({checks,onChange:next=>{checks=next;}});
+    const addCheck=findElements(editor(),'button').find(button=>button.props.children==='Add check')!;
+    addCheck.props.onClick();
+    expect(checks).toEqual([{name:'',command:'',args:'',network:false}]);
+    // Each event fires on a fresh render, as React re-renders between events.
+    const type=(label:string,value:string)=>findElements(editor(),'input').find(input=>input.props['aria-label']===label)!.props.onChange({target:{value}});
+    type('Check name','Fetch');type('Executable','cargo');type('Arguments','fetch --locked');
+    findElements(editor(),NetworkToggle)[0]!.props.onChange(true);
+    type('Arguments','fetch');
+    expect(validationCommandsPayload(checks)).toEqual([{name:'Fetch',command:'cargo',args:['fetch'],network:true}]);
+    // Commands left blank are not submitted.
+    expect(validationCommandsPayload([...checks,{name:'',command:'  ',args:'',network:true}])).toHaveLength(1);
   });
 });
 

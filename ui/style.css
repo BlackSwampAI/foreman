@@ -447,7 +447,7 @@ main>footer .foot-right{float:right;margin:0;color:var(--muted)}
 .task-checks{padding-bottom:var(--sp-3)}
 .task-checks>.overline{display:block;margin-bottom:var(--sp-1)}
 .task-checks>small{display:block;margin:0 0 var(--sp-2);color:var(--muted);font-size:var(--fs-xs)}
-.task-checks .repo-check{grid-template-columns:minmax(0,.8fr) minmax(0,.9fr) minmax(0,1.2fr) auto}
+.task-checks .repo-check{grid-template-columns:minmax(0,.8fr) minmax(0,.9fr) minmax(0,1.2fr) auto auto}
 .base-override{margin:0 0 var(--sp-2);padding:var(--sp-2) 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
 .start-setup{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr);align-items:start;gap:var(--sp-3)}
 .start-setup>div>b{display:block;color:var(--text);font-size:var(--fs-sm)}
@@ -466,7 +466,9 @@ main>footer .foot-right{float:right;margin:0;color:var(--muted)}
 .task-form-actions{display:flex;justify-content:flex-end}
 .task-preview{margin:0 var(--sp-4) var(--sp-3)}
 .repo-check{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px;margin:6px 0}
-.repo-check{grid-template-columns:minmax(80px,.7fr) minmax(90px,.8fr) minmax(0,1fr) auto}
+.repo-check{grid-template-columns:minmax(80px,.7fr) minmax(90px,.8fr) minmax(0,1fr) auto auto}
+.repo-check-network{display:flex;align-items:center;gap:6px;color:var(--dim);font-size:var(--fs-xs);white-space:nowrap;cursor:pointer}
+.repo-check-network>input{width:auto;height:auto;margin:0;accent-color:var(--focus)}
 
 /* ── Decision panel: first block of the centre column whenever there is something to decide (Approve enabled) or to do next (already approved); while it cannot be acted on it keeps its DOM position. */
 .decision-panel{padding:0 0 var(--sp-3);border-color:#245d90;background:linear-gradient(180deg,#0a2138,var(--panel) 70%)}

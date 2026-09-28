@@ -1,14 +1,15 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Controller, type UhpAdapter } from '../src/controller.js';
 import { JsonStore } from '../src/store.js';
 import { promoteSnapshotToGit } from '../src/git-promotion.js';
 import { formatReviewDiff } from '../src/verified-workspace.js';
 import { decisionDigest } from './decision-helper.js';
+import { defaultNetworkAccess } from '../src/validation-sandbox.js';
 
 const dirs:string[]=[];
 const bundle=resolve('tests/fixtures/recorded-worker-base.bundle');
@@ -31,7 +32,7 @@ async function setup(validationPass=true,reviewVerdict:'recommend'|'reject'='rec
   if(assignWorker){await store.mutate(s=>{s.projects[0]!.tasks[0]!.runs[0]!.workspaceId='recorded-workspace-fixture';});await controller.addGuidance(run.id,'Replay the recorded bounded README task.');const orchestration:any=await controller.orchestrate(run.id,'Prepare one bounded Worker assignment for the recorded README.md task.');worker=await controller.dispatchWorkerProposal(run.id,orchestration.proposal.id);}
   return {dir,repoPath,recorded,store,controller,runId:run.id,workerId:worker?.id,uhpCalls};
 }
-afterEach(async()=>{await Promise.all(dirs.splice(0).map(dir=>rm(dir,{recursive:true,force:true})));});
+afterEach(async()=>{vi.unstubAllEnvs();await Promise.all(dirs.splice(0).map(dir=>rm(dir,{recursive:true,force:true})));});
 
 describe('recorded Worker integration fixture (simulated Reviewer; no live model call)',()=>{
   async function approveRecordedRun(fixture: Awaited<ReturnType<typeof setup>>) {
@@ -56,6 +57,37 @@ describe('recorded Worker integration fixture (simulated Reviewer; no live model
     const after:any=(await fixture.store.load()).projects[0]!.tasks[0]!.runs[0]!;
     expect(after.approval).toEqual(approval);
     expect(after.promotion).toEqual(promoted.promotion);
+  });
+
+  it('promotes a legacy run whose stored install command has no network flag: the default applies when it runs and the command digest is untouched',async()=>{
+    // A fake pnpm under a re-exposed toolchain prefix, so no real install runs.
+    const home=await mkdtemp(join(homedir(),'.foreman-legacy-install-'));dirs.push(home);
+    const bin=join(home,'versions','v1','bin');await mkdir(bin,{recursive:true});
+    await writeFile(join(bin,'pnpm'),'#!/bin/sh\necho "fake install $*"\n');await chmod(join(bin,'pnpm'),0o755);
+    vi.stubEnv('PATH',`${bin}:${process.env.PATH??''}`);
+    const fixture=await setup();
+    // Legacy shape: a run stored before the network flag existed, with an install and a check, neither carrying a network field.
+    const legacy=[{name:'install',command:'pnpm',args:['install','--frozen-lockfile']},{name:'recorded README assertion',command:process.execPath,args:['-e',"const fs=require('fs');if(!fs.readFileSync('README.md','utf8').includes('Bridge smoke'))process.exit(2);console.log('recorded README assertion passed')"]}];
+    await fixture.store.mutate(s=>{s.projects[0]!.tasks[0]!.runs[0]!.validationCommands=structuredClone(legacy);});
+    await approveRecordedRun(fixture);
+    const stored=async():Promise<any>=>(await fixture.store.load()).projects[0]!.tasks[0]!.runs[0]!;
+    const validated=await stored();
+    // The install ran with the network by default, the check without, and the observation says so.
+    expect(validated.validation.observations.map((o:any)=>[o.name,o.exitCode,o.network])).toEqual([['install',0,true],['recorded README assertion',0,false]]);
+    expect(validated.validation.observations[0].output).toBe('fake install install --frozen-lockfile\n');
+    // The stored commands were not rewritten, so the digest the approval is bound to is the digest of the legacy list.
+    const sortKeys=(value:unknown):unknown=>Array.isArray(value)?value.map(sortKeys):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).filter(([,v])=>v!==undefined).sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>[k,sortKeys(v)])):value;
+    const digest=(commands:unknown)=>createHash('sha256').update(JSON.stringify(sortKeys(commands))).digest('hex');
+    expect(validated.validationCommands).toEqual(legacy);
+    expect(validated.validationCommands.some((command:any)=>'network' in command)).toBe(false);
+    expect(validated.validation.policy.commandDigest).toBe(digest(legacy));
+    // Filling the flag into the stored list would have changed that digest and broken promotion.
+    expect(digest(legacy.map(command=>({...command,network:defaultNetworkAccess(command.command,command.args)})))).not.toBe(validated.validation.policy.commandDigest);
+    const promoted:any=await fixture.controller.promoteRun(fixture.runId,{destinationBranch:'foreman/results/legacy-install'});
+    expect(promoted.promotion).toMatchObject({status:'applied',destinationBranch:'foreman/results/legacy-install',resultCommit:expect.any(String)});
+    const after=await stored();
+    expect(after.validationCommands).toEqual(legacy);
+    expect(after.validation.policy.commandDigest).toBe(digest(legacy));
   });
 
   it('recovers persisted promotion intent after Git created the result branch but before state recorded applied',async()=>{

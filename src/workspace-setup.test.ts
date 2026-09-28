@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -60,5 +60,62 @@ describe('workspace setup', () => {
   it('requires an absolute repository path and a validation command', async () => {
     await expect(validateWorkspaceSetup({ repoPath: '.', allowedScope: ['src/'], validationCommands: [{ name: 'Build', command: 'npm', args: [] }] })).rejects.toThrow('absolute repository folder');
     await expect(validateWorkspaceSetup({ repoPath: '/tmp', allowedScope: ['src/'], validationCommands: [] })).rejects.toThrow('validation commands');
+  });
+
+  describe('network flag', () => {
+    const networkOf = (setup: { validationCommands: Array<{ name: string; network?: boolean }> }) => Object.fromEntries(setup.validationCommands.map(check => [check.name, check.network]));
+
+    it('gives a command with no flag network access only when it is a recognised package-manager install', async () => {
+      const repoPath = await gitRepo();
+      const commands = [
+        { name: 'pnpm install', command: 'pnpm', args: ['install', '--frozen-lockfile'] },
+        { name: 'npm ci', command: 'npm', args: ['ci'] },
+        { name: 'npm i', command: 'npm', args: ['i', '--no-audit'] },
+        { name: 'pnpm add', command: 'pnpm', args: ['add', 'left-pad'] },
+        { name: 'bare yarn', command: 'yarn', args: [] },
+        { name: 'yarn install', command: 'yarn', args: ['install', '--immutable'] },
+        { name: 'trimmed', command: ' npm ', args: ['ci'] },
+        { name: 'pnpm test', command: 'pnpm', args: ['test'] },
+        { name: 'npm run install', command: 'npm', args: ['run', 'install'] },
+        { name: 'pnpm filter install', command: 'pnpm', args: ['--filter', 'app', 'install'] },
+        { name: 'yarn flags only', command: 'yarn', args: ['--immutable'] },
+        { name: 'cargo', command: 'cargo', args: ['test'] },
+        { name: 'other install', command: 'bun', args: ['install'] },
+        { name: 'shim path', command: '/usr/local/bin/pnpm', args: ['install'] },
+      ];
+      const setup = await validateWorkspaceSetup({ repoPath, allowedScope: ['src/'], validationCommands: commands });
+      expect(networkOf(setup)).toEqual({
+        'pnpm install': true, 'npm ci': true, 'npm i': true, 'pnpm add': true, 'bare yarn': true, 'yarn install': true, trimmed: true,
+        'pnpm test': false, 'npm run install': false, 'pnpm filter install': false, 'yarn flags only': false, cargo: false, 'other install': false, 'shim path': false,
+      });
+    });
+
+    it('keeps an explicit flag on every command, including an install that opts out and a test that opts in', async () => {
+      const repoPath = await gitRepo();
+      const setup = await validateWorkspaceSetup({ repoPath, allowedScope: ['src/'], validationCommands: [
+        { name: 'Install offline', command: 'pnpm', args: ['install', '--offline'], network: false },
+        { name: 'Cargo', command: 'cargo', args: ['test'], network: true },
+        { name: 'Tests', command: 'pnpm', args: ['test'], network: false },
+      ] });
+      expect(networkOf(setup)).toEqual({ 'Install offline': false, Cargo: true, Tests: false });
+    });
+
+    it('persists the resolved flag and defaults a saved setup written before the flag existed', async () => {
+      const repoPath = await gitRepo(), dataDir = join(await temp(), 'data');
+      const saved = await saveWorkspaceSetup(dataDir, 'project-net', { repoPath, allowedScope: ['src/'], validationCommands: [{ name: 'Install', command: 'pnpm', args: ['install'] }, { name: 'Tests', command: 'pnpm', args: ['test'], network: true }] });
+      expect(saved.validationCommands.map(check => check.network)).toEqual([true, true]);
+      expect(JSON.parse(await readFile(join(dataDir, 'workspaces', 'project-net.json'), 'utf8')).validationCommands.map((check: { network: boolean }) => check.network)).toEqual([true, true]);
+      // An older file: no network field anywhere.
+      const legacy = { repoPath, head: saved.head, dirty: false, allowedScope: ['src/'], validationCommands: [{ name: 'Install', command: 'npm', args: ['ci'] }, { name: 'Tests', command: 'npm', args: ['test'] }] };
+      await writeFile(join(dataDir, 'workspaces', 'project-legacy.json'), JSON.stringify(legacy));
+      expect(networkOf((await loadWorkspaceSetup(dataDir, 'project-legacy'))!)).toEqual({ Install: true, Tests: false });
+    });
+
+    it('accepts only true or false', async () => {
+      const base = { repoPath: '/path/that/does/not/exist', allowedScope: ['src/'] };
+      for (const network of ['true', 'false', 1, 0, null, {}, []]) {
+        await expect(validateWorkspaceSetup({ ...base, validationCommands: [{ name: 'Install', command: 'pnpm', args: ['install'], network }] }), JSON.stringify(network)).rejects.toThrow('network must be true or false');
+      }
+    });
   });
 });
