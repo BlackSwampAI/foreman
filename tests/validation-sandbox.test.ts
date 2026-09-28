@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { accessSync, constants, existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadConfig } from '../src/config.js';
 import { SANDBOX_UNAVAILABLE_MESSAGE, buildSandboxArgs, parseSandboxMode, probeBwrap, validationSandboxStatus, type SandboxPlanInput } from '../src/validation-sandbox.js';
@@ -46,6 +46,21 @@ const json = (output: string) => JSON.parse(output.trim().split('\n').at(-1)!);
 const READ_ALL = "const fs=require('fs'),out={};for(const [k,p] of Object.entries(JSON.parse(process.argv[1]))){try{out[k]=fs.readFileSync(p,'utf8')}catch(e){out[k]='ERR:'+e.code}}console.log(JSON.stringify(out))";
 const processesMatching = (needle: string): string[] => readdirSync('/proc').filter(pid => /^\d+$/.test(pid)).filter(pid => { try { return readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes(needle); } catch { return false; } });
 async function waitFor(check: () => boolean, ms = 8000): Promise<boolean> { const end = Date.now() + ms; while (Date.now() < end) { if (check()) return true; await new Promise(r => setTimeout(r, 50)); } return check(); }
+const hostRealpath = (path: string): string | undefined => { try { return realpathSync(path); } catch { return undefined; } };
+/** Directories strictly below `root` on the way to `file`, which lives under `root`. */
+const dirsBetween = (root: string, file: string): string[] => { const found: string[] = []; for (let dir = dirname(file); dir.length > root.length; dir = dirname(dir)) found.unshift(dir); return found; };
+/** Inside the sandbox: list everything under each root without following symlinks; any non-directory entry counts as a file. Also reports /etc/resolv.conf. */
+const WALK_RUN = "const fs=require('fs'),path=require('path'),out={};for(const root of JSON.parse(process.argv[1])){const files=[],dirs=[];let error;const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory()){dirs.push(full);walk(full)}else files.push(full)}};try{walk(root)}catch(e){error=e.code}out[root]={files:files.sort(),dirs:dirs.sort(),error}}let resolv;try{resolv=fs.readFileSync('/etc/resolv.conf','utf8')}catch(e){resolv='ERR:'+e.code}console.log(JSON.stringify({out,resolv}))";
+/** Run `find` under `root` in a sandbox built straight from buildSandboxArgs, so the resolv.conf location can be faked. */
+function walkInSandbox(root: string, plan: Pick<SandboxPlanInput, 'workspacePath' | 'repoPath' | 'resolvConf'>) {
+  const args = buildSandboxArgs({ command: '/bin/sh', args: ['-c', 'find "$1" -mindepth 1 ! -type d; echo ---; find "$1" -mindepth 1 -type d', 'sh', root], env: { path: '/usr/bin:/bin', lang: 'C.UTF-8', lcAll: 'C.UTF-8' }, home: homedir(), tmpDir: tmpdir(), ...plan });
+  const result = spawnSync('bwrap', args, { encoding: 'utf8', env: { PATH: process.env.PATH ?? '' } });
+  expect(result.status, result.stderr).toBe(0);
+  const [files = '', directories = ''] = result.stdout.split('---\n');
+  const lines = (text: string) => text.split('\n').filter(Boolean).sort();
+  return { files: lines(files), dirs: lines(directories) };
+}
+const canWriteRun = (() => { try { accessSync('/run', constants.W_OK); return true; } catch { return false; } })();
 
 describe('validation sandbox (bubblewrap)', () => {
   it('cannot read the operator home, Foreman data dir, source checkout, host /tmp or /run, and cannot write to them', async () => {
@@ -66,14 +81,45 @@ describe('validation sandbox (bubblewrap)', () => {
     expect(json(write.output)).toMatchObject({ repo: 'ERR:ENOENT', data: 'ERR:ENOENT', etc: expect.stringMatching(/^ERR:(EROFS|EACCES)$/) });
   });
 
-  it('hides /run, other processes and capabilities', async () => {
+  it('hides other processes and drops all capabilities', async () => {
     const f = await fixture();
-    const check = await run(f, node("const fs=require('fs');let run;try{run=fs.readdirSync('/run')}catch(e){run='ERR:'+e.code}console.log(JSON.stringify({run,pids:fs.readdirSync('/proc').filter(x=>/^\\d+$/.test(x)).map(Number),cap:fs.readFileSync('/proc/self/status','utf8').match(/CapEff:\\s*(\\w+)/)[1]}))"));
+    const check = await run(f, node("const fs=require('fs');console.log(JSON.stringify({pids:fs.readdirSync('/proc').filter(x=>/^\\d+$/.test(x)).map(Number),cap:fs.readFileSync('/proc/self/status','utf8').match(/CapEff:\\s*(\\w+)/)[1]}))"));
     const seen = json(check.output);
-    expect(existsSync('/run') ? seen.run : []).toEqual([]);
     expect(seen.pids.length).toBeLessThan(10);
     expect(Math.max(...seen.pids)).toBeLessThan(100);
     expect(seen.cap).toBe('0000000000000000');
+  });
+
+  it('shows nothing under /run and /var/run except the re-exposed resolv.conf target (when the host keeps it there) and its parent directories', async () => {
+    // With systemd-resolved, /etc/resolv.conf links into /run/systemd/resolve; on a plain host it is a regular file and /run must be empty.
+    const resolv = hostRealpath('/etc/resolv.conf'), roots = ['/run', '/var/run'].filter(existsSync);
+    const hostText = (() => { try { return readFileSync('/etc/resolv.conf', 'utf8'); } catch (error) { return `ERR:${(error as NodeJS.ErrnoException).code}`; } })();
+    const seen = json((await run(await fixture(), node(WALK_RUN, JSON.stringify(roots)))).output);
+    expect(roots).toContain('/run');
+    for (const root of roots) {
+      const rootReal = realpathSync(root), target = resolv?.startsWith(`${rootReal}/`) ? join(root, relative(rootReal, resolv)) : undefined;
+      expect(seen.out[root], root).toEqual({ files: target ? [target] : [], dirs: target ? dirsBetween(root, target).sort() : [] });
+    }
+    expect(seen.resolv).toBe(hostText);
+  });
+
+  it('re-exposes only the resolv.conf target inside a hidden tree, with just its parent directories (systemd-resolved layout)', async () => {
+    const base = await scratch(homedir(), '.foreman-sandbox-resolv-'), other = await scratch(tmpdir(), 'foreman-sandbox-plan-');
+    const target = join(realpathSync(base), 'run', 'systemd', 'resolve', 'stub-resolv.conf'), link = join(other, 'resolv.conf'), home = realpathSync(homedir());
+    await mkdir(dirname(target), { recursive: true }); await writeFile(target, 'nameserver 127.0.0.53\n'); await symlink(target, link);
+    expect(walkInSandbox(home, { workspacePath: other, repoPath: other, resolvConf: link })).toEqual({ files: [target], dirs: dirsBetween(home, target).sort() });
+    // A resolv.conf that is a regular file outside every hidden tree needs no re-exposing (stand-in: /etc/passwd).
+    expect(walkInSandbox(home, { workspacePath: other, repoPath: other, resolvConf: '/etc/passwd' })).toEqual({ files: [], dirs: [] });
+  });
+
+  it.runIf(canWriteRun)('leaves /run empty except a fake resolv.conf target placed there', async () => {
+    const runDir = `/run/foreman-test-resolv-${process.pid}`, other = await scratch(tmpdir(), 'foreman-sandbox-plan-');
+    dirs.push(runDir);
+    await mkdir(runDir); await writeFile(join(runDir, 'stub.conf'), 'nameserver 127.0.0.53\n');
+    const link = join(other, 'resolv.conf');
+    await symlink(join(runDir, 'stub.conf'), link);
+    expect(walkInSandbox('/run', { workspacePath: other, repoPath: other, resolvConf: link })).toEqual({ files: [join(runDir, 'stub.conf')], dirs: [runDir] });
+    expect(walkInSandbox('/run', { workspacePath: other, repoPath: other, resolvConf: '/nonexistent/resolv.conf' })).toEqual({ files: [], dirs: [] });
   });
 
   it('runs in a writable /workspace with a private HOME, minimal environment and the requested cwd', async () => {
@@ -261,11 +307,14 @@ describe('sandbox mount plan (pure)', () => {
     expect(binds).toContainEqual([target, link]);
   });
 
-  it('re-exposes resolv.conf when it is a symlink into a hidden tree', async () => {
+  it('re-exposes resolv.conf when it is a symlink into a hidden tree, and exposes nothing else', async () => {
     const { base, input } = await plan();
     const real = join(base, 'resolved.conf'), link = join(base, 'resolv.conf');
     await writeFile(real, 'nameserver 127.0.0.53\n'); await symlink(real, link);
-    expect(triples(buildSandboxArgs({ ...input, resolvConf: link }), '--ro-bind')).toContainEqual([real, real]);
+    const exposed = (resolvConf: string) => triples(buildSandboxArgs({ ...input, resolvConf }), '--ro-bind').filter(([src]) => src !== '/');
+    expect(exposed(link)).toEqual([[real, real]]);
+    expect(exposed('/etc/passwd')).toEqual([]);
+    expect(exposed(join(base, 'missing.conf'))).toEqual([]);
   });
 
   it('adds operator-supplied read-only paths and rejects ones that would defeat the masks', async () => {
