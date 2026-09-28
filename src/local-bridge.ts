@@ -132,6 +132,7 @@ export class LocalBridge {
   private starting?: Promise<LocalBridgeStatus>;
   private session?: Session;
   private generation = 0;
+  private logWrites: Promise<void> = Promise.resolve();
   private restartTimer?: ReturnType<typeof setTimeout>;
   private fastFailures = 0;
   private backoffAttempts = 0;
@@ -247,14 +248,18 @@ export class LocalBridge {
   private async bringUp(session: Session, attempt: { run?: Run }): Promise<void> {
     const run = attempt.run = await this.launch(session);
     await this.waitUntilReady(session, run);
+    // Log before publishing, so the bridge turns ready and its health is reported with no await in between.
+    await this.note(session, `bridge ready on ${session.baseUrl} (pid ${run.child.pid ?? 'unknown'})`);
+    this.assertCurrent(session);
     if (run.exit) throw new Error(`Local bridge exited during startup (${describeExit(run.exit)}); see ${session.logPath}`);
     run.ready = true;
     this.active = session.status;
     this.activeInstanceId = session.instanceId;
-    this.note(session, `bridge ready on ${session.baseUrl} (pid ${run.child.pid ?? 'unknown'})`);
   }
 
   private async launch(session: Session): Promise<Run> {
+    // Let notes about the previous run land before rotation, so none can end up in the new log or be lost with the old one.
+    await this.logWrites;
     await rotateLog(session.logPath, this.options.supervision.logMaxBytes);
     const log = await open(session.logPath, 'a', 0o600);
     try {
@@ -266,7 +271,7 @@ export class LocalBridge {
       child.once('exit', (code, signal) => { run.exit = { code, signal: signal ?? null }; this.onExit(session, run); });
       // A spawn failure reports only 'error'. Keep a listener for the child's whole life: an unhandled 'error' would crash Foreman.
       child.on('error', error => { if (child.pid === undefined && !run.exit) { run.error = error; run.exit = { code: null, signal: null }; this.onExit(session, run); } });
-      this.note(session, `starting bridge on ${session.baseUrl} (pid ${child.pid ?? 'unknown'})`);
+      await this.note(session, `starting bridge on ${session.baseUrl} (pid ${child.pid ?? 'unknown'})`);
       return run;
     } finally { await log.close().catch(() => undefined); }
   }
@@ -373,8 +378,11 @@ export class LocalBridge {
     if (alive(child)) child.kill('SIGKILL');
   }
 
-  private note(session: Session, message: string): void {
-    void appendFile(session.logPath, `[foreman ${new Date().toISOString()}] ${message}\n`, { mode: 0o600 }).catch(() => undefined);
+  /** Append a Foreman line to the bridge log. Writes are queued so lines keep their order; callers on the startup path await it. */
+  private note(session: Session, message: string): Promise<void> {
+    const line = `[foreman ${new Date().toISOString()}] ${message}\n`;
+    this.logWrites = this.logWrites.then(() => appendFile(session.logPath, line, { mode: 0o600 })).catch(() => undefined);
+    return this.logWrites;
   }
   private notify(): void {
     const health = this.health;
