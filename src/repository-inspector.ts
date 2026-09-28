@@ -181,6 +181,9 @@ export async function parseCiScripts(repoPath: string, knownScripts?: Set<string
 /** Scripts that are commonly part of CI but network-dependent or publish-only — skip as fallback suggestions. */
 const FALLBACK_COMMON_SCRIPTS = ['format:check', 'lint', 'typecheck', 'test', 'build'] as const;
 
+/** CI configuration runs with repository secrets once pushed, so it is never in the suggested Worker scope. Users can still add it by hand. */
+const CI_CONFIG_PATHS = new Set(['.github', '.gitlab-ci.yml', '.circleci', '.buildkite', 'azure-pipelines.yml', 'Jenkinsfile', '.travis.yml']);
+
 /** Read bounded Git metadata for a repository picked in the local folder browser. */
 export async function inspectRepository(selectedPath: string): Promise<{
   repoPath: string;
@@ -207,7 +210,7 @@ export async function inspectRepository(selectedPath: string): Promise<{
     const slash = file.indexOf('/');
     topLevel.add(slash < 0 ? file : `${file.slice(0, slash)}/`);
   }
-  const scope = [...topLevel].filter(path => path !== '.git/' && path !== '.git').slice(0, 256);
+  const scope = [...topLevel].filter(path => path !== '.git/' && path !== '.git' && !CI_CONFIG_PATHS.has(path.replace(/\/$/, ''))).slice(0, 256);
   const suggestedValidationCommands: ValidationSuggestion[] = [];
   const packagePath = join(repoPath, 'package.json');
   const packageStat = await stat(packagePath).catch(() => undefined);

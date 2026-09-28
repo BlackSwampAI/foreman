@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, rm, symlink, writeFile, chmod, lstat } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { spawn } from 'node:child_process';
 import { verifyGitSnapshotScope } from './git-workspace.js';
+import { assertBwrapUsable, buildSandboxArgs, ensureSandboxCache, type ValidationSandboxConfig } from './validation-sandbox.js';
 import type { SnapshotChange, SnapshotEntry } from './workspace-snapshot.js';
 
 export interface BridgeSnapshotEntry { path: string; kind: 'file'|'symlink'; mode: '100644'|'100755'|'120000'; size: number; sha256: string; contentBase64?: string; target?: string }
@@ -14,7 +15,7 @@ export interface VerifiedWorkerWorkspace {
   scopeVerified: true; allowedScope: string[]; entries: SnapshotEntry[]; changes: ChangeEvidence[]; reviewDiff: string;
 }
 export interface ValidationCommand { name: string; command: string; args: string[]; cwd?: string }
-export interface ValidationObservation { name: string; command: string; args: string[]; exitCode: number|null; signal?: string; timedOut: boolean; output: string; outputTruncated: boolean; startedAt: string; finishedAt: string }
+export interface ValidationObservation { name: string; command: string; args: string[]; exitCode: number|null; signal?: string; timedOut: boolean; output: string; outputTruncated: boolean; startedAt: string; finishedAt: string; sandbox: 'bwrap'|'none' }
 export interface ControllerValidationEvidence { passed: boolean; checks: ValidationObservation[] }
 const SHA=/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
 
@@ -144,30 +145,37 @@ export async function materializeVerifiedWorkspace(repoPath:string,evidence:Veri
   } catch(error){await rm(root,{recursive:true,force:true});throw error;}
 }
 
-export async function validateWorkerOutput(input:{repoPath:string;evidence:VerifiedWorkerWorkspace;commands:readonly ValidationCommand[];timeoutMs?:number;maxOutputBytes?:number}):Promise<ControllerValidationEvidence>{
+export async function validateWorkerOutput(input:{repoPath:string;evidence:VerifiedWorkerWorkspace;commands:readonly ValidationCommand[];timeoutMs?:number;maxOutputBytes?:number;sandbox?:ValidationSandboxConfig}):Promise<ControllerValidationEvidence>{
+  const sandbox=input.sandbox??{};
+  if((sandbox.mode??'bwrap')==='bwrap'){await assertBwrapUsable(sandbox.bwrapPath);if(sandbox.cacheDir)await ensureSandboxCache(sandbox.cacheDir);}
   const {workspacePath,cleanup}=await materializeVerifiedWorkspace(input.repoPath,input.evidence);
   try {
     const checks:ValidationObservation[]=[];
     for(const command of input.commands){
       if(!command.name.trim()||!command.command||!Array.isArray(command.args)||command.args.some(a=>typeof a!=='string'))throw new Error('Validation commands require a name and explicit argv');
-      checks.push(await runOne(workspacePath,command,input.timeoutMs??120_000,input.maxOutputBytes??1024*1024));
+      checks.push(await runOne(workspacePath,input.repoPath,command,input.timeoutMs??120_000,input.maxOutputBytes??1024*1024,sandbox));
     }
     return {passed:checks.length>0&&checks.every(c=>c.exitCode===0&&!c.timedOut&&!c.outputTruncated),checks};
   } finally {await cleanup();}
 }
 
-async function runOne(root:string,command:ValidationCommand,timeoutMs:number,maxBytes:number):Promise<ValidationObservation>{
+async function runOne(root:string,repoPath:string,command:ValidationCommand,timeoutMs:number,maxBytes:number,sandbox:ValidationSandboxConfig):Promise<ValidationObservation>{
   if(!Number.isSafeInteger(timeoutMs)||timeoutMs<1||!Number.isSafeInteger(maxBytes)||maxBytes<1)throw new Error('Invalid validation bounds');
   const cwd=command.cwd?resolve(root,command.cwd):root;if(cwd!==root&&!cwd.startsWith(root+sep))throw new Error('Validation cwd escapes disposable workspace');
   const relCwd=cwd.slice(root.length+1).split(sep);let traversed=root;for(const part of relCwd){traversed=join(traversed,part);try{if((await lstat(traversed)).isSymbolicLink())throw new Error('Validation cwd follows a symlink');}catch(error){if(error instanceof Error&&error.message==='Validation cwd follows a symlink')throw error;}}
+  const mode=sandbox.mode??'bwrap',hostEnv={PATH:process.env.PATH??'',LANG:process.env.LANG??'C.UTF-8',LC_ALL:process.env.LC_ALL??'C.UTF-8'};
+  // Sandboxed: bwrap is the direct child, so killing it tears down the whole PID namespace (--die-with-parent + --unshare-pid).
+  const launch=mode==='bwrap'
+    ?{file:sandbox.bwrapPath??'bwrap',args:buildSandboxArgs({workspacePath:root,cwd:relCwd.join(sep),command:command.command,args:command.args,env:{path:hostEnv.PATH,lang:hostEnv.LANG,lcAll:hostEnv.LC_ALL},home:homedir(),tmpDir:tmpdir(),repoPath,dataDir:sandbox.dataDir,cacheDir:sandbox.cacheDir,roPaths:sandbox.roPaths}),cwd:root,env:{PATH:hostEnv.PATH}}
+    :{file:command.command,args:command.args,cwd,env:hostEnv};
   const startedAt=new Date().toISOString();return new Promise(resolvePromise=>{
-    const child=spawn(command.command,command.args,{cwd,stdio:['ignore','pipe','pipe'],windowsHide:true,detached:process.platform!=='win32',env:{PATH:process.env.PATH??'',LANG:process.env.LANG??'C.UTF-8',LC_ALL:process.env.LC_ALL??'C.UTF-8'}});
+    const child=spawn(launch.file,launch.args,{cwd:launch.cwd,stdio:['ignore','pipe','pipe'],windowsHide:true,detached:process.platform!=='win32',env:launch.env});
     const chunks:Buffer[]=[];let size=0,truncated=false,timedOut=false,exitCode:number|null=null,signal:string|undefined;
     const collect=(chunk:Buffer)=>{if(size<maxBytes){const keep=chunk.subarray(0,maxBytes-size);chunks.push(keep);size+=keep.length;}if(size>=maxBytes&&chunk.length>0){truncated=true;killTree(child);}};
     child.stdout.on('data',collect);child.stderr.on('data',collect);
     const timer=setTimeout(()=>{timedOut=true;killTree(child);},timeoutMs);
-    child.once('error',()=>{clearTimeout(timer);exitCode=127;resolvePromise({name:command.name,command:command.command,args:[...command.args],exitCode,signal,timedOut,output:Buffer.concat(chunks).toString('utf8'),outputTruncated:truncated,startedAt,finishedAt:new Date().toISOString()});});
-    child.once('close',(code,term)=>{clearTimeout(timer);exitCode=code;signal=term??undefined;resolvePromise({name:command.name,command:command.command,args:[...command.args],exitCode,signal,timedOut,output:Buffer.concat(chunks).toString('utf8'),outputTruncated:truncated,startedAt,finishedAt:new Date().toISOString()});});
+    child.once('error',()=>{clearTimeout(timer);exitCode=127;resolvePromise({name:command.name,command:command.command,args:[...command.args],exitCode,signal,timedOut,output:Buffer.concat(chunks).toString('utf8'),outputTruncated:truncated,startedAt,finishedAt:new Date().toISOString(),sandbox:mode});});
+    child.once('close',(code,term)=>{clearTimeout(timer);exitCode=code;signal=term??undefined;resolvePromise({name:command.name,command:command.command,args:[...command.args],exitCode,signal,timedOut,output:Buffer.concat(chunks).toString('utf8'),outputTruncated:truncated,startedAt,finishedAt:new Date().toISOString(),sandbox:mode});});
   });
 }
 

@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { inspectRepository, parseCiScripts, ciChecksNotConfigured } from '../src/repository-inspector.js';
 
@@ -13,6 +13,7 @@ async function repoWithPackage(options: {
   scripts?: Record<string, string>;
   packageManager?: string;
   workflowFiles?: Record<string, string>;
+  extraFiles?: Record<string, string>;
 } = {}): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'foreman-inspector-'));
   dirs.push(root);
@@ -32,6 +33,10 @@ async function repoWithPackage(options: {
     for (const [name, content] of Object.entries(options.workflowFiles)) {
       await writeFile(join(wfDir, name), content);
     }
+  }
+  for (const [name, content] of Object.entries(options.extraFiles ?? {})) {
+    await mkdir(dirname(join(root, name)), { recursive: true });
+    await writeFile(join(root, name), content);
   }
   git(root, 'add', '-A');
   git(root, 'commit', '-qm', 'init');
@@ -248,6 +253,32 @@ jobs:
       const ciScripts = await parseCiScripts(repo);
       expect(ciScripts.indexOf('lint')).toBeLessThan(ciScripts.indexOf('typecheck'));
       expect(ciScripts.indexOf('typecheck')).toBeLessThan(ciScripts.indexOf('test'));
+    });
+  });
+
+  describe('suggested allowed scope', () => {
+    it('excludes CI configuration but keeps manifests, lockfiles and source', async () => {
+      const repo = await repoWithPackage({
+        workflowFiles: { 'ci.yml': 'on: [push]\njobs: {}\n' },
+        extraFiles: {
+          '.gitlab-ci.yml': 'stages: []\n',
+          '.circleci/config.yml': 'version: 2.1\n',
+          '.buildkite/pipeline.yml': 'steps: []\n',
+          'azure-pipelines.yml': 'trigger: []\n',
+          Jenkinsfile: 'pipeline {}\n',
+          '.travis.yml': 'language: node_js\n',
+          'src/index.ts': 'export {};\n',
+          'README.md': '# fixture\n',
+        },
+      });
+      const { suggestedAllowedScope } = await inspectRepository(repo);
+      expect([...suggestedAllowedScope].sort()).toEqual(['README.md', 'package.json', 'pnpm-lock.yaml', 'src/']);
+    });
+
+    it('does not filter look-alike paths that are not CI configuration', async () => {
+      const repo = await repoWithPackage({ extraFiles: { 'docs/.github/notes.md': 'x\n', 'Jenkinsfile.md': 'x\n', 'github/readme.md': 'x\n' } });
+      const { suggestedAllowedScope } = await inspectRepository(repo);
+      expect(suggestedAllowedScope).toEqual(expect.arrayContaining(['docs/', 'Jenkinsfile.md', 'github/']));
     });
   });
 
