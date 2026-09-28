@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, chmod, readFile, rm, truncate, mkdir, readdir, stat } from 'node:fs/promises';
+import { mkdtemp, writeFile, chmod, readFile, rm, truncate, mkdir, readdir, stat, lstat, symlink, readlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { request as httpRequest } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
@@ -45,6 +46,7 @@ async function setup(t, options = {}) {
   await mkdir(join(dir,'codex-auth')); await writeFile(join(dir,'codex-auth','auth.json'),'{"fixture":true}',{mode:0o600});
   const env = { ...process.env, ANTHROPIC_API_KEY:'fixture-only-do-not-forward', OPENAI_API_KEY:'fixture-only-do-not-forward', AWS_ACCESS_KEY_ID:'fixture-only-do-not-forward', GOOGLE_API_KEY:'fixture-only-do-not-forward', CLAUDE_CODE_USE_BEDROCK:'1', CLAUDE_CODE_USE_VERTEX:'1', CLAUDE_CODE_USE_FOUNDRY:'1', CODEX_API_KEY:'fixture-only-do-not-forward', ...(options.claudeNetworkRequirements ? {HTTP_PROXY:'http://fixture-proxy.invalid:8080'} : {}), ...(Number.isFinite(options.keepaliveMs) ? {LOCAL_CLI_UHP_KEEPALIVE_MS:String(options.keepaliveMs)} : {}), ...(options.agyWorkerEffort ? {AGY_WORKER_EFFORT:options.agyWorkerEffort} : {}), LOCAL_CLI_UHP_PORT: String(port), LOCAL_CLI_UHP_STATE: join(dir, 'state.json'), LOCAL_CLI_UHP_WORK: join(dir, 'work'), FOREMAN_CLAUDE_USAGE_CACHE: join(dir,'claude-usage-cache.json'), CLAUDE_CONFIG_DIR: join(dir, 'claude-auth'), CODEX_HOME: join(dir, 'codex-auth'), CLAUDE_MODEL: options.noClaudeModel ? '' : options.claudeModel ?? 'claude-requested', CODEX_MODEL: 'codex-requested', CLAUDE_BIN: options.claudeBin ?? (options.spawnError ? join(dir,'missing-cli') : claude), CODEX_BIN: codex, AGY_BIN:join(dir,'missing-agy'), ...(options.agyEnabled ? { AGY_CONFIG_DIR: join(dir,'agy-auth'), ...(options.noAgyModel ? {} : {AGY_MODEL:options.agyModel ?? 'gemini-3.8-flash-medium'}), AGY_BIN:agy } : {}), ...agyDiscoveryEnv, LOCAL_CLI_UHP_SOURCE_REPO: options.sourceRepo ?? fixture.repo, LOCAL_CLI_UHP_BWRAP: options.bwrapBin ?? 'bwrap' };
   if (options.noAgyModel) delete env.AGY_MODEL;
+  if (options.extraEnv) Object.assign(env, options.extraEnv);
   if (!options.agyWorkerEffort) delete env.AGY_WORKER_EFFORT;
   if (options.agyEnabled) Object.assign(env,{AGY_CONFIG_DIR:join(dir,'agy-auth'),...(options.noAgyModel?{}:{AGY_MODEL:options.agyModel ?? 'gemini-3.8-flash-medium'}),AGY_BIN:agy});
   // Tests run without a bridge token unless one is requested, whatever the developer's shell exports.
@@ -1049,4 +1051,132 @@ test('an authenticated request with a malformed URL is rejected without crashing
   const client = new UhpClient({ baseUrl: base, token, fetch: bearerFetch(token), harnessId: 'claude-code', model: 'claude-requested' });
   const result = await client.submit({ submissionId: 'sub-env', assignmentId: 'asg-env', runId: 'run-env', roleId: 'planner', taskId: 'task-env', projectId: 'prj-env', prompt: 'Report your environment.', config: { harnessId: 'claude-code', model: 'claude-requested', timeoutSeconds: 5 }, idempotencyKey: 'token-env-key' });
   assert.equal(result.outputText, 'token_visible=false;env_entries=true');
+});
+
+// Batch seeding and workspace cleanup.
+const gitIn = (repo, ...args) => new Promise((resolveGit, reject) => execFile('git', ['-C', repo, ...args], { encoding: 'buffer', maxBuffer: 1 << 28 }, (error, out) => error ? reject(error) : resolveGit(out)));
+async function makeRepo(t, populate) {
+  const repo = await mkdtemp(join(tmpdir(), 'uhp-batch-repo-')); t.after(() => rm(repo, { recursive: true, force: true }));
+  await gitIn(repo, 'init', '-q'); await gitIn(repo, 'config', 'user.name', 'Fixture'); await gitIn(repo, 'config', 'user.email', 'fixture@example.invalid');
+  await populate(repo);
+  await gitIn(repo, 'add', '--all'); await gitIn(repo, 'commit', '-qm', 'fixture');
+  return { repo, baseCommit: (await gitIn(repo, 'rev-parse', 'HEAD')).toString().trim() };
+}
+const seedRaw = (base, baseCommit, headers = {}) => fetch(`${base}/extensions/foreman-workspace/v1/workspaces`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify({ base_commit: baseCommit }) });
+const deleteWorkspace = (base, id, headers = {}) => fetch(`${base}/extensions/foreman-workspace/v1/workspaces/${id}`, { method: 'DELETE', headers });
+async function bridgeGitChildren(repo) {
+  const found = [];
+  for (const pid of (await readdir('/proc')).filter(name => /^\d+$/.test(name))) { try { if ((await readFile(`/proc/${pid}/cmdline`, 'utf8')).includes(`${repo}\0cat-file`)) found.push(pid); } catch {} }
+  return found;
+}
+const slowClaude = ms => `process.stdin.resume();process.stdin.on('end',()=>setTimeout(()=>{console.log(JSON.stringify({type:'system',subtype:'init',model:'claude-requested',session_id:'slow-session'}));console.log(JSON.stringify({type:'result',subtype:'success',result:'slow bounded answer',model:'claude-requested',session_id:'slow-session',usage:{input_tokens:3,output_tokens:2}}));},${ms}));`;
+async function startResponse(base, headers, key, workspaceId) {
+  const r = await fetch(`${base}/v1/responses`, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', 'UHP-Version': '2026-09-12', 'Idempotency-Key': key, ...headers }, body: JSON.stringify({ input: 'Say bounded answer', model: 'claude-requested', metadata: { harness_id: 'claude-code', workspace_id: workspaceId }, stream: true, timeout_seconds: 10, max_step: 1 }) });
+  assert.equal(r.status, 200); return r;
+}
+async function until(check, ms = 8000) { const end = Date.now() + ms; while (Date.now() < end) { if (await check()) return true; await new Promise(r => setTimeout(r, 50)); } return false; }
+const exists = path => lstat(path).then(() => true, () => false);
+
+test('batch seeding reproduces binary, empty, executable and symlink blobs across more than 200 files', async t => {
+  const files = new Map();
+  const { repo, baseCommit } = await makeRepo(t, async repo => {
+    for (let i = 0; i < 250; i++) { const path = `dir${i % 7}/sub/file${i}.txt`; files.set(path, Buffer.from(`file ${i}\n`.repeat(1 + (i % 5)))); }
+    files.set('bin/random.bin', randomBytes(300_000));
+    files.set('bin/all.bin', Buffer.concat([Buffer.from(Array.from({ length: 256 }, (_, i) => i)), Buffer.from('\n\n0123456789abcdef 1 2\n'), Buffer.alloc(70_000, 10)]));
+    files.set('empty.txt', Buffer.alloc(0));
+    for (const [path, bytes] of files) { await mkdir(dirname(join(repo, path)), { recursive: true }); await writeFile(join(repo, path), bytes); }
+    await writeFile(join(repo, 'run.sh'), '#!/bin/sh\necho hi\n', { mode: 0o755 }); await chmod(join(repo, 'run.sh'), 0o755);
+    await symlink('dir0/sub/file0.txt', join(repo, 'link'));
+  });
+  const { base, env } = await setup(t, { sourceRepo: repo });
+  const seed = await seedRaw(base, baseCommit); assert.equal(seed.status, 201);
+  const work = join(env.LOCAL_CLI_UHP_WORK, (await seed.json()).workspace_id);
+  for (const [path, bytes] of files) assert.ok((await readFile(join(work, path))).equals(bytes), path);
+  assert.equal((await stat(join(work, 'run.sh'))).mode & 0o777, 0o755); assert.equal((await stat(join(work, 'empty.txt'))).mode & 0o777, 0o644);
+  assert.equal(await readlink(join(work, 'link')), 'dir0/sub/file0.txt');
+  assert.deepEqual(await bridgeGitChildren(repo), []);
+});
+
+test('batch seeding fails cleanly on a blob over the cap, a missing blob and an escaping symlink, and leaves no workspace or git child', async t => {
+  const big = await makeRepo(t, async repo => { await writeFile(join(repo, 'a.txt'), 'small\n'); await writeFile(join(repo, 'big.bin'), Buffer.alloc(16 * 1024 * 1024 + 1)); });
+  const missing = await makeRepo(t, async repo => { await writeFile(join(repo, 'a.txt'), 'small\n'); await writeFile(join(repo, 'gone.txt'), 'this blob will be deleted\n'); });
+  const oid = (await gitIn(missing.repo, 'rev-parse', `${missing.baseCommit}:gone.txt`)).toString().trim();
+  await rm(join(missing.repo, '.git', 'objects', oid.slice(0, 2), oid.slice(2)), { force: true });
+  const escape = await makeRepo(t, async repo => { await writeFile(join(repo, 'a.txt'), 'small\n'); await symlink('../outside', join(repo, 'evil')); });
+  const { base, env } = await setup(t, { sourceRepo: big.repo });
+  const r1 = await seedRaw(base, big.baseCommit); assert.equal(r1.status, 500); assert.match((await r1.json()).error.message, /size limit exceeded: big\.bin/);
+  assert.deepEqual(await readdir(env.LOCAL_CLI_UHP_WORK), []); assert.deepEqual(await bridgeGitChildren(big.repo), []);
+  const other = await setup(t, { sourceRepo: missing.repo });
+  const r2 = await seedRaw(other.base, missing.baseCommit); assert.equal(r2.status, 500); assert.match((await r2.json()).error.message, /blob is missing: gone\.txt/);
+  assert.deepEqual(await readdir(other.env.LOCAL_CLI_UHP_WORK), []); assert.deepEqual(await bridgeGitChildren(missing.repo), []);
+  const third = await setup(t, { sourceRepo: escape.repo });
+  const r3 = await seedRaw(third.base, escape.baseCommit); assert.equal(r3.status, 500); assert.match((await r3.json()).error.message, /symlink escapes workspace: evil/);
+  assert.deepEqual(await readdir(third.env.LOCAL_CLI_UHP_WORK), []);
+  assert.equal((await fetch(`${other.base}/v1/uhp`)).status, 200);
+});
+
+test('DELETE removes a workspace and its sibling dirs: 404 unknown, 401 without the token, 409 while a response runs, 204 after', async t => {
+  const { base, env, baseCommit, authHeaders } = await setup(t, { token: BRIDGE_TOKEN, claudeBody: slowClaude(1500) });
+  const seed = await (await seedRaw(base, baseCommit, authHeaders)).json(); const id = seed.workspace_id;
+  const work = join(env.LOCAL_CLI_UHP_WORK, id); const codexHome = `${work}.codex-home`; await mkdir(codexHome);
+  assert.equal((await deleteWorkspace(base, `ws_${randomUUID()}`, authHeaders)).status, 404);
+  for (const headers of [{}, { authorization: 'Bearer wrong' }]) assert.equal((await deleteWorkspace(base, id, headers)).status, 401);
+  assert.ok(await exists(work));
+  const running = await startResponse(base, authHeaders, 'delete-running', id);
+  const blocked = await deleteWorkspace(base, id, authHeaders); assert.equal(blocked.status, 409); assert.equal((await blocked.json()).error.code, 'workspace_task_in_progress');
+  assert.ok(await exists(work));
+  assert.equal(terminalEvent((await running.text()).split('\n').filter(x => x.startsWith('data: ')).map(x => JSON.parse(x.slice(6))))?.type, 'response.completed');
+  const removed = await deleteWorkspace(base, id, authHeaders); assert.equal(removed.status, 204); assert.equal(await removed.text(), '');
+  assert.ok(!(await exists(work))); assert.ok(!(await exists(codexHome)));
+  assert.equal(JSON.parse(await readFile(env.LOCAL_CLI_UHP_STATE, 'utf8')).workspaces[id], undefined);
+  assert.equal((await deleteWorkspace(base, id, authHeaders)).status, 404);
+  assert.equal((await fetch(`${base}/extensions/foreman-workspace/v1/workspaces/${id}/snapshot`, { headers: authHeaders })).status, 404);
+});
+
+test('DELETE and the startup sweep never remove anything outside the work root through a symlinked workspace dir', async t => {
+  const { base, env, baseCommit, restart } = await setup(t);
+  const outside = await mkdtemp(join(tmpdir(), 'uhp-outside-')); t.after(() => rm(outside, { recursive: true, force: true }));
+  await writeFile(join(outside, 'precious.txt'), 'keep me');
+  const id = (await (await seedRaw(base, baseCommit)).json()).workspace_id; const work = join(env.LOCAL_CLI_UHP_WORK, id);
+  await rm(work, { recursive: true, force: true }); await symlink(outside, work); await symlink(outside, `${work}.codex-home`);
+  assert.equal((await deleteWorkspace(base, id)).status, 204);
+  assert.ok(!(await exists(work))); assert.ok(!(await exists(`${work}.codex-home`)));
+  assert.equal(await readFile(join(outside, 'precious.txt'), 'utf8'), 'keep me');
+  const orphan = join(env.LOCAL_CLI_UHP_WORK, `ws_${randomUUID()}`); await symlink(outside, orphan); await symlink(outside, join(env.LOCAL_CLI_UHP_WORK, `review-${randomUUID()}`));
+  await restart();
+  assert.ok(!(await exists(orphan))); assert.deepEqual(await readdir(env.LOCAL_CLI_UHP_WORK), []);
+  assert.equal(await readFile(join(outside, 'precious.txt'), 'utf8'), 'keep me');
+});
+
+test('startup removes work-root entries no persisted state references and keeps everything that is referenced', async t => {
+  const { base, env, baseCommit, restart } = await setup(t);
+  const root = env.LOCAL_CLI_UHP_WORK;
+  const kept = (await (await seedRaw(base, baseCommit)).json()).workspace_id; await mkdir(join(root, `${kept}.codex-home`));
+  const orphan = `ws_${randomUUID()}`; const orphanFiles = [orphan, `${orphan}.codex-home`, `review-${randomUUID()}`, `resp_${randomUUID()}.review-codex-home`, `codex-preflight-${randomUUID()}`];
+  for (const name of orphanFiles) { await mkdir(join(root, name)); await writeFile(join(root, name, 'x'), 'x'); }
+  await chmod(join(root, orphanFiles[2]), 0o500);
+  for (const name of ['kept-role', 'orphan-role']) { await mkdir(join(root, 'role-sessions', name), { recursive: true }); await writeFile(join(root, 'role-sessions', name, 'x'), 'x'); }
+  await writeFile(join(root, 'not-ours.txt'), 'foreign'); await mkdir(join(root, 'ws_not-a-uuid'));
+  const statePath = env.LOCAL_CLI_UHP_STATE; const persisted = JSON.parse(await readFile(statePath, 'utf8'));
+  persisted.responses.resp_role = { id: 'resp_role', object: 'response', status: 'completed', metadata: { role_session_state_path: join(root, 'role-sessions', 'kept-role') } };
+  await writeFile(statePath, JSON.stringify(persisted));
+  await restart();
+  assert.deepEqual((await readdir(root)).sort(), [kept, `${kept}.codex-home`, 'not-ours.txt', 'role-sessions', 'ws_not-a-uuid'].sort());
+  assert.deepEqual(await readdir(join(root, 'role-sessions')), ['kept-role']);
+  assert.equal((await fetch(`${base}/extensions/foreman-workspace/v1/workspaces/${kept}/snapshot`)).status, 200);
+  await rm(join(root, kept), { recursive: true, force: true }); await restart();
+  assert.equal(JSON.parse(await readFile(statePath, 'utf8')).workspaces[kept], undefined);
+});
+
+test('the TTL sweep removes idle workspaces but never one with a running response', async t => {
+  const { base, env, baseCommit } = await setup(t, { claudeBody: slowClaude(3000), extraEnv: { LOCAL_CLI_UHP_WORKSPACE_TTL_MS: '800' } });
+  const idle = (await (await seedRaw(base, baseCommit)).json()).workspace_id; const busy = (await (await seedRaw(base, baseCommit)).json()).workspace_id;
+  const busyDir = join(env.LOCAL_CLI_UHP_WORK, busy);
+  const running = await startResponse(base, {}, 'ttl-running', busy); let finished = false; const body = running.text().then(text => { finished = true; return text; });
+  assert.ok(await until(async () => !(await exists(join(env.LOCAL_CLI_UHP_WORK, idle)))), 'the idle workspace was never swept');
+  assert.equal(finished, false); assert.ok(await exists(busyDir), 'the busy workspace was swept mid-run');
+  assert.match(await body, /response\.completed/);
+  assert.ok(await exists(busyDir));
+  assert.ok(await until(async () => !(await exists(busyDir))), 'the finished workspace was never swept once idle');
+  const persisted = JSON.parse(await readFile(env.LOCAL_CLI_UHP_STATE, 'utf8')).workspaces; assert.equal(persisted[idle], undefined); assert.equal(persisted[busy], undefined);
 });
