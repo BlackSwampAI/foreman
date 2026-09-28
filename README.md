@@ -131,6 +131,10 @@ The standard local flow requires no environment variables. The following setting
 
 Planner and Orchestrator turn timeouts are fixed at 300 seconds and are not configurable via environment variable. The optional configuration shape is recorded in `config.schema.json`.
 
+## Security
+
+Foreman has no login; it relies on binding to `127.0.0.1` and on request checks that stop other web pages from driving it through your browser. Every request must carry a `Host` of `localhost`, `127.0.0.1` or `[::1]` (or the `FOREMAN_HOST` value) on `FOREMAN_PORT`, which blocks DNS rebinding. Every request other than `GET` and `HEAD` must also carry an `Origin` that matches `Host`, and a `Sec-Fetch-Site`, if sent, must be `same-origin`; otherwise it gets a 403. Scripts that call the API directly (for example with `curl`) must therefore send `-H 'Origin: http://127.0.0.1:4399'` on writes. `pnpm dev:ui` rewrites `Origin` on proxied requests to `http://127.0.0.1:4399`. GitHub write actions additionally require an explicit confirmation token. Binding to a non-loopback address with `FOREMAN_HOST` exposes an unauthenticated control plane to that network; don't.
+
 ## Data and cleanup
 
 Foreman stores project state in `.foreman-data/`. Each project's workspace setup, bridge state, and work directories are stored under its project ID. **Deleting a project** from the UI removes its events, bridge state directory, bridge work directory, and saved workspace setup in addition to the project record itself. Promotion records a result commit but does not advance the repository checkout.

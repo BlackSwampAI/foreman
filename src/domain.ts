@@ -36,8 +36,8 @@ export interface Guidance { id: string; sequence: number; text: string; status: 
 export interface EmptyResponseInfo { reason: string; deniedTools?: string[] }
 export interface RepoAccessRecord { mode: 'snapshot' | 'digest'; commit: string; reason?: string }
 export interface Assignment { id: string; roleId: string; status: AssignmentStatus; requestedConfig: RoleConfig; requestedModel?:string; actualModelStatus?:'observed'|'unavailable'; selectedHarnessId?:string; reportedHarnessId?:string; modelFallback?:boolean; cliInvocation?:{executable:string;hostExecutable?:string;args:string[]}; actualConfig?: RoleConfig; configOutcome?:'confirmed'|'substituted'|'unavailable'; configNotes?:{boundsApplied?:boolean;ignoredFields?:string[]}; reviewerInboxId?:string; reviewerEvidenceDigest?:string; usage?:Usage; reviewerExecution?:{mode:string;mutationAttempted:boolean;validation?:unknown}; repoAccess?:RepoAccessRecord; prompt: string; submissionId: string; idempotencyKey: string; externalId?: string; sessionId?: string; responseId?: string; result?: unknown; error?: string; emptyResponse?: EmptyResponseInfo; createdAt: string; cancelIdempotencyKey?: string; createdTaskIds?:string[] }
-export interface Event { id: string; type: string; entityType: string; entityId: string; at: string; data: Record<string, unknown> }
-export interface State { version: 1; projects: Project[]; roles: Role[]; events: Event[] }
+export interface Event { id: string; type: string; entityType: string; entityId: string; at: string; data: Record<string, unknown>; seq?: number }
+export interface State { version: 1; projects: Project[]; roles: Role[]; events: Event[]; eventSeq?: number }
 export const now = (): string => new Date().toISOString();
 export const id = (prefix: string): string => `${prefix}_${crypto.randomUUID()}`;
 
