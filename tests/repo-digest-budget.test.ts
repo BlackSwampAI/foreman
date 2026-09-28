@@ -18,6 +18,8 @@ const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, 
 async function makeBigRepo() {
   const repo = await mkdtemp(join(tmpdir(), 'foreman-digest-budget-repo-')); dirs.push(repo);
   git(repo, 'init', '-q', '-b', 'main'); git(repo, 'config', 'user.email', 'test@test.com'); git(repo, 'config', 'user.name', 'Test');
+  // Recent Git detaches auto maintenance after `commit`; a background repack would write into .git/objects while afterEach removes the repo.
+  git(repo, 'config', 'maintenance.auto', 'false'); git(repo, 'config', 'gc.auto', '0');
   const baseFilePaths: string[] = [];
   for (let i = 0; i < 500; i++) {
     const dir = join('src', `module-with-a-long-name-${i % 20}`, `feature-area-${i % 7}`);

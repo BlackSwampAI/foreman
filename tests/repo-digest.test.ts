@@ -13,6 +13,9 @@ async function makeGitRepo() {
   execFileSync('git', ['init', '-b', 'main', dir], { stdio: 'pipe' });
   execFileSync('git', ['-C', dir, 'config', 'user.email', 'test@test.com'], { stdio: 'pipe' });
   execFileSync('git', ['-C', dir, 'config', 'user.name', 'Test'], { stdio: 'pipe' });
+  // Recent Git detaches auto maintenance after `commit`; a background repack would write into .git/objects while afterEach removes the repo.
+  execFileSync('git', ['-C', dir, 'config', 'maintenance.auto', 'false'], { stdio: 'pipe' });
+  execFileSync('git', ['-C', dir, 'config', 'gc.auto', '0'], { stdio: 'pipe' });
   return dir;
 }
 
