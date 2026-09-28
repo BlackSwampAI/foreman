@@ -137,7 +137,7 @@ const server=createServer(async(req,res)=>{
           projectControllers.set(existingId,{...runtime,workspace:saved});
         }else{
           const {scoped,bridge}=await createProjectRuntime(existingId,workspace);
-          try{await scoped.refreshDiscovery();await scoped.recover();const saved=await saveWorkspaceSetup(config.dataDir,existingId,{repoPath:workspace.repoPath,allowedScope:workspace.allowedScope,validationCommands:workspace.validationCommands});projectControllers.set(existingId,{controller:scoped,bridge,workspace:saved});configuredProjectIds.add(existingId);}
+          try{await scoped.refreshDiscovery();const saved=await saveWorkspaceSetup(config.dataDir,existingId,{repoPath:workspace.repoPath,allowedScope:workspace.allowedScope,validationCommands:workspace.validationCommands});projectControllers.set(existingId,{controller:scoped,bridge,workspace:saved});configuredProjectIds.add(existingId);void scoped.startRecovery(existingId);}
           catch(error){projectControllers.delete(existingId);await bridge.stop();throw error;}
         }
         const resumed=await projectControllers.get(existingId)!.controller.state();const project=resumed.projects.find(item=>item.id===existingId);if(!project)throw new Error('Saved project disappeared while reopening its repository');json(res,200,project);return;
@@ -148,7 +148,7 @@ const server=createServer(async(req,res)=>{
       catch(error){projectControllers.delete(projectId);await bridge.stop();throw error;}
     }
     const setupMatch=path.match(/^\/api\/projects\/([^/]+)\/workspace-setup$/);
-    if(req.method==='GET'&&setupMatch){const projectId=decodeURIComponent(setupMatch[1]!);let workspace;try{workspace=await loadWorkspaceSetup(config.dataDir,projectId);}catch{throw Object.assign(new Error('Saved repository is unavailable; reopen the repository to continue'),{statusCode:503});}if(!workspace)throw Object.assign(new Error('Workspace setup not found'),{statusCode:404});const bridgeHealth=projectControllers.get(projectId)?.bridge.health;json(res,200,{...workspace,bridgeStatus:bridgeHealth?.state??'unavailable',...(bridgeHealth?{bridgeHealth}:{})});return;}
+    if(req.method==='GET'&&setupMatch){const projectId=decodeURIComponent(setupMatch[1]!);let workspace;try{workspace=await loadWorkspaceSetup(config.dataDir,projectId);}catch{throw Object.assign(new Error('Saved repository is unavailable; reopen the repository to continue'),{statusCode:503});}if(!workspace)throw Object.assign(new Error('Workspace setup not found'),{statusCode:404});const runtime=projectControllers.get(projectId),bridgeHealth=runtime?.bridge.health;json(res,200,{...workspace,bridgeStatus:bridgeHealth?.state??'unavailable',...(bridgeHealth?{bridgeHealth}:{}),...(runtime?{recovery:runtime.controller.recoveryStatus()}:{})});return;}
     if(req.method==='GET'&&path==='/api/state'){json(res,200,stateForUi(await activeController.state()));return;}
     if(req.method==='GET'&&path==='/api/status'){json(res,200,await activeController.serviceStatus());return;}
     if(req.method==='GET'&&path==='/api/events'){
@@ -237,12 +237,13 @@ await controller.refreshDiscovery();
 for(const project of startupState.projects){
   let workspace;try{workspace=await loadWorkspaceSetup(config.dataDir,project.id);}catch(error){process.stderr.write(`Saved workspace for ${project.id} is unavailable: ${error instanceof Error?error.message:'invalid setup'}\n`);continue;}
   if(!workspace)continue;configuredProjectIds.add(project.id);
-  try{const {scoped}=await createProjectRuntime(project.id,workspace);await scoped.refreshDiscovery();await scoped.recover();}
+  try{const {scoped}=await createProjectRuntime(project.id,workspace);await scoped.refreshDiscovery();void scoped.startRecovery(project.id);}
   catch(error){process.stderr.write(`Could not start local workspace for ${project.id}: ${error instanceof Error?error.message:'bridge startup failed'}\n`);}
 }
-if(configuredProjectIds.size===0)await controller.recover();
+if(configuredProjectIds.size===0)void controller.startRecovery('default project');
 setInterval(()=>{if(configuredProjectIds.size===0)void controller.reconcileRunning();for(const runtime of projectControllers.values())void runtime.controller.reconcileRunning();},5000).unref();
-const shutdown=async()=>{server.close();await Promise.all([...projectControllers.values()].map(runtime=>runtime.bridge.stop()));await store.flush().catch(()=>undefined);};
+// Shutdown never awaits an in-flight recovery (it may be blocked on an external UHP call); the flush is bounded too.
+const shutdown=async()=>{server.close();await Promise.all([...projectControllers.values()].map(runtime=>runtime.bridge.stop()));await Promise.race([store.flush().catch(()=>undefined),new Promise<void>(done=>setTimeout(done,5000).unref())]);};
 process.once('SIGINT',()=>{void shutdown().finally(()=>process.exit(0));});
 process.once('SIGTERM',()=>{void shutdown().finally(()=>process.exit(0));});
 server.listen(config.port,config.host,()=>process.stdout.write(`Foreman listening on http://${config.host}:${config.port}\n`));

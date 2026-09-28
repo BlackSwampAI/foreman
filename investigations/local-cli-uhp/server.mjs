@@ -11,6 +11,7 @@ import { tmpdir, homedir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { posix } from 'node:path';
 import { TextDecoder } from 'node:util';
+import { once } from 'node:events';
 import { createRequire } from 'node:module';
 import { roleSessionBinding, roleStatePath, resolvePreviousRoleSession, withRoleSession } from './role-sessions.mjs';
 import { claudeCodeCliArgs, codexCliArgs } from './cli-args.mjs';
@@ -51,6 +52,7 @@ const HARNESS = {
   codex: { id: 'codex-cli', bin: process.env.CODEX_BIN ?? 'codex', authDir: process.env.CODEX_HOME ?? join(homedir(), '.codex'), model: process.env.CODEX_MODEL ?? 'gpt-6-sol' },
   agy: { id: 'antigravity-cli', bin: process.env.AGY_BIN ?? 'agy', authDir: process.env.AGY_CONFIG_DIR ?? join(homedir(), '.gemini', 'antigravity-cli'), model: process.env.AGY_MODEL ?? 'gemini-3.8-flash-low' },
 };
+const WORKSPACE_TTL_MS = (() => { const value = Number(process.env.LOCAL_CLI_UHP_WORKSPACE_TTL_MS); return process.env.LOCAL_CLI_UHP_WORKSPACE_TTL_MS !== undefined && process.env.LOCAL_CLI_UHP_WORKSPACE_TTL_MS !== '' && Number.isFinite(value) && value >= 0 ? value : 24 * 3600_000; })();
 const tasks = new Map();
 const workspaces = new Map();
 let agyModelsCache = { expires: 0, models: [] };
@@ -63,7 +65,9 @@ function agyDiscoveryEnvironment(source = process.env) {
   return Object.fromEntries(Object.entries(source).filter(([name, value]) => allowed.has(name) && typeof value === 'string'));
 }
 
-async function persist() {
+let persistQueue = Promise.resolve();
+function persist() { const run = persistQueue.then(writeState); persistQueue = run.catch(() => undefined); return run; }
+async function writeState() {
   await mkdir(resolve(STATE, '..'), { recursive: true });
   const temp = `${STATE}.${process.pid}.tmp`;
   await writeFile(temp, JSON.stringify(state), { mode: 0o600 });
@@ -75,11 +79,64 @@ async function load() {
   for (const [id, item] of Object.entries(state.workspaces)) {
     if (!/^ws_[0-9a-f-]{36}$/.test(id) || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(item.baseCommit) || !SOURCE_REPO) continue;
     const dir = join(ROOT, id);
-    try { if ((await lstat(dir)).isDirectory()) workspaces.set(id, { id, baseCommit: item.baseCommit, dir, sourceRepo: await realpath(SOURCE_REPO), responseId: item.responseId }); } catch {}
+    try { if ((await lstat(dir)).isDirectory()) workspaces.set(id, { id, baseCommit: item.baseCommit, dir, sourceRepo: await realpath(SOURCE_REPO), responseId: item.responseId, lastUsed: Number.isFinite(item.lastUsed) ? item.lastUsed : Date.now() }); } catch {}
   }
   for (const [id, r] of Object.entries(state.responses)) {
-    if (r.status === 'in_progress') { r.status = 'failed'; r.error = { message: 'Server restarted before CLI completion; replay will not spawn a duplicate' }; await persist(); }
+    if (r.status === 'in_progress') { touchWorkspace(workspaces.get(r.metadata?.workspace_id)); touchWorkspace(workspaces.get(r.metadata?.foreman_read_only_workspace_id)); r.status = 'failed'; r.error = { message: 'Server restarted before CLI completion; replay will not spawn a duplicate' }; await persist(); }
     tasks.set(id, { response: r });
+  }
+  await sweepOrphans();
+}
+// Everything below only ever removes entries of ROOT (never follows a symlink out of it), and only names this bridge creates.
+const ROOT_ENTRY = /^(?:ws_[0-9a-f-]{36}(?:\..+)?|review-[0-9a-f-]{36}|resp_[0-9a-f-]{36}\.review-codex-home|(?:preflight|codex-preflight|agy-preflight|planner-auth-preflight)-[0-9a-f-]{36})$/;
+async function removeInsideRoot(path) {
+  const root = await realpath(ROOT);
+  let info;
+  try { info = await lstat(path); } catch (e) { if (e.code === 'ENOENT') return false; throw e; }
+  if (info.isSymbolicLink()) { await rm(path, { force: true }); return true; } // the link itself, never its target
+  const real = await realpath(path);
+  if (dirname(real) === real || !real.startsWith(`${root}/`)) throw Error('Refusing to remove a path outside the work root');
+  if (info.isDirectory()) await chmod(real, 0o700).catch(() => undefined);
+  await rm(real, { recursive: true, force: true });
+  return true;
+}
+function referencedRoleStates() {
+  const paths = new Set();
+  for (const r of Object.values(state.responses)) for (const p of [r.metadata?.role_session_state_path, r.metadata?.role_session?.state_path]) if (typeof p === 'string') paths.add(resolve(p));
+  return paths;
+}
+async function sweepOrphans() {
+  if (ROOT === tmpdir()) return;
+  const keepWorkspace = name => Object.keys(state.workspaces).some(id => name === id || name.startsWith(`${id}.`));
+  for (const name of await readdir(ROOT).catch(() => [])) {
+    if (ROOT_ENTRY.test(name) && !keepWorkspace(name)) await removeInsideRoot(join(ROOT, name)).catch(() => undefined);
+  }
+  const roles = join(ROOT, 'role-sessions'), keep = referencedRoleStates();
+  for (const name of await readdir(roles).catch(() => [])) if (!keep.has(join(roles, name))) await removeInsideRoot(join(roles, name)).catch(() => undefined);
+  let changed = false;
+  for (const id of Object.keys(state.workspaces)) if (!(await lstat(join(ROOT, id)).catch(() => undefined))) { delete state.workspaces[id]; changed = true; }
+  if (changed) await persist();
+}
+function touchWorkspace(ws) { if (!ws) return; ws.lastUsed = Date.now(); if (state.workspaces[ws.id]) state.workspaces[ws.id].lastUsed = ws.lastUsed; }
+function workspaceActive(ws) {
+  return ws.ops > 0 || Object.values(state.responses).some(r => r.status === 'in_progress' && (r.metadata?.workspace_id === ws.id || r.metadata?.foreman_read_only_workspace_id === ws.id));
+}
+// Runs one workspace request (overlay, snapshot) so cleanup cannot remove the workspace underneath it.
+async function withWorkspaceOp(ws, fn) { ws.ops = (ws.ops ?? 0) + 1; try { return await fn(); } finally { ws.ops--; touchWorkspace(ws); persist().catch(() => undefined); } }
+// The synchronous part (activity check plus unregistering) is what stops a new response from binding to a workspace being removed.
+async function removeWorkspace(id) {
+  const ws = workspaces.get(id);
+  if (!ws || workspaceActive(ws)) return false;
+  workspaces.delete(id); delete state.workspaces[id];
+  await persist();
+  for (const name of await readdir(ROOT).catch(() => [])) if (name === id || name.startsWith(`${id}.`)) await removeInsideRoot(join(ROOT, name)).catch(error => console.warn(`workspace cleanup failed for ${name}: ${error.message}`));
+  return true;
+}
+async function sweepIdleWorkspaces() {
+  if (!WORKSPACE_TTL_MS) return;
+  for (const ws of [...workspaces.values()]) {
+    if (workspaceActive(ws)) { touchWorkspace(ws); continue; }
+    if (Date.now() - (ws.lastUsed ?? 0) > WORKSPACE_TTL_MS) await removeWorkspace(ws.id).catch(error => console.warn(`workspace sweep failed for ${ws.id}: ${error.message}`));
   }
 }
 function send(res, status, body, extra = {}) {
@@ -479,6 +536,60 @@ function git(repo, args, maxBytes = 32 * 1024 * 1024) {
     child.once('close', code => code === 0 ? resolvePromise(Buffer.concat(out, size)) : reject(Error(`git ${args[0]} failed (${code}): ${err.slice(0, 1000)}`)));
   });
 }
+const GIT_BATCH_TIMEOUT_MS = 300_000;
+const MAX_BLOB = 16 * 1024 * 1024, MAX_SEED_TOTAL = 256 * 1024 * 1024;
+// One `git cat-file --batch` for every blob: oids in on stdin, `<oid> <type> <size>\n<bytes>\n` records out. Both callbacks
+// run in order and are awaited before the next chunk is read, which is the backpressure on git's stdout.
+async function gitBatchBlobs(repo, entries, onHeader, onBlob) {
+  const child = spawn('git', ['-C', repo, 'cat-file', '--batch'], { stdio: ['pipe', 'pipe', 'pipe'], shell: false });
+  let err = ''; let timedOut = false; const abort = new AbortController();
+  child.stderr.on('data', chunk => { if (err.length < 4000) err += chunk.toString('utf8').slice(0, 4000 - err.length); });
+  child.stdin.on('error', () => {});
+  const closed = new Promise((resolveClose, rejectClose) => { child.once('error', rejectClose); child.once('close', resolveClose); });
+  closed.catch(() => {});
+  const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, GIT_BATCH_TIMEOUT_MS);
+  const feed = (async () => {
+    let pending = '';
+    for (const entry of entries) {
+      pending += `${entry.oid}\n`;
+      if (pending.length >= 65_536) { if (!child.stdin.write(pending)) await once(child.stdin, 'drain', { signal: abort.signal }); pending = ''; }
+    }
+    child.stdin.end(pending);
+  })().catch(() => {});
+  try {
+    let buf = Buffer.alloc(0), index = 0, current;
+    for await (const chunk of child.stdout) {
+      buf = buf.length ? Buffer.concat([buf, chunk]) : chunk;
+      while (buf.length) {
+        if (!current) {
+          const nl = buf.indexOf(10);
+          if (nl < 0) { if (buf.length > 4096) throw Error('Git cat-file header too long'); break; }
+          const entry = entries[index];
+          if (!entry) throw Error('Git cat-file returned more records than requested');
+          const header = buf.toString('ascii', 0, nl); buf = buf.subarray(nl + 1);
+          if (header === `${entry.oid} missing`) throw Error(`Seed snapshot blob is missing: ${entry.path}`);
+          const match = /^([0-9a-f]{40}|[0-9a-f]{64}) (\w+) (\d+)$/.exec(header);
+          if (!match || match[1] !== entry.oid || match[2] !== 'blob') throw Error(`Unexpected Git cat-file header for ${entry.path}`);
+          const size = Number(match[3]);
+          await onHeader(entry, size);
+          current = { entry, size, parts: [], got: 0 };
+        }
+        const take = buf.subarray(0, Math.min(current.size + 1 - current.got, buf.length));
+        current.parts.push(take); current.got += take.length; buf = buf.subarray(take.length);
+        if (current.got < current.size + 1) break;
+        const record = Buffer.concat(current.parts, current.got);
+        if (record[current.size] !== 10) throw Error(`Git cat-file record for ${current.entry.path} is malformed`);
+        const done = current; current = undefined; index++;
+        await onBlob(done.entry, record.subarray(0, done.size));
+      }
+    }
+    if (timedOut) throw Error('git cat-file timed out');
+    if (current || index !== entries.length) throw Error('Git cat-file output was truncated');
+    const code = await closed;
+    if (code !== 0) throw Error(`git cat-file failed (${code}): ${err.slice(0, 1000)}`);
+  } catch (error) { throw timedOut ? Error('git cat-file timed out') : error; }
+  finally { clearTimeout(timer); abort.abort(); child.kill('SIGKILL'); await feed; }
+}
 async function seedWorkspace(baseCommit) {
   if (!SOURCE_REPO) throw Error('Workspace seeding requires LOCAL_CLI_UHP_SOURCE_REPO');
   if (typeof baseCommit !== 'string' || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(baseCommit)) throw Error('A full base commit SHA is required');
@@ -491,35 +602,29 @@ async function seedWorkspace(baseCommit) {
   try { treeText = utf8.decode(tree); } catch { throw Error('Git tree contains a non-UTF-8 path'); }
   const records = tree.length ? treeText.split('\0').filter(Boolean) : [];
   if (records.length > 100_000) throw Error('Seed snapshot entry limit exceeded');
-  let total = 0;
   const parsed = [];
   for (const record of records) {
     const tab = record.indexOf('\t'); const [mode, type, oid] = record.slice(0, tab).split(' '); const path = record.slice(tab + 1);
     if (!validRelativePath(path) || type !== 'blob' || !['100644', '100755', '120000'].includes(mode)) throw Error(`Unsupported or unsafe Git tree entry: ${path}`);
-    const sizeText = (await git(repo, ['cat-file', '-s', oid], 64)).toString('ascii').trim();
-    const size = Number(sizeText);
-    if (!/^\d+$/.test(sizeText) || !Number.isSafeInteger(size) || size > 16 * 1024 * 1024 || (total += size) > 256 * 1024 * 1024) throw Error(`Seed snapshot size limit exceeded: ${path}`);
-    parsed.push({ mode, oid, path, size });
-    if (mode === '120000') {
-      let target;
-      try { target = utf8.decode(await git(repo, ['cat-file', 'blob', oid], 16 * 1024 * 1024)); } catch { throw Error(`Non-UTF-8 symlink target: ${path}`); }
-      if (linkEscapes(path, target)) throw Error(`Seed symlink escapes workspace: ${path}`);
-    }
+    parsed.push({ mode, oid, path });
   }
   const id = `ws_${randomUUID()}`; const dir = join(ROOT, id);
   await mkdir(dir, { recursive: false, mode: 0o700 });
   try {
-    for (const entry of parsed) {
+    let total = 0;
+    await gitBatchBlobs(repo, parsed, (entry, size) => { if (size > MAX_BLOB || (total += size) > MAX_SEED_TOTAL) throw Error(`Seed snapshot size limit exceeded: ${entry.path}`); }, async (entry, bytes) => {
       const target = join(dir, ...entry.path.split('/'));
       await mkdir(dirname(target), { recursive: true, mode: 0o700 });
-      const bytes = await git(repo, ['cat-file', 'blob', entry.oid], 16 * 1024 * 1024);
-      if (bytes.length !== entry.size) throw Error(`Pinned Git blob changed or was truncated: ${entry.path}`);
-      if (entry.mode === '120000') await symlink(bytes.toString('utf8'), target);
-      else { await writeFile(target, bytes, { mode: entry.mode === '100755' ? 0o755 : 0o644, flag: 'wx' }); await chmod(target, entry.mode === '100755' ? 0o755 : 0o644); }
-    }
-    const ws = { id, baseCommit: sha, dir, sourceRepo: repo };
+      if (entry.mode === '120000') {
+        let linkTarget;
+        try { linkTarget = utf8.decode(bytes); } catch { throw Error(`Non-UTF-8 symlink target: ${entry.path}`); }
+        if (linkEscapes(entry.path, linkTarget)) throw Error(`Seed symlink escapes workspace: ${entry.path}`);
+        await symlink(linkTarget, target);
+      } else { await writeFile(target, bytes, { mode: entry.mode === '100755' ? 0o755 : 0o644, flag: 'wx' }); await chmod(target, entry.mode === '100755' ? 0o755 : 0o644); }
+    });
+    const ws = { id, baseCommit: sha, dir, sourceRepo: repo, lastUsed: Date.now() };
     workspaces.set(id, ws);
-    state.workspaces[id] = { baseCommit: sha }; await persist();
+    state.workspaces[id] = { baseCommit: sha, lastUsed: ws.lastUsed }; await persist();
     return ws;
   } catch (error) { await rm(dir, { recursive: true, force: true }); throw error; }
 }
@@ -1070,6 +1175,7 @@ async function runTask(record, prompt) {
     record.metadata.role_session = { binding: record.metadata.role_session_binding, cli_session_id: parsed.session, state_path: record.metadata.role_session_state_path };
   }
   await persist();
+  touchWorkspace(ws); touchWorkspace(roWs);
   for (const finish of active.finishListeners ?? []) finish();
   if (kind === 'codex-cli' && !persistentRole) {
     const codexHome = reviewer ? reviewerState.codexHome : taskWorkspace.codexHome;
@@ -1314,6 +1420,13 @@ const server = createServer(async (req, res) => {
       const b = await body(req); const ws = await seedWorkspace(b.base_commit);
       return send(res, 201, { workspace_id: ws.id, base_commit: ws.baseCommit });
     }
+    const workspacePath = url.pathname.match(/^\/extensions\/foreman-workspace\/v1\/workspaces\/([^/]+)$/);
+    if (req.method === 'DELETE' && workspacePath) {
+      const ws = workspaces.get(decodeURIComponent(workspacePath[1]));
+      if (!ws) return send(res, 404, { error: { code: 'workspace_not_found' } });
+      if (!(await removeWorkspace(ws.id))) return workspaces.has(ws.id) ? send(res, 409, { error: { code: 'workspace_task_in_progress' } }) : send(res, 404, { error: { code: 'workspace_not_found' } });
+      res.writeHead(204, { 'UHP-Version': VERSION }); return res.end();
+    }
     const overlayPath = url.pathname.match(/^\/extensions\/foreman-workspace\/v1\/workspaces\/([^/]+)\/overlay$/);
     if (req.method === 'POST' && overlayPath) {
       const ws = workspaces.get(decodeURIComponent(overlayPath[1]));
@@ -1321,7 +1434,7 @@ const server = createServer(async (req, res) => {
       const response = ws.responseId ? state.responses[ws.responseId] : undefined;
       if (response?.status === 'in_progress') return send(res, 409, { error: { code: 'workspace_task_in_progress' } });
       const b = await body(req);
-      const result = await overlayWorkspace(ws, b.entries);
+      const result = await withWorkspaceOp(ws, () => overlayWorkspace(ws, b.entries));
       return send(res, 200, { workspace_id: ws.id, applied: result.applied });
     }
     const snapshotPath = url.pathname.match(/^\/extensions\/foreman-workspace\/v1\/workspaces\/([^/]+)\/snapshot$/);
@@ -1330,7 +1443,7 @@ const server = createServer(async (req, res) => {
       if (!ws) return send(res, 404, { error: { code: 'workspace_not_found' } });
       const response = ws.responseId ? state.responses[ws.responseId] : undefined;
       if (response?.status === 'in_progress') return send(res, 409, { error: { code: 'workspace_task_in_progress' } });
-      const snapshot = await snapshotWorkspace(ws);
+      const snapshot = await withWorkspaceOp(ws, () => snapshotWorkspace(ws));
       if (ws.responseId && response?.status !== 'completed') {
         snapshot.complete = false;
         snapshot.errors.push({ path: '.', error: `task_status_${response?.status ?? 'unknown'}` });
@@ -1408,7 +1521,8 @@ const server = createServer(async (req, res) => {
       if (ws?.responseId) return send(res, 409, { error: { code: 'workspace_already_used' } });
       const id = `resp_${randomUUID()}`;
       const record = { id, object: 'response', status: 'in_progress', requested_model: b.model, metadata: { ...b.metadata, harness_id: h.id, ...(workspaceId ? { workspace_id: workspaceId } : {}) }, timeout_seconds: timeout, max_step: steps };
-      if (ws) { ws.responseId = id; state.workspaces[ws.id].responseId = id; }
+      if (ws) { ws.responseId = id; state.workspaces[ws.id].responseId = id; touchWorkspace(ws); }
+      touchWorkspace(workspaces.get(roWorkspaceId));
       state.keys[key] = id; state.responses[id] = record; const task = { response: record, finishListeners: new Set(), activity: [], activityTotal: 0, activityListeners: new Set(), activityRemainder: '' }; recordActivity(task, 'Preparing isolated runtime'); tasks.set(id, task);
       await persist(); // durable idempotency intent before spawning any CLI process
       runTask(record, b.input).catch(async error => { record.status = 'failed'; record.error = { message: 'CLI task failed internally' }; if(task.reviewerWorkDir) { await rm(task.reviewerWorkDir,{recursive:true,force:true}).catch(()=>undefined); task.reviewerWorkDir=undefined; } const ws = workspaces.get(record.metadata.workspace_id); if (ws) { record.metadata.execution_boundary = ws.boundary ?? { proven: false, error: 'execution_boundary_unavailable' }; record.metadata.execution_stage = ws.executionStage ?? 'task_setup'; if (ws.boundaryDiagnostic) record.metadata.execution_boundary_diagnostic = ws.boundaryDiagnostic; else if (/^boundary_probe_failed:/.test(String(error?.message))) record.metadata.execution_boundary_diagnostic = { category: String(error.message).split(':')[1] ?? 'probe_failed', exit_code: Number(String(error.message).split(':')[2]) || null, signal: null }; if (record.metadata.harness_id === 'codex-cli' && record.metadata.foreman_review_mode !== 'read_only') { record.metadata.cli_exit = { exit_code: null, signal: null }; record.metadata.cli_failure_category = record.metadata.execution_stage === 'resolve_auth' ? 'host_auth_unavailable' : record.metadata.execution_stage === 'boundary_probe' ? 'boundary_setup' : record.metadata.execution_stage === 'runtime_mount' ? 'runtime_setup' : 'cli_setup'; await rm(ws.codexHome, { recursive: true, force: true }).catch(() => undefined); } } await persist(); for (const finish of task.finishListeners) finish(); });
@@ -1475,6 +1589,7 @@ if (process.argv[2] === '--preflight-claude-runtime') {
   console.log(await preflightAgyRuntime());
 } else {
   await load();
+  if (WORKSPACE_TTL_MS) setInterval(() => sweepIdleWorkspaces().catch(() => undefined), Math.min(Math.max(WORKSPACE_TTL_MS / 4, 100), 600_000)).unref();
   server.on('error', error => { console.error(`local CLI UHP could not listen on 127.0.0.1:${PORT}: ${error.message}`); process.exit(1); });
   if (!AUTH_TOKEN) console.warn('WARNING: LOCAL_CLI_UHP_TOKEN is not set; this bridge accepts unauthenticated requests from any local process (set it to require "Authorization: Bearer <token>").');
   server.listen(PORT, '127.0.0.1', () => console.log(`experimental local CLI UHP listening on 127.0.0.1:${PORT}${AUTH_TOKEN ? ' (bearer token required)' : ''}`));

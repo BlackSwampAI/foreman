@@ -163,7 +163,22 @@ operation over a full commit SHA; requests do not accept a host path:
 - `POST /extensions/foreman-workspace/v1/workspaces` with
   `{"base_commit":"<full commit SHA>"}` seeds a fresh workspace from the
   configured source repository and returns its `workspace_id` and exact base.
+  Blobs are read with a single `git cat-file --batch` process (16 MiB per blob,
+  256 MiB total; a missing or oversized blob fails the seed and removes the
+  partial workspace).
 - Submit the Worker request with that `workspace_id` in response metadata.
+- `DELETE /extensions/foreman-workspace/v1/workspaces/{workspace_id}` removes
+  the workspace and its per-workspace directories (`204`; `404` for an unknown
+  id; `409` while a response is running in it or uses it as a read-only
+  workspace).
+- Cleanup is also automatic. At startup the bridge removes bridge-named entries
+  under `LOCAL_CLI_UHP_WORK` that no persisted state references (workspaces,
+  Reviewer scratch, preflight dirs, role-session state no stored response
+  points at); unrecognised files are left alone. Every 1/4 of
+  `LOCAL_CLI_UHP_WORKSPACE_TTL_MS` (default 24 h, `0` disables; checked at most
+  every 10 minutes) an unref'd timer removes workspaces with no running
+  response whose last use (seed, overlay, snapshot, submit, finish) is older
+  than the TTL. Removal never follows a symlink out of the work root.
 - `GET /extensions/foreman-workspace/v1/workspaces/{workspace_id}/snapshot`
   returns a complete tree, exact file bytes (base64) and SHA-256, Git mode,
   symlink target, and an explicit `errors` list. Dotfiles and instruction
