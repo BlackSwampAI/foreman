@@ -118,6 +118,15 @@ select option{background:var(--panel)}
 .repo-details[open]>summary{color:var(--text)}
 .repo-details-panel{position:absolute;z-index:30;top:26px;left:0;display:grid;gap:var(--sp-2);width:min(400px,80vw);padding:var(--sp-3);border:1px solid var(--line-strong);border-radius:var(--r-lg);background:var(--panel);box-shadow:0 12px 32px #0009;color:var(--dim);font-size:var(--fs-xs)}
 .repo-details-panel code{color:var(--text)}
+.repo-details>summary .bridge-badge{margin-left:var(--sp-2);vertical-align:middle}
+@media(max-width:1180px){.bridge-badge .bridge-word{display:none}}
+.bridge-notice{display:grid;gap:var(--sp-1);padding:var(--sp-2) var(--sp-3);border:1px solid var(--t-bd,var(--line));border-left-width:3px;border-radius:var(--r-md);background:var(--t-bg,var(--panel-2,var(--panel)));color:var(--dim);font-size:var(--fs-xs);overflow-wrap:anywhere}
+.bridge-notice.bridge-restarting{--t-fg:var(--warning-fg);--t-bg:var(--warning-bg);--t-bd:var(--warning-bd)}
+.bridge-notice.bridge-unavailable{--t-fg:var(--failed-fg);--t-bg:var(--failed-bg);--t-bd:var(--failed-bd)}
+.bridge-notice>b{color:var(--t-fg);font-size:var(--fs-sm)}
+.bridge-meta{color:var(--muted)}
+.bridge-log,.bridge-reopen{display:flex;align-items:center;flex-wrap:wrap;gap:var(--sp-2)}
+.bridge-log code{flex:1 1 0;min-width:0;padding:2px var(--sp-1);border-radius:var(--r-sm,4px);user-select:all;word-break:break-all}
 .project-switch{flex:none}
 .workspace-nav{display:flex;align-items:center;gap:2px;margin-left:auto;padding:2px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--well)}
 .workspace-nav button,.mobile-inspector-tabs button{height:var(--ctl-sm);padding:0 var(--sp-3);border:0;border-radius:var(--r-sm);background:transparent;color:var(--dim);font-size:var(--fs-sm);font-weight:500;white-space:nowrap}
