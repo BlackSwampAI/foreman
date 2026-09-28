@@ -72,7 +72,22 @@ provider-selection overrides are excluded. Do not set provider API keys for
 this experiment. State is stored at
 `LOCAL_CLI_UHP_STATE` (default `/tmp/local-cli-uhp-state.json`, mode 0600) and
 work directories under `LOCAL_CLI_UHP_WORK` (default `/tmp/local-cli-uhp-work`).
-The HTTP listener binds loopback only and has no authentication; keep it local.
+The HTTP listener binds loopback only.
+
+Authentication: set `LOCAL_CLI_UHP_TOKEN` (1-512 printable ASCII characters, no
+spaces) and every request, including `/v1/uhp` discovery and the workspace
+extension routes, must carry `Authorization: Bearer <token>`; a missing or wrong
+token gets `401` before any other work, compared in constant time. Without it
+the bridge accepts requests from any local process and prints a startup
+warning. Foreman starts its own bridges with a fresh random token per start. The
+token is removed from the bridge's environment, so the CLIs it spawns never see
+it. Independently of the token, the `Host` header must be `127.0.0.1:<port>`,
+`localhost:<port>` or `[::1]:<port>` (case-insensitive, one trailing dot
+tolerated) or the request gets `403`, which stops DNS-rebinding attacks. The
+smoke scripts in this directory send no token and need a bridge without one.
+If the port cannot be bound the bridge exits with status 1 and a message on
+stderr; Foreman's supervisor logs that output to `bridge.log` and treats it as a
+failed restart.
 
 ### Claude subscription usage
 

@@ -4,7 +4,7 @@
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { createHash } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile, readdir, lstat, readlink, realpath, rm, access, symlink, chmod, open } from 'node:fs/promises';
 import { accessSync, constants as fsConstants, readFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
@@ -20,6 +20,12 @@ import { readClaudeControlUsage } from './claude-quota.mjs';
 const VERSION = '2026-09-12';
 const utf8 = new TextDecoder('utf-8', { fatal: true });
 const PORT = Number(process.env.LOCAL_CLI_UHP_PORT ?? 8787);
+// Bearer-token authentication. When LOCAL_CLI_UHP_TOKEN is set, every request must carry it. The variable is
+// removed from the environment so nothing that inherits process.env can ever see it.
+const AUTH_TOKEN = (process.env.LOCAL_CLI_UHP_TOKEN ?? '').trim();
+delete process.env.LOCAL_CLI_UHP_TOKEN;
+if (AUTH_TOKEN && !/^[\x21-\x7e]{1,512}$/.test(AUTH_TOKEN)) throw new Error('LOCAL_CLI_UHP_TOKEN must be 1-512 printable ASCII characters without spaces');
+const AUTH_TOKEN_DIGEST = AUTH_TOKEN ? createHash('sha256').update(AUTH_TOKEN).digest() : undefined;
 const STATE = resolve(process.env.LOCAL_CLI_UHP_STATE ?? join(tmpdir(), 'local-cli-uhp-state.json'));
 const ROOT = resolve(process.env.LOCAL_CLI_UHP_WORK ?? join(tmpdir(), 'local-cli-uhp-work'));
 if (ROOT !== tmpdir() && !ROOT.startsWith(`${tmpdir()}/`)) throw new Error('LOCAL_CLI_UHP_WORK must be under the system temporary directory');
@@ -1283,8 +1289,25 @@ function safeAgyDiagnostic(stderr) {
   return 'no safe diagnostic details';
 }
 
+// DNS-rebinding guard: only accept the loopback names on the port this server is actually bound to.
+// Case-insensitive, and a single trailing dot on the name is tolerated ("localhost.:8787").
+function hostAllowed(header) {
+  const match = typeof header === 'string' ? /^(?:(?:127\.0\.0\.1|localhost)\.?|\[::1\]):(\d{1,5})$/i.exec(header) : null;
+  return !!match && Number(match[1]) === (server.address()?.port ?? PORT);
+}
+// Constant-time bearer check: compare SHA-256 digests so both timingSafeEqual inputs always have the same length.
+function tokenAccepted(header) {
+  if (!AUTH_TOKEN_DIGEST) return true;
+  const supplied = typeof header === 'string' ? /^Bearer +([\x21-\x7e]+)$/i.exec(header)?.[1] : undefined;
+  return timingSafeEqual(createHash('sha256').update(supplied ?? '').digest(), AUTH_TOKEN_DIGEST);
+}
+
 const server = createServer(async (req, res) => {
-  const url = new URL(req.url, 'http://localhost');
+  // Runs before routing, URL parsing and body handling, so a rejected request costs nothing and touches no state.
+  if (!hostAllowed(req.headers.host)) return send(res, 403, { error: { code: 'host_forbidden', message: 'Host must be 127.0.0.1, localhost or [::1] on the bridge port' } }, { connection: 'close' });
+  if (!tokenAccepted(req.headers.authorization)) return send(res, 401, { error: { code: 'unauthorized', message: 'A valid bearer token is required' } }, { 'www-authenticate': 'Bearer', connection: 'close' });
+  let url;
+  try { url = new URL(req.url, 'http://localhost'); } catch { return send(res, 400, { error: { code: 'invalid_url' } }); }
   try {
     if (req.method === 'GET' && url.pathname === '/v1/uhp') return send(res, 200, { protocol: 'uhp', versions: [VERSION], default_version: VERSION, implementation: { name: 'local-cli-uhp', experimental: true }, capabilities: { streaming: true, idempotency: true, sessions: true, cancellation: true, readOnlyReviewer: true, extensions: { foreman_workspace_bridge_v1: { version: 1, seed: !!SOURCE_REPO, complete_snapshot: true, execution_boundary: 'bubblewrap' } } } });
     if (req.method === 'POST' && url.pathname === '/extensions/foreman-workspace/v1/workspaces') {
@@ -1452,5 +1475,7 @@ if (process.argv[2] === '--preflight-claude-runtime') {
   console.log(await preflightAgyRuntime());
 } else {
   await load();
-  server.listen(PORT, '127.0.0.1', () => console.log(`experimental local CLI UHP listening on 127.0.0.1:${PORT}`));
+  server.on('error', error => { console.error(`local CLI UHP could not listen on 127.0.0.1:${PORT}: ${error.message}`); process.exit(1); });
+  if (!AUTH_TOKEN) console.warn('WARNING: LOCAL_CLI_UHP_TOKEN is not set; this bridge accepts unauthenticated requests from any local process (set it to require "Authorization: Bearer <token>").');
+  server.listen(PORT, '127.0.0.1', () => console.log(`experimental local CLI UHP listening on 127.0.0.1:${PORT}${AUTH_TOKEN ? ' (bearer token required)' : ''}`));
 }

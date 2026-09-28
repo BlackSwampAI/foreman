@@ -4,6 +4,8 @@ import { mkdtemp, writeFile, chmod, readFile, rm, truncate, mkdir, readdir, stat
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
+import { request as httpRequest } from 'node:http';
+import { createServer as createNetServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 
 await import('tsx/esm/api').then(({ register }) => register());
@@ -11,11 +13,14 @@ const { UhpClient } = await import('../../src/uhp.ts');
 const { Controller } = await import('../../src/controller.ts');
 const { JsonStore } = await import('../../src/store.ts');
 const { snapshotGitCommit } = await import('../../src/git-workspace.ts');
+const { seedBridgeWorkspace, fetchBridgeSnapshot, overlayBridgeWorkspace } = await import('../../src/verified-workspace.ts');
+const { bearerFetch } = await import('../../src/local-bridge.ts');
 const { verifyBridgeWorkspace, validateBridgeSnapshot } = await import('./workspace-verifier.mjs');
 const { createWorkspaceFixture, applyAllFileCaseChanges } = await import('./workspace-fixture.mjs');
 const { assertReviewerBounds, isPrepareOnly, REVIEWER_TASK_BOUNDS, REVIEWER_STREAM_INACTIVITY_TIMEOUT_MS, REVIEWER_BRIDGE_MAX_STEP } = await import('./reviewer-smoke-bounds.mjs');
 
 const here = dirname(fileURLToPath(import.meta.url));
+const BRIDGE_TOKEN = '0123456789abcdef'.repeat(4);
 const dirs = [];
 async function fixtureCli(dir, name, body) {
   const path = join(dir, name);
@@ -42,11 +47,17 @@ async function setup(t, options = {}) {
   if (options.noAgyModel) delete env.AGY_MODEL;
   if (!options.agyWorkerEffort) delete env.AGY_WORKER_EFFORT;
   if (options.agyEnabled) Object.assign(env,{AGY_CONFIG_DIR:join(dir,'agy-auth'),...(options.noAgyModel?{}:{AGY_MODEL:options.agyModel ?? 'gemini-3.8-flash-medium'}),AGY_BIN:agy});
-  let proc = spawn(process.execPath, [join(here, 'server.mjs')], { env, cwd: dir, stdio: 'ignore' });
+  // Tests run without a bridge token unless one is requested, whatever the developer's shell exports.
+  delete env.LOCAL_CLI_UHP_TOKEN;
+  if (options.token) env.LOCAL_CLI_UHP_TOKEN = options.token;
+  const authHeaders = options.token ? { authorization: `Bearer ${options.token}` } : {};
+  let output = '';
+  const startBridge = () => { const child = spawn(process.execPath, [join(here, 'server.mjs')], { env, cwd: dir, stdio: options.captureOutput ? ['ignore','pipe','pipe'] : 'ignore' }); if (options.captureOutput) for (const stream of [child.stdout, child.stderr]) stream.on('data', chunk => { output += chunk; }); return child; };
+  let proc = startBridge();
   t.after(async () => { if (proc.exitCode === null) { proc.kill('SIGTERM'); await new Promise(r => proc.once('exit', r)); } await rm(dir, { recursive: true, force: true }); });
   const base = `http://127.0.0.1:${port}`;
-  for (let i=0;i<100;i++) { try { const r=await fetch(`${base}/v1/uhp`); if(r.ok) break; } catch {} await new Promise(r=>setTimeout(r,20)); }
-  return { base, dir, env, baseCommit: options.baseCommit ?? fixture?.baseCommit, sourceRepo: options.sourceRepo ?? fixture?.repo, countFor: workspaceId=>join(env.LOCAL_CLI_UHP_WORK,workspaceId,'.fixture-cli-count'), restart: async () => { proc.kill('SIGTERM'); await new Promise(r => proc.once('exit', r)); proc = spawn(process.execPath, [join(here, 'server.mjs')], { env, cwd: dir, stdio: 'ignore' }); for(let i=0;i<100;i++){try{if((await fetch(`${base}/v1/uhp`)).ok)break;}catch{} await new Promise(r=>setTimeout(r,20));} } };
+  for (let i=0;i<250&&proc.exitCode===null;i++) { try { const r=await fetch(`${base}/v1/uhp`, { headers: authHeaders }); if(r.ok) break; } catch {} await new Promise(r=>setTimeout(r,20)); }
+  return { base, dir, env, port, token: options.token, authHeaders, output: () => output, baseCommit: options.baseCommit ?? fixture?.baseCommit, sourceRepo: options.sourceRepo ?? fixture?.repo, countFor: workspaceId=>join(env.LOCAL_CLI_UHP_WORK,workspaceId,'.fixture-cli-count'), restart: async () => { proc.kill('SIGTERM'); await new Promise(r => proc.once('exit', r)); proc = startBridge(); for(let i=0;i<250&&proc.exitCode===null;i++){try{if((await fetch(`${base}/v1/uhp`, { headers: authHeaders })).ok)break;}catch{} await new Promise(r=>setTimeout(r,20));} } };
 }
 async function submit(base, harness, model, key, baseCommit, workspaceId, input = 'Say bounded answer') {
   const seeded=workspaceId ? {workspace_id:workspaceId} : await (await fetch(`${base}/extensions/foreman-workspace/v1/workspaces`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({base_commit:baseCommit})})).json();
@@ -625,16 +636,17 @@ test('tool-enabled child cannot read or write outside its seeded workspace', asy
   assert.equal(evidence.validation,'verified_by_foreman_git_comparison');
 });
 
-test('Codex Worker edits only its seeded workspace; Foreman verifies the complete snapshot and validates it', async t => {
+// The full Foreman-to-bridge Worker flow, with or without a bridge token (Foreman wires it as server.ts does for a project bridge).
+async function codexWorkerFlow(t, token) {
   const fixture = await createWorkspaceFixture(); t.after(fixture.cleanup);
   const parent = await mkdtemp(join(tmpdir(),'foreman-codex-boundary-')); t.after(()=>rm(parent,{recursive:true,force:true}));
   const sentinel=join(parent,'outside-sentinel'); await writeFile(sentinel,'FOREMAN-CODEX-OUTSIDE-SENTINEL');
   const codexBody = `import {readFileSync,writeFileSync} from 'node:fs'; const path=${JSON.stringify(sentinel)}; let read='allowed',write='allowed'; try{readFileSync(path,'utf8')}catch{read='denied'} try{writeFileSync(path,'CHANGED')}catch{write='denied'} writeFileSync('README.md',${JSON.stringify('# Fixture\n\nCodex changed the assigned README.\n')}); writeFileSync('.boundary-result.json',JSON.stringify({read,write})); console.log(JSON.stringify({type:'thread.started',thread_id:'codex-worker-thread'})); console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'Updated README.md in the assigned workspace.'}})); console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:11,output_tokens:7}}));`;
   const claudeBody=`let prompt='';process.stdin.setEncoding('utf8');process.stdin.on('data',chunk=>prompt+=chunk);process.stdin.on('end',()=>{const model='claude-actual';const result=prompt.includes('"workerTask"')&&prompt.includes('"targetFiles"')?JSON.stringify({workerTask:'Change README.md with one short sentence.',targetFiles:['README.md']}):'Planner recommends a concise README note.';console.log(JSON.stringify({type:'system',subtype:'init',model,session_id:'judgment-session'}));console.log(JSON.stringify({type:'result',subtype:'success',result,model,session_id:'judgment-session',usage:{input_tokens:5,output_tokens:2}}));});`;
-  const {base,env}=await setup(t,{sourceRepo:fixture.repo,baseCommit:fixture.baseCommit,codexBody,claudeBody});
-  const uhp = new UhpClient({baseUrl:base,timeoutMs:20_000});
+  const {base,env}=await setup(t,{sourceRepo:fixture.repo,baseCommit:fixture.baseCommit,codexBody,claudeBody,...(token?{token}:{})});
+  const uhp = new UhpClient({baseUrl:base,timeoutMs:20_000,...(token?{token,fetch:bearerFetch(token)}:{})});
   const controller = new Controller(new JsonStore(join(parent,'foreman-state.json')),uhp,false,true);
-  controller.configureVerifiedWorkspace({repoPath:fixture.repo,allowedScope:['README.md','.boundary-result.json'],commands:[{name:'assert verified README content',command:process.execPath,args:['-e',`const fs=require('node:fs');if(fs.readFileSync('README.md','utf8')!=='# Fixture\\n\\nCodex changed the assigned README.\\n')process.exit(1)`]}],bridgeBaseUrl:base,timeoutMs:10_000,maxOutputBytes:2_000});
+  controller.configureVerifiedWorkspace({repoPath:fixture.repo,allowedScope:['README.md','.boundary-result.json'],commands:[{name:'assert verified README content',command:process.execPath,args:['-e',`const fs=require('node:fs');if(fs.readFileSync('README.md','utf8')!=='# Fixture\\n\\nCodex changed the assigned README.\\n')process.exit(1)`]}],bridgeBaseUrl:base,timeoutMs:10_000,maxOutputBytes:2_000,...(token?{bridgeToken:token}:{})});
   await controller.refreshDiscovery();
   const project=await controller.createProject('Codex disposable workspace fixture');
   const task=await controller.createTask(project.id,'Edit the assigned README');
@@ -683,7 +695,9 @@ test('Codex Worker edits only its seeded workspace; Foreman verifies the complet
   assert.equal(await readFile(sentinel,'utf8'),'FOREMAN-CODEX-OUTSIDE-SENTINEL');
   const boundary=JSON.parse(await readFile(join(env.LOCAL_CLI_UHP_WORK,stored.workspaceId,'.boundary-result.json'),'utf8'));
   assert.deepEqual(boundary,{read:'denied',write:'denied'});
-});
+}
+test('Codex Worker edits only its seeded workspace; Foreman verifies the complete snapshot and validates it', t => codexWorkerFlow(t));
+test('the same Worker flow works end to end against a token-protected bridge, with the token on every Foreman-to-bridge call', t => codexWorkerFlow(t, BRIDGE_TOKEN));
 
 test('failed boundary probe blocks the tool-enabled CLI before spawn', async t => {
   const fixture = await createWorkspaceFixture(); t.after(fixture.cleanup);
@@ -912,4 +926,127 @@ test('activity SSE emits contiguous ordered events and bounds sanitized summarie
   const summaries=activities.map(item=>item.response.activity.summary);
   assert.ok(summaries.every(summary=>summary.length<=200&&!/[\u0000-\u001f\u007f-\u009f]/.test(summary)));
   assert.equal(activities.every(item=>item.response.status==='in_progress'),true);
+});
+
+// ---- Bearer-token authentication and Host validation ----
+// fetch() will not let a caller choose the Host header, so these tests speak raw HTTP.
+function rawRequest(port, { method = 'GET', path = '/', headers = {}, body } = {}) {
+  return new Promise((resolveRequest, reject) => {
+    const req = httpRequest({ host: '127.0.0.1', port, method, path, headers, setHost: false }, res => {
+      let text = ''; res.setEncoding('utf8'); res.on('data', chunk => { text += chunk; }); res.on('end', () => resolveRequest({ status: res.statusCode, headers: res.headers, text }));
+    });
+    req.on('error', reject); req.end(body);
+  });
+}
+const jsonHeaders = { 'content-type': 'application/json' };
+function protectedRoutes(baseCommit) {
+  const workspace = 'ws_00000000-0000-0000-0000-000000000000';
+  const seed = JSON.stringify({ base_commit: baseCommit });
+  const submission = JSON.stringify({ input: 'unauthenticated prompt', model: 'claude-requested', metadata: { harness_id: 'claude-code' }, timeout_seconds: 5, max_step: 1 });
+  return [
+    ['GET', '/v1/uhp'], ['GET', '/v1/harnesses'], ['GET', '/v1/harnesses/claude-code/models'], ['GET', '/v1/usage'],
+    ['POST', '/extensions/foreman-workspace/v1/workspaces', seed],
+    ['GET', `/extensions/foreman-workspace/v1/workspaces/${workspace}/snapshot`],
+    ['POST', `/extensions/foreman-workspace/v1/workspaces/${workspace}/overlay`, JSON.stringify({ entries: [] })],
+    ['POST', '/v1/responses', submission, { 'idempotency-key': 'unauthenticated-key' }],
+    ['GET', '/v1/responses/resp_00000000-0000-0000-0000-000000000000'],
+    ['POST', '/v1/responses/resp_00000000-0000-0000-0000-000000000000/cancel', '{}'],
+  ];
+}
+
+test('with LOCAL_CLI_UHP_TOKEN set, a missing or wrong bearer token gets 401 on every route before any work', async t => {
+  const { port, env, token, baseCommit } = await setup(t, { token: BRIDGE_TOKEN });
+  const wrong = [undefined, 'Bearer', 'Bearer ', 'Bearer wrong', `Bearer ${token.slice(0, -1)}`, `Bearer ${token}x`, `Bearer ${token.toUpperCase()}`, `Basic ${token}`, token, `Bearer ${token} ${token}`];
+  for (const [method, path, body, extra] of protectedRoutes(baseCommit)) for (const authorization of wrong) {
+    const response = await rawRequest(port, { method, path, body, headers: { host: `127.0.0.1:${port}`, ...(body ? jsonHeaders : {}), ...extra, ...(authorization === undefined ? {} : { authorization }) } });
+    const label = `${method} ${path} with ${authorization === undefined ? 'no Authorization' : JSON.stringify(authorization.replace(token, '<token>'))}`;
+    assert.equal(response.status, 401, label);
+    assert.equal(JSON.parse(response.text).error.code, 'unauthorized', label);
+    assert.equal(response.headers['www-authenticate'], 'Bearer', label);
+    assert.ok(!response.text.includes(token), label);
+  }
+  // Nothing behind the rejected requests ran: no workspace was seeded and no idempotency intent was persisted.
+  assert.deepEqual((await readdir(env.LOCAL_CLI_UHP_WORK)).filter(name => name.startsWith('ws_')), []);
+  await assert.rejects(stat(env.LOCAL_CLI_UHP_STATE), { code: 'ENOENT' });
+});
+
+test('the right bearer token unlocks discovery, seeding, snapshots, usage and submissions through Foreman clients', async t => {
+  const claudeBody = `process.stdin.resume();process.stdin.on('end',()=>{console.log(JSON.stringify({type:'system',subtype:'init',model:'claude-requested',session_id:'token-session'}));console.log(JSON.stringify({type:'result',subtype:'success',result:'authorized answer',model:'claude-requested',session_id:'token-session',usage:{input_tokens:1,output_tokens:1}}));});`;
+  const { base, authHeaders, token, baseCommit } = await setup(t, { token: BRIDGE_TOKEN, claudeBody });
+  const discovery = await fetch(`${base}/v1/uhp`, { headers: { authorization: `bEaReR ${token}` } });
+  assert.equal(discovery.status, 200); assert.equal((await discovery.json()).implementation.name, 'local-cli-uhp');
+  assert.equal((await fetch(`${base}/v1/usage`, { headers: authHeaders })).status, 200);
+  // The Foreman workspace helpers: seed, overlay and read the snapshot back, all with the token.
+  const seeded = await seedBridgeWorkspace(base, baseCommit, { token });
+  assert.equal(seeded.baseCommit, baseCommit);
+  const overlay = await overlayBridgeWorkspace(base, seeded.workspaceId, [{ path: 'README.md', contentBase64: Buffer.from('overlaid\n').toString('base64'), mode: '100644' }], { token });
+  assert.equal(overlay.applied, 1);
+  const snapshot = await fetchBridgeSnapshot(base, seeded.workspaceId, baseCommit, { token });
+  assert.equal(snapshot.complete, true); assert.ok(snapshot.entries.length > 0);
+  assert.equal(Buffer.from(snapshot.entries.find(entry => entry.path === 'README.md').contentBase64, 'base64').toString('utf8'), 'overlaid\n');
+  // Without the token, or with a wrong one, the same helpers surface a 401 and never echo the token.
+  for (const call of [() => seedBridgeWorkspace(base, baseCommit), () => overlayBridgeWorkspace(base, seeded.workspaceId, []), () => fetchBridgeSnapshot(base, seeded.workspaceId, baseCommit), () => seedBridgeWorkspace(base, baseCommit, { token: `${token}0` })]) {
+    await assert.rejects(call, error => /\(401\)/.test(error.message) && !error.message.includes(token));
+  }
+  // Foreman's client for the bridge (see createProjectRuntime): the token rides on every call, discovery included.
+  const input = { submissionId: 'sub-token', assignmentId: 'asg-token', runId: 'run-token', roleId: 'planner', taskId: 'task-token', projectId: 'prj-token', prompt: 'Reply once.', config: { harnessId: 'claude-code', model: 'claude-requested', timeoutSeconds: 5 }, idempotencyKey: 'token-submit-key' };
+  const authorized = new UhpClient({ baseUrl: base, token, fetch: bearerFetch(token), harnessId: 'claude-code', model: 'claude-requested' });
+  assert.equal((await authorized.discover()).version, '2026-09-12');
+  assert.equal((await authorized.submit(input)).outputText, 'authorized answer');
+  await assert.rejects(new UhpClient({ baseUrl: base, harnessId: 'claude-code', model: 'claude-requested' }).submit(input), /UHP request failed \(401\): unauthorized/);
+  await assert.rejects(new UhpClient({ baseUrl: base, token: `${token}0`, fetch: bearerFetch(`${token}0`), harnessId: 'claude-code', model: 'claude-requested' }).discover(), /UHP request failed \(401\): unauthorized/);
+});
+
+for (const withToken of [false, true]) test(`a foreign Host header gets 403 ${withToken ? 'even with the right token' : 'when no token is configured'}; loopback names on the bridge port are accepted`, async t => {
+  const { port, authHeaders, baseCommit } = await setup(t, { token: withToken ? BRIDGE_TOKEN : undefined });
+  const foreign = [`evil.example:${port}`, 'evil.example', '127.0.0.1', 'localhost', '[::1]', `127.0.0.1:${port + 1}`, `localhost:${port}0`, `localhost.evil.example:${port}`, `127.0.0.1.evil.example:${port}`, `0.0.0.0:${port}`, `[::2]:${port}`, `::1:${port}`, `localhost..:${port}`, `user@localhost:${port}`];
+  for (const host of foreign) for (const [method, path, body, extra] of protectedRoutes(baseCommit).filter((_, index) => index % 3 === 0)) {
+    const label = `Host ${JSON.stringify(host)} ${method} ${path}`;
+    const response = await rawRequest(port, { method, path, body, headers: { host, ...authHeaders, ...(body ? jsonHeaders : {}), ...extra } });
+    assert.equal(response.status, 403, label); assert.equal(JSON.parse(response.text).error.code, 'host_forbidden', label);
+  }
+  // A foreign Host is refused before the missing or wrong token is even considered.
+  if (withToken) for (const authorization of [undefined, 'Bearer wrong']) assert.equal((await rawRequest(port, { path: '/v1/uhp', headers: { host: `evil.example:${port}`, ...(authorization ? { authorization } : {}) } })).status, 403);
+  for (const host of [`127.0.0.1:${port}`, `localhost:${port}`, `LOCALHOST:${port}`, `LocalHost.:${port}`, `127.0.0.1.:${port}`, `[::1]:${port}`]) {
+    const response = await rawRequest(port, { path: '/v1/uhp', headers: { host, ...authHeaders } });
+    assert.equal(response.status, 200, host); assert.equal(JSON.parse(response.text).protocol, 'uhp');
+  }
+});
+
+test('the bridge warns once at startup when unauthenticated, stays quiet when a token is set, and never prints the token', async t => {
+  const waitForListening = async bridge => { for (let i = 0; i < 500 && !/listening on/.test(bridge.output()); i++) await new Promise(r => setTimeout(r, 20)); assert.match(bridge.output(), /listening on/, 'the bridge never reported that it is listening'); };
+  const open = await setup(t, { captureOutput: true }); await waitForListening(open);
+  assert.equal(open.output().split('\n').filter(line => line.includes('WARNING: LOCAL_CLI_UHP_TOKEN is not set')).length, 1, open.output());
+  assert.equal((await fetch(`${open.base}/v1/uhp`)).status, 200); // still serves unauthenticated requests in the documented manual mode
+  const secured = await setup(t, { token: BRIDGE_TOKEN, captureOutput: true }); await waitForListening(secured);
+  assert.match(secured.output(), /listening on 127\.0\.0\.1:\d+ \(bearer token required\)/);
+  assert.doesNotMatch(secured.output(), /WARNING/); assert.ok(!secured.output().includes(BRIDGE_TOKEN));
+});
+
+test('an unusable token or an occupied port stops the bridge at startup without printing the token', async () => {
+  const badToken = 'bad token with spaces';
+  const bad = spawn(process.execPath, [join(here, 'server.mjs')], { env: { ...process.env, LOCAL_CLI_UHP_TOKEN: badToken, LOCAL_CLI_UHP_WORK: join(tmpdir(), `local-cli-uhp-bad-token-${process.pid}`) }, stdio: ['ignore', 'pipe', 'pipe'] });
+  let badOutput = ''; for (const stream of [bad.stdout, bad.stderr]) stream.on('data', chunk => { badOutput += chunk; });
+  assert.equal(await new Promise(resolveCode => bad.once('exit', resolveCode)), 1);
+  assert.match(badOutput, /LOCAL_CLI_UHP_TOKEN must be 1-512 printable ASCII characters without spaces/); assert.ok(!badOutput.includes(badToken));
+  // A restart that cannot rebind its port must exit promptly with a diagnostic so a supervisor can count it as a failure.
+  const holder = createNetServer(); await new Promise(resolveListen => holder.listen(0, '127.0.0.1', resolveListen));
+  const dir = await mkdtemp(join(tmpdir(), 'local-cli-uhp-port-')); dirs.push(dir);
+  try {
+    const busy = spawn(process.execPath, [join(here, 'server.mjs')], { env: { ...process.env, LOCAL_CLI_UHP_PORT: String(holder.address().port), LOCAL_CLI_UHP_STATE: join(dir, 'state.json'), LOCAL_CLI_UHP_WORK: join(dir, 'work') }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let busyOutput = ''; for (const stream of [busy.stdout, busy.stderr]) stream.on('data', chunk => { busyOutput += chunk; });
+    assert.equal(await new Promise(resolveCode => busy.once('exit', resolveCode)), 1);
+    assert.match(busyOutput, /could not listen on 127\.0\.0\.1:\d+: .*EADDRINUSE/);
+  } finally { holder.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('an authenticated request with a malformed URL is rejected without crashing the bridge, and CLI children never see the token', async t => {
+  const claudeBody = `process.stdin.resume();process.stdin.on('end',()=>{const seen=Object.entries(process.env).some(([name,value])=>/TOKEN/i.test(name)||String(value).includes(${JSON.stringify(BRIDGE_TOKEN)}));console.log(JSON.stringify({type:'system',subtype:'init',model:'claude-requested',session_id:'env-session'}));console.log(JSON.stringify({type:'result',subtype:'success',result:'token_visible='+seen+';env_entries='+(Object.keys(process.env).length>0),model:'claude-requested',session_id:'env-session',usage:{input_tokens:1,output_tokens:1}}));});`;
+  const { base, port, token, authHeaders } = await setup(t, { token: BRIDGE_TOKEN, claudeBody });
+  const malformed = await rawRequest(port, { path: '//[', headers: { host: `127.0.0.1:${port}`, ...authHeaders } });
+  assert.equal(malformed.status, 400); assert.equal(JSON.parse(malformed.text).error.code, 'invalid_url');
+  assert.equal((await fetch(`${base}/v1/uhp`, { headers: authHeaders })).status, 200);
+  const client = new UhpClient({ baseUrl: base, token, fetch: bearerFetch(token), harnessId: 'claude-code', model: 'claude-requested' });
+  const result = await client.submit({ submissionId: 'sub-env', assignmentId: 'asg-env', runId: 'run-env', roleId: 'planner', taskId: 'task-env', projectId: 'prj-env', prompt: 'Report your environment.', config: { harnessId: 'claude-code', model: 'claude-requested', timeoutSeconds: 5 }, idempotencyKey: 'token-env-key' });
+  assert.equal(result.outputText, 'token_visible=false;env_entries=true');
 });
