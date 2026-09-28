@@ -19,6 +19,7 @@ export class JsonStore extends EventEmitter {
       const parsed = JSON.parse(await readFile(this.filePath, 'utf8')) as State;
       if (parsed.version !== 1 || !Array.isArray(parsed.projects) || !Array.isArray(parsed.roles) || !Array.isArray(parsed.events)) throw new Error('Unsupported or corrupt Foreman data file');
       this.state = parsed;
+      this.sequenceEvents(this.state);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       await this.persist(this.state);
@@ -35,7 +36,6 @@ export class JsonStore extends EventEmitter {
     let result!: T;
     const next = this.queue.then(async () => {
       const draft = structuredClone(this.state);
-      const prevLen = this.state.events.length;
       let succeeded = false;
       try {
         result = await fn(draft);
@@ -44,6 +44,7 @@ export class JsonStore extends EventEmitter {
         this.pendingCount--;
         if (succeeded) {
           // Apply draft; persist now if we are the last queued mutation, otherwise mark dirty.
+          const sequenced = this.sequenceEvents(draft);
           this.state = draft;
           if (this.pendingCount === 0) {
             await this.persist(this.state);
@@ -51,9 +52,7 @@ export class JsonStore extends EventEmitter {
           } else {
             this.dirty = true;
           }
-          if (this.state.events.length > prevLen) {
-            this.emit('mutation', this.state.events.slice(prevLen) as Event[]);
-          }
+          if (sequenced.length) this.emit('mutation', sequenced);
         } else if (this.pendingCount === 0 && this.dirty) {
           // This mutation failed but it is the last queued; flush prior successful mutations' state.
           await this.persist(this.state).catch(() => undefined);
@@ -64,6 +63,16 @@ export class JsonStore extends EventEmitter {
     this.queue = next.catch(() => undefined);
     await next;
     return result;
+  }
+
+  // Give every unsequenced event the next value of the persisted counter. Deleting events never rewinds it.
+  private sequenceEvents(state: State): Event[] {
+    let counter = state.eventSeq ?? 0;
+    for (const event of state.events) if (event.seq !== undefined && event.seq > counter) counter = event.seq;
+    const sequenced: Event[] = [];
+    for (const event of state.events) if (event.seq === undefined) { event.seq = ++counter; sequenced.push(event); }
+    if (counter !== (state.eventSeq ?? 0)) state.eventSeq = counter;
+    return sequenced;
   }
 
   /** Flush any in-memory state not yet written to disk. Call during graceful shutdown. */

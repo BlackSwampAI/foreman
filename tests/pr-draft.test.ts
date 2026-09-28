@@ -26,6 +26,10 @@ async function makePromotedRun(options: {
   plannerFails?: boolean;
   withEvidence?: boolean;
   withReviewer?: boolean;
+  criteria?: string[];
+  reviewDiff?: string;
+  changedPaths?: string[];
+  submissions?: Array<{ prompt: string }>;
 } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'foreman-prdraft-'));
   dirs.push(root);
@@ -35,7 +39,8 @@ async function makePromotedRun(options: {
     body: '## Summary\n\n- Added feature X\n- Fixed edge case',
   });
   const uhp: UhpAdapter = {
-    submit: async () => {
+    submit: async input => {
+      options.submissions?.push(input);
       if (options.plannerFails) throw new Error('UHP unavailable');
       return { externalId: 'ext-draft', status: 'completed', outputText: uhpOutput };
     },
@@ -63,7 +68,7 @@ async function makePromotedRun(options: {
     id: projectId, name: 'PR Draft Project', status: 'active',
     defaultRoleConfigs: {}, createdAt: stamp, tasks: [{
       id: taskId, title: 'Add feature X', goal: 'Implement feature X to solve the problem',
-      validationCriteria: ['Feature X works correctly'], status: 'completed', createdAt: stamp,
+      validationCriteria: options.criteria ?? ['Feature X works correctly'], status: 'completed', createdAt: stamp,
       runs: [{
         id: runId, status: 'awaiting_approval', createdAt: stamp,
         sessions: {} as any, sessionHistory: [], roleConfigs: {},
@@ -74,8 +79,8 @@ async function makePromotedRun(options: {
           responseId: 'resp_worker-1', pinnedBaseCommit: baseCommit,
           completeSnapshot: { reportedComplete: true, reportedErrors: 0, entryCount: 2 },
           scopeVerified: true, allowedScope: ['src/'], entries: [],
-          changes: [{ path: 'src/feature.ts', kind: 'add' }, { path: 'src/index.ts', kind: 'modify' }],
-          reviewDiff: 'diff --git a/src/feature.ts b/src/feature.ts\n+export function featureX() {}\n',
+          changes: (options.changedPaths ?? ['src/feature.ts', 'src/index.ts']).map((path, i) => ({ path, kind: i === 0 ? 'add' : 'modify' })),
+          reviewDiff: options.reviewDiff ?? 'diff --git a/src/feature.ts b/src/feature.ts\n+export function featureX() {}\n',
           acceptance: 'not_decided' as const,
         } : undefined,
         validation: checks.length ? {
@@ -104,6 +109,8 @@ async function makePromotedRun(options: {
   return { store, controller, runId, resultCommit };
 }
 
+const draftEvent = async (store: JsonStore) => (await store.load()).events.filter(e => e.type === 'github.pr_draft_generated').at(-1)!;
+
 describe('PR draft generation', () => {
   it('generates title and body from planner output and appends deterministic Verification section', async () => {
     const { controller, runId, resultCommit } = await makePromotedRun({
@@ -128,7 +135,7 @@ describe('PR draft generation', () => {
   });
 
   it('falls back to a deterministic template when model output is invalid', async () => {
-    const { controller, runId } = await makePromotedRun({
+    const { store, controller, runId } = await makePromotedRun({
       withEvidence: true,
       plannerOutput: 'not valid json at all',
     });
@@ -136,13 +143,43 @@ describe('PR draft generation', () => {
     expect(draft.source).toBe('template');
     expect(draft.title).toBeTruthy();
     expect(draft.body).toContain('## Summary');
+    expect(draft.fallbackReason).toContain('not a JSON object');
+    expect((await draftEvent(store)).data).toMatchObject({ source: 'template', fallbackReason: draft.fallbackReason });
   });
 
-  it('falls back to template when UHP fails', async () => {
-    const { controller, runId } = await makePromotedRun({ plannerFails: true });
+  it('falls back to template when UHP fails and records why', async () => {
+    const { store, controller, runId } = await makePromotedRun({ plannerFails: true });
     const draft = await controller.generatePrDraft(runId);
     expect(draft.source).toBe('template');
     expect(draft.title).toBeTruthy();
+    expect(draft.fallbackReason).toContain('UHP unavailable');
+    expect((await draftEvent(store)).data.fallbackReason).toBe(draft.fallbackReason);
+    expect((await store.load()).projects[0]!.tasks[0]!.runs[0]!.prDraft?.fallbackReason).toBe(draft.fallbackReason);
+  });
+
+  it('records no fallback reason for a Planner-written draft', async () => {
+    const { store, controller, runId } = await makePromotedRun();
+    const draft = await controller.generatePrDraft(runId);
+    expect(draft.source).toBe('planner');
+    expect(draft.fallbackReason).toBeUndefined();
+    expect((await draftEvent(store)).data).not.toHaveProperty('fallbackReason');
+  });
+
+  it('bounds the prompt below the UHP limit however large the criteria, changed files and diff are', async () => {
+    const submissions: Array<{ prompt: string }> = [];
+    const { controller, runId } = await makePromotedRun({
+      withEvidence: true,
+      withReviewer: true,
+      submissions,
+      criteria: Array.from({ length: 400 }, (_, i) => `Criterion ${i}: ${'c'.repeat(290)}`),
+      changedPaths: Array.from({ length: 80 }, (_, i) => `src/${'deeply/nested/'.repeat(120)}file-${i}.ts`),
+      reviewDiff: 'diff --git a/x b/x\n' + '+added line\n'.repeat(20_000),
+    });
+    const draft = await controller.generatePrDraft(runId);
+    expect(submissions).toHaveLength(1);
+    expect(Buffer.byteLength(submissions[0]!.prompt, 'utf8')).toBeLessThanOrEqual(15_000);
+    expect(submissions[0]!.prompt).toContain('Criterion 0:');
+    expect(draft.source).toBe('planner');
   });
 
   it('clamps title to 72 characters', async () => {

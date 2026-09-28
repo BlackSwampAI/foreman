@@ -10,7 +10,7 @@ export interface RepoDigestOptions {
   commit: string; // full 40-char SHA
   allowedScope: string[];
   keywords?: string[];
-  maxBytes?: number; // default 24 * 1024
+  maxBytes?: number; // strict upper bound on the UTF-8 size of `text`; default 24 * 1024
 }
 
 /** Result of building a repository digest. */
@@ -25,6 +25,43 @@ const BINARY_EXT = /\.(png|jpg|jpeg|gif|ico|svg|webp|woff|woff2|ttf|otf|eot|mp3|
 const SKIP_DIRS = /^(?:node_modules|dist|build|\.git|coverage|\.next|\.nuxt|__pycache__|\.mypy_cache|\.pytest_cache|vendor|\.vendor)(?:\/|$)/;
 
 const decoder = new TextDecoder('utf-8', { fatal: false });
+
+const MIN_SECTION_BYTES = 200;
+const byteLength = (text: string): number => Buffer.byteLength(text, 'utf8');
+
+/** Cut `text` to at most `maxBytes` UTF-8 bytes without splitting a code point. */
+function truncateUtf8(text: string, maxBytes: number): string {
+  if (maxBytes <= 0) return '';
+  const buf = Buffer.from(text, 'utf8');
+  if (buf.length <= maxBytes) return text;
+  let end = maxBytes;
+  while (end > 0 && (buf[end]! & 0xc0) === 0x80) end--;
+  return buf.subarray(0, end).toString('utf8');
+}
+
+/** Clip a newline-terminated section to `maxBytes`, marking the cut. Sections with too little room to be useful are dropped. */
+function clipSection(text: string, maxBytes: number): string {
+  if (byteLength(text) <= maxBytes) return text;
+  return maxBytes < MIN_SECTION_BYTES ? '' : `${truncateUtf8(text, maxBytes - 4)}…\n`;
+}
+
+/** Fit the tree listing to `maxBytes` by dropping trailing lines instead of the whole tree. */
+function fitTree(header: string, listing: string, maxBytes: number): string {
+  const full = `${header}${listing}\n`;
+  if (byteLength(full) <= maxBytes) return full;
+  const lines = listing ? listing.split('\n') : [];
+  const note = (omitted: number) => `… ${omitted} more tree lines omitted\n`;
+  let used = byteLength(header) + byteLength(note(lines.length));
+  if (used > maxBytes) return '';
+  const kept: string[] = [];
+  for (const line of lines) {
+    const bytes = byteLength(line) + 1;
+    if (used + bytes > maxBytes) break;
+    kept.push(line);
+    used += bytes;
+  }
+  return `${header}${kept.map(line => `${line}\n`).join('')}${note(lines.length - kept.length)}`;
+}
 
 async function gitCommand(repoPath: string, args: string[], timeoutMs = 15_000, maxBytes = 4 * 1024 * 1024): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -114,22 +151,11 @@ export async function buildRepoDigest(options: RepoDigestOptions): Promise<RepoD
   // Filter to allowed scope
   const scopedEntries = allowedScope.length ? allEntries.filter(e => scopeContainsPath(e.path, allowedScope)) : allEntries;
 
-  const parts: string[] = [];
-  let usedBytes = 0;
+  const budget = Math.max(0, Math.floor(maxBytes));
+  const MAX_HIT_BYTES = 6 * 1024;
 
-  function addSection(text: string): boolean {
-    const bytes = Buffer.byteLength(text, 'utf8');
-    if (usedBytes + bytes > maxBytes) return false;
-    parts.push(text);
-    usedBytes += bytes;
-    return true;
-  }
-
-  // --- File tree (paths only, depth-limited with counts) ---
-  const treeText = buildTreeListing(scopedEntries, 400);
-  addSection(`## Repository file tree (allowed scope: ${allowedScope.join(', ') || 'all'})\n${treeText}\n`);
-
-  // --- package.json ---
+  // package.json and README are read first so the tree can be sized from what they leave; each is capped to a share of the budget.
+  let pkgText = '';
   const pkgEntry = allEntries.find(e => e.path === 'package.json');
   if (pkgEntry) {
     try {
@@ -139,23 +165,31 @@ export async function buildRepoDigest(options: RepoDigestOptions): Promise<RepoD
       const scripts = parsed.scripts && typeof parsed.scripts === 'object' ? Object.keys(parsed.scripts as object).join(', ') : '';
       const deps = parsed.dependencies && typeof parsed.dependencies === 'object' ? Object.keys(parsed.dependencies as object).join(', ') : '';
       const devDeps = parsed.devDependencies && typeof parsed.devDependencies === 'object' ? Object.keys(parsed.devDependencies as object).join(', ') : '';
-      const pkgSummary = `## package.json summary\nname: ${name}\nscripts: ${scripts||'(none)'}\ndependencies: ${deps||'(none)'}\ndevDependencies: ${devDeps||'(none)'}\n`;
-      addSection(pkgSummary);
+      pkgText = clipSection(`## package.json summary\nname: ${name}\nscripts: ${scripts||'(none)'}\ndependencies: ${deps||'(none)'}\ndevDependencies: ${devDeps||'(none)'}\n`, Math.floor(budget * 0.15));
     } catch { /* skip if parse fails */ }
   }
 
-  // --- README first ~60 lines ---
+  let readmeText = '';
   const readmeEntry = allEntries.find(e => /^README(?:\.[a-z]+)?$/i.test(e.path));
   if (readmeEntry) {
     try {
       const raw = await gitCommand(repoPath, ['cat-file', 'blob', readmeEntry.objectId], 8_000, 32 * 1024);
       const lines = decoder.decode(raw).split('\n').slice(0, 60).join('\n');
-      addSection(`## ${readmeEntry.path} (first 60 lines)\n${lines}\n`);
+      readmeText = clipSection(`## ${readmeEntry.path} (first 60 lines)\n${lines}\n`, Math.floor(budget * 0.25));
     } catch { /* skip */ }
   }
 
+  // --- File tree (paths only, depth-limited with counts); truncated to the room left after the other sections ---
+  const hitsReserve = keywords.length ? Math.min(MAX_HIT_BYTES, Math.floor(budget * 0.25)) : 0;
+  const scope = allowedScope.join(', ');
+  const scopeLabel = !scope ? 'all' : byteLength(scope) > 200 ? `${truncateUtf8(scope, 196)}…` : scope;
+  const treeBudget = budget - byteLength(pkgText) - byteLength(readmeText) - (hitsReserve >= MIN_SECTION_BYTES ? hitsReserve : 0) - 3;
+  const parts = [fitTree(`## Repository file tree (allowed scope: ${scopeLabel})\n`, buildTreeListing(scopedEntries, 400), treeBudget), pkgText, readmeText].filter(Boolean);
+  const usedBytes = () => parts.reduce((sum, part) => sum + byteLength(part), 0) + Math.max(0, parts.length - 1);
+
   // --- Keyword search (source-first, rarity-weighted, per-file capped, round-robin) ---
-  if (keywords.length) {
+  const hitsAvailable = budget - usedBytes() - 1;
+  if (keywords.length && hitsAvailable >= MIN_SECTION_BYTES) {
     const kwRaw = keywords.slice(0, 8).filter(k => k.length >= 2).map(k => k.toLowerCase());
     if (kwRaw.length) {
       // Sort: source code first, then generic files, then tests, then docs/markdown
@@ -164,7 +198,6 @@ export async function buildRepoDigest(options: RepoDigestOptions): Promise<RepoD
         .sort((a, b) => keywordSearchPriority(a.path) - keywordSearchPriority(b.path));
       const maxFilesToRead = 80;
       const maxFileBytes = 32 * 1024;
-      const maxHitBytes = Math.min(6 * 1024, Math.max(0, maxBytes - usedBytes - 200));
       const MAX_PER_FILE = 6;
       const MAX_PER_FILE_PER_KW = 3;
       const IMPORT_LINE = /^\s*(?:import|require|export\s+(?:\*|{[^}]*})\s+from)\s/;
@@ -195,6 +228,11 @@ export async function buildRepoDigest(options: RepoDigestOptions): Promise<RepoD
           return true;
         })
         .sort((a, b) => (dfCount.get(a) ?? 0) - (dfCount.get(b) ?? 0));
+      const header = [
+        `## Keyword hits (${truncateUtf8(kw.join(', '), 200)})`,
+        ...(tooCommon.length ? [`<!-- too common (>40% of files), skipped: ${truncateUtf8(tooCommon.join(', '), 200)} -->`] : []),
+      ].join('\n');
+      const maxHitBytes = Math.min(MAX_HIT_BYTES, hitsAvailable - byteLength(header) - 1);
 
       // --- Pass 2: collect hits using cached file lines ---
       interface FileHits { hits: string[] }
@@ -239,16 +277,12 @@ export async function buildRepoDigest(options: RepoDigestOptions): Promise<RepoD
         if (!advanced) break;
         round++;
       }
-      const header = [
-        `## Keyword hits (${kw.join(', ')})`,
-        ...(tooCommon.length ? [`<!-- too common (>40% of files), skipped: ${tooCommon.join(', ')} -->`] : []),
-      ].join('\n');
-      if (hitLines.length) addSection(`${header}\n${hitLines.join('')}`);
-      else if (tooCommon.length) addSection(`${header}\n`);
+      if (hitLines.length) parts.push(`${header}\n${hitLines.join('')}`);
+      else if (tooCommon.length && byteLength(header) + 1 <= hitsAvailable) parts.push(`${header}\n`);
     }
   }
 
-  return { text: parts.join('\n'), commit };
+  return { text: truncateUtf8(parts.join('\n'), budget), commit };
 }
 
 function buildTreeListing(entries: TreeEntry[], maxLines: number): string {

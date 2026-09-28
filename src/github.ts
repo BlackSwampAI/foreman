@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { loadWorkspaceSetup } from './workspace-setup.js';
 import type { JsonStore } from './store.js';
 import type { Project, Run } from './domain.js';
+import { sameOriginFailure, type HostPolicy } from './http-guard.js';
 
 export type GitHubReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
 export type GitHubQueueState = 'AWAITING_CHECKS'|'LOCKED'|'MERGEABLE'|'QUEUED'|'UNMERGEABLE'|'unavailable'|null;
@@ -302,31 +303,14 @@ export class GitHubIntegration {
 }
 
 export function confirmationToken(kind:keyof typeof confirmTokens):string{return confirmTokens[kind];}
-export interface WriteHostPolicy { bindHost:string; port:number }
+export type WriteHostPolicy=HostPolicy;
 export function requireSameOriginWrite(req:{headers:Pick<IncomingMessage['headers'],'host'|'origin'|'sec-fetch-site'>;socket:unknown},body:unknown,kind:keyof typeof confirmTokens,hostPolicy:WriteHostPolicy):void{
-  const host=firstHeader(req.headers.host),origin=firstHeader(req.headers.origin),fetchSite=firstHeader(req.headers['sec-fetch-site']);
-  if(!host||!origin||fetchSite&&fetchSite!=='same-origin')throw httpError(403,'GitHub writes require a same-origin browser request.');
-  if(!isAllowedForemanHost(host,hostPolicy))throw httpError(403,'GitHub writes are allowed only through Foreman’s configured local host and port.');
-  let originUrl:URL;try{originUrl=new URL(origin);}catch{throw httpError(403,'GitHub writes require a valid same-origin request.');}
-  const expectedProtocol=(req.socket as import('node:tls').TLSSocket).encrypted?'https:':'http:';
-  if(originUrl.host.toLowerCase()!==host.toLowerCase()||originUrl.protocol!==expectedProtocol)throw httpError(403,'GitHub writes require a same-origin browser request.');
+  const failure=sameOriginFailure(req,hostPolicy);
+  if(failure==='host')throw httpError(403,'GitHub writes are allowed only through Foreman’s configured local host and port.');
+  if(failure==='invalid-origin')throw httpError(403,'GitHub writes require a valid same-origin request.');
+  if(failure)throw httpError(403,'GitHub writes require a same-origin browser request.');
   const confirmation=(body&&typeof body==='object'&&!Array.isArray(body)?(body as Json).confirm:undefined);
   if(confirmation!==confirmTokens[kind])throw httpError(400,`Explicit confirmation is required (${confirmTokens[kind]}).`);
-}
-
-function isAllowedForemanHost(authority:string,policy:WriteHostPolicy):boolean{
-  if(!Number.isSafeInteger(policy.port)||policy.port<1||policy.port>65535)return false;
-  let url:URL;try{url=new URL(`http://${authority}`);}catch{return false;}
-  if(url.username||url.password||url.pathname!=='/'||url.search||url.hash)return false;
-  const port=Number(url.port||80);if(port!==policy.port)return false;
-  const normalize=(host:string)=>host.toLowerCase().replace(/^\[|\]$/g,'').replace(/\.$/,'');
-  const hostname=normalize(url.hostname),bind=normalize(policy.bindHost);
-  const allowed=new Set([bind]);
-  // The default loopback bind is commonly reached by either spelling in a browser.
-  if(['127.0.0.1','localhost','::1'].includes(bind)){allowed.add('127.0.0.1');allowed.add('localhost');allowed.add('::1');}
-  // Wildcard binds still accept the loopback names, but no arbitrary DNS host.
-  if(['0.0.0.0','::'].includes(bind)){allowed.add('127.0.0.1');allowed.add('localhost');allowed.add('::1');}
-  return allowed.has(hostname);
 }
 
 function repositoryFromRemote(url:string):string|undefined{
@@ -338,7 +322,6 @@ function parseJson(text:string):any{try{return JSON.parse(text);}catch{throw htt
 function escapeRegExp(value:string):string{return value.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');}
 function errorMessage(error:unknown):string{return error instanceof Error?error.message:'GitHub integration unavailable';}
 function httpError(statusCode:number,message:string):Error{return Object.assign(new Error(message),{statusCode});}
-function firstHeader(value:string|string[]|undefined):string|undefined{return Array.isArray(value)?value[0]:value;}
 function boundedText(value:unknown,max:number):string|null{if(value===undefined||value===null||value==='')return null;const text=String(value);return text.length<=max?text:`${text.slice(0,max)}\n[truncated]`;}
 function safeHttpsUrl(value:unknown):string|null{if(typeof value!=='string')return null;try{const url=new URL(value);return url.protocol==='https:'&&!url.username&&!url.password?url.toString():null;}catch{return null;}}
 function run(command:string,args:string[],cwd:string,timeoutMs:number,maxBytes:number,extraEnv:Record<string,string>):Promise<{stdout:string;stderr:string}>{

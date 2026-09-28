@@ -15,6 +15,8 @@ import { inspectRepository } from './repository-inspector.js';
 import { deleteWorkspaceSetup, findSavedProjectForRepository, loadWorkspaceSetup, saveWorkspaceSetup, validateWorkspaceSetup } from './workspace-setup.js';
 import { GitHubIntegration, requireSameOriginWrite } from './github.js';
 import { stateForUi } from './state-transform.js';
+import { guardRequest } from './http-guard.js';
+import type { Event as ForemanEvent } from './domain.js';
 
 const config=loadConfig();
 const workspacePolicyConfigured=Boolean(config.workspaceSourceRepo||config.workspaceBridgeUrl||config.workspaceAllowedScope.length||config.validationCommands.length);
@@ -42,7 +44,15 @@ const createProjectRuntime=async(projectId:string,workspace:Awaited<ReturnType<t
   } catch(error) { await bridge.stop(); throw error; }
 };
 const uiRoot=resolve(fileURLToPath(new URL('../dist/ui/',import.meta.url)));
-const body=async(req:IncomingMessage):Promise<any>=>{let data='';for await(const chunk of req)data+=chunk;if(data.length>1_000_000)throw Object.assign(new Error('Request body too large'),{statusCode:413});return data?JSON.parse(data):{};};
+const maxBodyBytes=1_000_000;
+const body=async(req:IncomingMessage):Promise<any>=>{
+  const tooLarge=()=>Object.assign(new Error('Request body too large'),{statusCode:413});
+  if(Number(req.headers['content-length'])>maxBodyBytes)throw tooLarge();
+  const chunks:Buffer[]=[];let size=0;
+  // Stop reading as soon as the limit is crossed; destroyOnReturn:false keeps the socket open long enough to send the 413.
+  for await(const chunk of req.iterator({destroyOnReturn:false})){size+=(chunk as Buffer).length;if(size>maxBodyBytes)throw tooLarge();chunks.push(chunk as Buffer);}
+  const data=Buffer.concat(chunks).toString('utf8');return data?JSON.parse(data):{};
+};
 const json=(res:ServerResponse,status:number,data:unknown)=>{res.writeHead(status,{'content-type':'application/json; charset=utf-8','cache-control':'no-store'});res.end(JSON.stringify(data));};
 const controllerForPath=async(path:string,query?:URLSearchParams,method?:string):Promise<Controller>=>{
   const state=await store.load();
@@ -65,8 +75,11 @@ const controllerForPath=async(path:string,query?:URLSearchParams,method?:string)
   return controller;
 };
 const server=createServer(async(req,res)=>{
-  const url=new URL(req.url??'/',`http://${req.headers.host??'localhost'}`), path=url.pathname;
+  // CSRF and DNS-rebinding guard: runs before routing, so it covers the API, the event stream and the static UI.
+  const denied=guardRequest(req,{bindHost:config.host,port:config.port});
+  if(denied){json(res,403,{error:denied});return;}
   try {
+    const url=new URL(req.url??'/',`http://${req.headers.host??'localhost'}`), path=url.pathname;
     const githubMatch=path.match(/^\/api\/runs\/([^/]+)\/github(?:\/(push|pr|review|merge|enqueue|refresh-local))?$/);
     if(githubMatch){
       const runId=decodeURIComponent(githubMatch[1]!);
@@ -123,14 +136,14 @@ const server=createServer(async(req,res)=>{
           projectControllers.set(existingId,{...runtime,workspace:saved});
         }else{
           const {scoped,bridge}=await createProjectRuntime(existingId,workspace);
-          try{await scoped.refreshDiscovery();await scoped.recover();const saved=await saveWorkspaceSetup(config.dataDir,existingId,{repoPath:workspace.repoPath,allowedScope:workspace.allowedScope,validationCommands:workspace.validationCommands});projectControllers.set(existingId,{controller:scoped,bridge,workspace:saved});}
+          try{await scoped.refreshDiscovery();await scoped.recover();const saved=await saveWorkspaceSetup(config.dataDir,existingId,{repoPath:workspace.repoPath,allowedScope:workspace.allowedScope,validationCommands:workspace.validationCommands});projectControllers.set(existingId,{controller:scoped,bridge,workspace:saved});configuredProjectIds.add(existingId);}
           catch(error){projectControllers.delete(existingId);await bridge.stop();throw error;}
         }
         const resumed=await projectControllers.get(existingId)!.controller.state();const project=resumed.projects.find(item=>item.id===existingId);if(!project)throw new Error('Saved project disappeared while reopening its repository');json(res,200,project);return;
       }
       const projectId=`prj_${randomUUID()}`;
       const {scoped,bridge}=await createProjectRuntime(projectId,workspace);
-      try {await scoped.refreshDiscovery();const project=await scoped.createProject(repositoryName(workspace.repoPath),projectId);const saved=await saveWorkspaceSetup(config.dataDir,projectId,{repoPath:workspace.repoPath,allowedScope:workspace.allowedScope,validationCommands:workspace.validationCommands});projectControllers.set(projectId,{controller:scoped,bridge,workspace:saved});json(res,201,project);return;}
+      try {await scoped.refreshDiscovery();const project=await scoped.createProject(repositoryName(workspace.repoPath),projectId);const saved=await saveWorkspaceSetup(config.dataDir,projectId,{repoPath:workspace.repoPath,allowedScope:workspace.allowedScope,validationCommands:workspace.validationCommands});projectControllers.set(projectId,{controller:scoped,bridge,workspace:saved});configuredProjectIds.add(projectId);json(res,201,project);return;}
       catch(error){projectControllers.delete(projectId);await bridge.stop();throw error;}
     }
     const setupMatch=path.match(/^\/api\/projects\/([^/]+)\/workspace-setup$/);
@@ -139,16 +152,21 @@ const server=createServer(async(req,res)=>{
     if(req.method==='GET'&&path==='/api/status'){json(res,200,await activeController.serviceStatus());return;}
     if(req.method==='GET'&&path==='/api/events'){
       res.writeHead(200,{'content-type':'text/event-stream','cache-control':'no-cache','connection':'keep-alive'});
-      let last=Number(req.headers['last-event-id']??url.searchParams.get('after')??0);
-      // Flush any events the client missed since last-event-id.
-      const flush=async()=>{const state=await store.load();for(let i=last;i<state.events.length;i++){const e=state.events[i]!;last=i+1;if(!res.writableEnded)res.write(`id: ${last}\nevent: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);}};
-      await flush();
-      // Push-notify on each mutation instead of polling every second.
-      const onMutation=()=>{if(!res.writableEnded)void flush().catch(()=>undefined);};
+      res.write(': connected\n\n');
+      // Event ids are store-assigned seqs. With a cursor (Last-Event-ID or ?after=) replay what was missed; without one start at the tail.
+      const cursor=String(req.headers['last-event-id']??url.searchParams.get('after')??'').trim(),after=cursor===''?NaN:Number(cursor);
+      let last=0,ready=false,closed=false;const queued:ForemanEvent[]=[];
+      const send=(e:ForemanEvent)=>{if(closed||res.writableEnded||e.seq===undefined||e.seq<=last)return;last=e.seq;res.write(`id: ${e.seq}\nevent: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);};
+      // Push the events each mutation reports instead of re-reading the store; queue them until the initial replay is written.
+      const onMutation=(events:ForemanEvent[])=>{if(!ready){queued.push(...events);return;}for(const e of events)send(e);};
       store.on('mutation',onMutation);
       // Keepalive comment every 15 s to prevent proxy timeouts.
       const keepalive=setInterval(()=>{if(!res.writableEnded)res.write(': keepalive\n\n');},15_000);
-      req.on('close',()=>{store.off('mutation',onMutation);clearInterval(keepalive);});
+      req.on('close',()=>{closed=true;store.off('mutation',onMutation);clearInterval(keepalive);});
+      const state=await store.load(),tail=state.eventSeq??0;
+      last=Number.isFinite(after)?Math.max(0,Math.min(after,tail)):tail;
+      if(Number.isFinite(after))for(const e of state.events)send(e);
+      ready=true;for(const e of queued)send(e);
       return;
     }
     if(req.method==='POST'&&path==='/api/projects'){const b=await body(req);json(res,201,await activeController.createProject(String(b.name??'')));return;}
@@ -208,7 +226,7 @@ const server=createServer(async(req,res)=>{
     m=path.match(/^\/api\/assignments\/([^/]+)\/refresh$/);if(req.method==='POST'&&m){json(res,200,await activeController.refreshAssignment(decodeURIComponent(m[1]!)));return;}
     if(req.method==='GET'&&(path==='/'||!path.startsWith('/api/'))){const root=uiRoot;const requested=path==='/'?'index.html':decodeURIComponent(path.slice(1));const candidate=resolve(root,requested);if(candidate!==root&&!candidate.startsWith(`${root}${sep}`)){json(res,403,{error:'Forbidden'});return;}try{if(!(await stat(candidate)).isFile())throw new Error();const content=await readFile(candidate);res.writeHead(200,{'content-type':mime(extname(candidate)),'cache-control':'no-cache'});res.end(content);return;}catch{const index=await readFile(resolve(root,'index.html')).catch(()=>undefined);if(index){res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-cache'});res.end(index);return;}}}
     json(res,404,{error:'Not found'});
-  } catch(e) {const err=e as Error&{statusCode?:number};json(res,err.statusCode??400,{error:err.message});}
+  } catch(e) {const err=e as Error&{statusCode?:number};if(err.statusCode===413)res.setHeader('connection','close');json(res,err.statusCode??400,{error:err.message});}
 });
 await store.load();
 const startupState=await store.load();
