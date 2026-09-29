@@ -101,6 +101,9 @@ describe('validation sandbox (bubblewrap)', () => {
 
   it('shows nothing under /run and /var/run except the re-exposed resolv.conf target (when the host keeps it there) and its parent directories', async () => {
     // With systemd-resolved, /etc/resolv.conf links into /run/systemd/resolve; on a plain host it is a regular file and /run must be empty.
+    // Pin PATH: fnm shells can put toolchain symlinks under /run, which the
+    // sandbox intentionally re-exposes. Those are tested separately below.
+    vi.stubEnv('PATH', '/usr/bin:/bin');
     const resolv = hostRealpath('/etc/resolv.conf'), roots = ['/run', '/var/run'].filter(existsSync);
     const hostText = (() => { try { return readFileSync('/etc/resolv.conf', 'utf8'); } catch (error) { return `ERR:${(error as NodeJS.ErrnoException).code}`; } })();
     const seen = json((await run(await fixture(), node(WALK_RUN, JSON.stringify(roots)))).output);

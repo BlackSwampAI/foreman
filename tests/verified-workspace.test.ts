@@ -37,6 +37,14 @@ describe('verified Worker output and validation',()=>{
     expect(validation.passed).toBe(false);expect(validation.checks[0]).toMatchObject({exitCode:3,output:'observed\n',timedOut:false});
   });
 
+  it('streams bounded check output before the validation process finishes',async()=>{
+    const {dir,sha}=await fixtureRepo(),bytes=Buffer.from('base\n'),{createHash}=await import('node:crypto');
+    const evidence=await verifyWorkerSnapshot({repoPath:dir,pinnedBaseCommit:sha,allowedScope:['README.md'],envelope:{complete:true,base_commit:sha,errors:[],entries:[{path:'README.md',kind:'file',mode:'100644',size:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex'),contentBase64:bytes.toString('base64')}]}});
+    let finished=false,resolveOutput!:()=>void;const outputSeen=new Promise<void>(resolve=>resolveOutput=resolve);
+    const validationPromise=validateWorkerOutput({repoPath:dir,evidence,commands:[{name:'stream',command:'/bin/sh',args:['-c','printf hello; sleep 0.5']}],timeoutMs:5000,maxOutputBytes:32,sandbox:{mode:'none'},callbacks:{output:(_command,output)=>{if(output.includes('hello'))resolveOutput();},finished:()=>{finished=true;}}});
+    await outputSeen;expect(finished).toBe(false);const result=await validationPromise;expect(result.checks[0]?.output).toBe('hello');expect(result.checks[0]?.outputTruncated).toBe(false);
+  });
+
   it('restricts bridge snapshot fetches to loopback URLs',async()=>{
     await expect(fetchBridgeSnapshot('https://example.com','id','a'.repeat(40))).rejects.toThrow('loopback-only');
   });

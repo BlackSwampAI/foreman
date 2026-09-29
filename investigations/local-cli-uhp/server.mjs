@@ -1051,7 +1051,12 @@ async function runTask(record, prompt) {
   const work = ws?.dir ?? roWs?.dir ?? (reviewer ? join(ROOT, `review-${randomUUID()}`) : join(roleStatePath, 'context'));
   if (!ws && !reviewer && !persistentRole) throw Error('Worker workspace binding is unavailable');
   if (!ws && !roWs) await mkdir(work, { recursive: persistentRole, mode: 0o700 });
-  const taskWorkspace = ws ?? roWs ?? { id: record.id, dir: work, roleStatePath, executionStage: 'task_setup' };
+  // Snapshot-backed roles still need their own writable transcript mounts. Do
+  // not attach role state to the shared workspace object: another role may use
+  // the same immutable repository snapshot with a different conversation.
+  const taskWorkspace = persistentRole
+    ? { ...(roWs ?? { id: record.id, dir: work }), roleStatePath, executionStage: 'task_setup' }
+    : ws ?? { id: record.id, dir: work, executionStage: 'task_setup' };
   if (persistentRole) {
     record.metadata.execution_boundary = { reviewer_read_only: true, project_workspace_mounted: !!roWs, workspace_writable: false, role_context_isolated: true, proven: true };
   }
@@ -1120,7 +1125,7 @@ async function runTask(record, prompt) {
   if (parsed.text.length > MAX_OUTPUT) parsed.text = parsed.text.slice(0, MAX_OUTPUT);
   const missingReportedIdentity = !parsed.session || (kind === 'claude' && !parsed.model);
   if (kind === 'claude' && !reviewer && (spawnError || exit.code !== 0 || exit.signal || missingReportedIdentity || parsed.isError)) {
-    record.metadata.cli_failure_category = classifyClaudeFailure(stderrTail, exit, spawnError, { missingIdentity: missingReportedIdentity, providerError: parsed.isError });
+    record.metadata.cli_failure_category = classifyClaudeFailure(stderrTail, exit, spawnError, { missingIdentity: missingReportedIdentity, providerError: parsed.isError, missingResume: !!nativeSessionId && !out.trim() && !parsed.session && exit.code !== 0 });
     record.metadata.cli_failure_diagnostic = safeClaudeDiagnostic(stderrTail);
   }
   const reviewerFailed = reviewer && (parsed.mutationAttempted || parsed.malformedOutput || parsed.unrecognizedOutput || cliOutputOverflow || parsed.isError || missingReportedIdentity || exit.code !== 0 || active.cancelRequested);
@@ -1200,6 +1205,7 @@ function classifyCodexFailure(stderr, exit, spawnError) {
 function classifyClaudeFailure(stderr, exit = {}, spawnError, state = {}) {
   if (spawnError) return 'sandbox_spawn_failed';
   const text = String(stderr ?? '').toLowerCase();
+  if (state.missingResume && /no (?:conversation|session) found|(?:conversation|session).{0,80}(?:not found|does not exist)|unable to find (?:session|conversation)/.test(text)) return 'session_resume_unavailable';
   if (/not logged in|not authenticated|authentication required|unauthorized|sign.?in|token expired|credentials? (?:are )?invalid/.test(text)) return 'host_auth_unavailable';
   if (/model .*not found|unknown model|model unavailable|unsupported model/.test(text)) return 'model_unavailable';
   if (/permission denied|operation not permitted|read.only file system|failed to create.*directory|eacces|eperm/.test(text)) return 'filesystem_permission';
@@ -1506,6 +1512,13 @@ const server = createServer(async (req, res) => {
             b.metadata.conversation_id = roleSession.session_id;
             b.metadata.role_session_continuation = true;
             const previous = state.responses[roleSession.previous_response_id];
+            // Follow-ups normally carry only the verified result inbox. Keep
+            // their repository view from the last completed turn when it is
+            // still available, without requiring the caller to repeat it.
+            const previousWorkspaceId = previous.metadata?.foreman_read_only_workspace_id;
+            if (!roWorkspaceId && typeof previousWorkspaceId === 'string' && workspaces.has(previousWorkspaceId)) {
+              b.metadata.foreman_read_only_workspace_id = previousWorkspaceId;
+            }
             if (h.id === 'antigravity-cli' && previous.metadata?.agy_usage_cumulative) b.metadata.usage_baseline = previous.metadata.agy_usage_cumulative;
           }
         } catch (error) { return send(res, 409, { error: { code: 'previous_response_invalid', message: error.message } }); }

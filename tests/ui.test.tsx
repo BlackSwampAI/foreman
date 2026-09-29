@@ -5,6 +5,7 @@ import { App, debounce, type State, type TaskStartPreview } from '../ui/main.js'
 import { DecisionPanel, DecisionDigestNotice, type DecisionPanelProps } from '../ui/decision-panel.js';
 import type { DecisionDigestView } from '../ui/decision-digest.js';
 import { ChecksPipeline, type StationObservation, type GithubCheckEntry } from '../ui/checks-pipeline.js';
+import { ValidationProgressPanel, type ValidationProgress } from '../ui/validation-progress.js';
 import { parseChecksSummary } from '../ui/check-output.js';
 import { PrDraftPanel, type PrDraftData } from '../ui/pr-draft.js';
 import { FormatStepToggle, NetworkToggle, RepoChecksEditor, checksFromSuggestions, formatCommandPayload, formatStepFromSuggestion, formattingSummary, validationCommandsPayload, type RepoCheck } from '../ui/repo-checks.js';
@@ -378,6 +379,13 @@ describe('validation check list and correction button',()=>{
     const html=renderToStaticMarkup(createElement(App,{initialState:makeValidationFailedState(2,2)}));
     expect(html).not.toContain('Ask Orchestrator for a correction');
   });
+  it('defaults automatic validation correction on and clearly labels manual mode when disabled',()=>{
+    const automatic=renderToStaticMarkup(createElement(App,{initialState:makeValidationFailedState(1,2)}));
+    expect(automatic).toContain('When a check fails, Foreman asks the Orchestrator for a bounded correction automatically.');
+    const state=makeValidationFailedState(1,2);state.projects[0]!.tasks![0]!.runs![0]!.autoValidationCorrection=false;
+    const manual=renderToStaticMarkup(createElement(App,{initialState:state}));
+    expect(manual).toContain('Manual mode: validation failures stop the run and wait for you to request a correction.');
+  });
   it('renders exactly one correction button for a validation-blocked stopped run',()=>{
     const html=renderToStaticMarkup(createElement(App,{initialState:makeValidationFailedState(1,2)}));
     const matches=html.match(/Ask Orchestrator for a correction/g);
@@ -719,6 +727,58 @@ describe('checks pipeline',()=>{
     expect(station('smoke')).toContain('aria-label="Also fails on the base commit">Fails on base<');
     expect(station('smoke')).toContain('also fails on the base commit"');
     for(const name of ['tests','lint','build'])expect(station(name)).not.toContain('Fails on base');
+  });
+});
+
+describe('live validation progress',()=>{
+  const progress:ValidationProgress={attemptId:'attempt-1',startedAt:'2026-09-28T12:00:00.000Z',checks:[
+    {name:'Tests',command:'pnpm',args:['test'],status:'running',output:'1 test file passed\n',outputTruncated:false,startedAt:'2026-09-28T12:00:01.000Z'},
+    {name:'Prettier',command:'pnpm',args:['prettier','--check','.'],status:'queued',output:'',outputTruncated:false},
+  ]};
+
+  it('shows a compact running summary and expandable queued/running checks with live output',()=>{
+    const html=renderToStaticMarkup(createElement(ValidationProgressPanel,{runId:'run-live',progress,running:true,autoCorrection:true,correcting:false,onAutoCorrectionChange:async()=>{}}));
+    expect(html).toContain('Local validation');
+    expect(html).toContain('Running');
+    expect(html).toContain('0 passed · 0 failed · 1 running · 1 queued');
+    expect(html).toContain('class="validation-progress-check is-running"');
+    expect(html).toContain('class="validation-progress-check is-queued"');
+    expect(html).toContain('Prettier');
+    expect(html).toContain('1 test file passed');
+    expect(html).toContain('checked=""');
+  });
+
+  it('shows completed passed and failed check results, durations and manual mode',()=>{
+    const completed:ValidationProgress={...progress,finishedAt:'2026-09-28T12:00:03.000Z',checks:[
+      {...progress.checks[0]!,status:'passed',finishedAt:'2026-09-28T12:00:02.000Z',elapsedMs:1200,exitCode:0},
+      {...progress.checks[1]!,status:'failed',output:'Formatting differs',finishedAt:'2026-09-28T12:00:03.000Z',elapsedMs:850,exitCode:1},
+    ]};
+    const html=renderToStaticMarkup(createElement(ValidationProgressPanel,{runId:'run-done',progress:completed,running:false,autoCorrection:false,correcting:false,onAutoCorrectionChange:async()=>{}}));
+    expect(html).toContain('1 passed · 1 failed');
+    expect(html).toContain('class="validation-progress-check is-passed"');
+    expect(html).toContain('class="validation-progress-check is-failed"');
+    expect(html).toContain('1.2s');
+    expect(html).toContain('Formatting differs');
+    expect(html).toContain('Manual mode: validation failures stop the run and wait for you to request a correction.');
+    expect(html).not.toContain('checked=""');
+  });
+
+  it('explains when automatic correction begins after a failed check',()=>{
+    const failed:ValidationProgress={...progress,checks:[{...progress.checks[0]!,status:'failed',exitCode:1,finishedAt:'2026-09-28T12:00:03.000Z'}]};
+    const html=renderToStaticMarkup(createElement(ValidationProgressPanel,{runId:'run-correcting',progress:failed,running:false,autoCorrection:true,correcting:true,onAutoCorrectionChange:async()=>{}}));
+    expect(html).toContain('Correction in progress');
+    expect(html).toContain('The Orchestrator is preparing a bounded correction for the Worker.');
+    expect(html).toContain('Automatically ask the Orchestrator to correct validation failures');
+  });
+
+  it('infers legacy exit codes and keeps network access visible',()=>{
+    const html=renderToStaticMarkup(createElement(ValidationProgressPanel,{runId:'run-legacy',observations:[
+      {name:'Tests',command:'pnpm',args:['test'],exitCode:0,timedOut:false,output:'ok',outputTruncated:false},
+      {name:'Install',command:'pnpm',args:['install'],exitCode:1,timedOut:false,output:'failed',outputTruncated:false,network:true},
+    ],running:false,autoCorrection:true,correcting:false,onAutoCorrectionChange:async()=>{}}));
+    expect(html).toContain('class="validation-progress-check is-passed"');
+    expect(html).toContain('class="validation-progress-check is-failed"');
+    expect(html).toContain('aria-label="Ran with network access"');
   });
 });
 

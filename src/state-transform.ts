@@ -10,7 +10,7 @@ function stripEvidence(ev:WorkerEvidence):WorkerEvidence{return {...ev,...(ev.en
 
 // High-volume event types: keep only the most recent N to bound payload size.
 // All other event types are kept in full so run-recovery logic is never starved of events.
-export const HIGH_VOL_TYPES=new Set(['assignment.progress','assignment.reconciled']);
+export const HIGH_VOL_TYPES=new Set(['assignment.progress','assignment.reconciled','validation.check_output']);
 // Persisted-state cap for the high-volume types (the UI payload above is trimmed further, to 200).
 export const HIGH_VOL_RETAINED=500;
 /**

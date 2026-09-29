@@ -11,7 +11,7 @@ Human ↔ Planner  →  Orchestrator  →  Worker  →  checks  →  Reviewer  �
 1. **Planner.** You talk to the Planner about the work. The Planner can read a read-only snapshot of the repository at the current HEAD (Claude Code or Codex) or receive a deterministic digest (Antigravity CLI or snapshot unavailable). It proposes structured tasks with scope and validation criteria.
 2. **Orchestrator.** When you start a run, the Orchestrator receives the Planner's task and guidance. It returns a JSON object `{"workerTask":"...","targetFiles":["path",...]}` naming the exact files the Worker must touch. Scope is checked against `targetFiles`; the post-run snapshot diff is the authority.
 3. **Worker.** The Worker edits an isolated workspace seeded from the pinned Git base. Foreman fetches the complete snapshot, byte-compares it against the pinned commit, enforces allowed scope, and computes the exact diff.
-4. **Checks.** Foreman runs every configured validation command in a disposable workspace. An empty result (no file changes) fails the result gate even if commands pass.
+4. **Checks.** Foreman runs every configured validation command in a disposable workspace. Expand a check to see its command, live output, duration, and result. Failed validation automatically returns to the Orchestrator for a bounded Worker correction while budget remains. Turn off **Automatic correction** to pause on failure and request a correction manually. An empty result (no file changes) fails the result gate even if commands pass.
 5. **Reviewer.** The Reviewer reads the verified diff and check results in read-only mode. Its recommendation is advisory; it cannot modify the result. A `request_changes` or `reject` verdict triggers a bounded Orchestrator → Worker → Reviewer correction while budget remains.
 6. **Your decision.** The "Ready for your review" panel shows a checklist, the checks pipeline (local Foreman checks and remote GitHub CI), and an Approve / Reject pair. Approval records an immutable decision bound to the evidence digest you reviewed. It does not change Git.
 7. **Promote → GitHub.** Approved results can be promoted to a local commit, pushed, opened as a PR, and merged, each as a separate confirmed action.
@@ -35,6 +35,8 @@ No `.env` file or separate bridge command is needed for the standard local flow.
 For the manual bridge workflow (custom CLIs, external UHP servers, or disposable-repo testing), see [the host CLI workflow guide](docs/three-harness-workflow.md).
 
 `pnpm dev` starts the API in watch mode; `pnpm dev:ui` starts Vite for UI development.
+
+The header's **Light / Dark** control switches themes and remembers your choice in this browser.
 
 ## Choosing models per role
 

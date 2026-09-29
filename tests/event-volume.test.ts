@@ -73,9 +73,9 @@ describe('streamed progress events',()=>{
 
 describe('pruneHighVolumeEvents',()=>{
   it('keeps every high-volume type consistent with the UI trim and drops only the oldest ones in place',()=>{
-    expect([...HIGH_VOL_TYPES].sort()).toEqual(['assignment.progress','assignment.reconciled']);
+    expect([...HIGH_VOL_TYPES].sort()).toEqual(['assignment.progress','assignment.reconciled','validation.check_output']);
     const events:Event[]=[];let seq=0;
-    for(let i=0;i<30;i++){events.push(evt('assignment.progress',i,++seq));if(i%5===0)events.push(evt('run.created',i,++seq));if(i%3===0)events.push(evt('assignment.reconciled',i,++seq));}
+    for(let i=0;i<30;i++){events.push(evt('assignment.progress',i,++seq));if(i%5===0)events.push(evt('run.created',i,++seq));if(i%3===0)events.push(evt('assignment.reconciled',i,++seq));if(i%2===0)events.push(evt('validation.check_output',i,++seq));}
     const same=events;const others=events.filter(e=>!HIGH_VOL_TYPES.has(e.type));
     pruneHighVolumeEvents(events,10);
     expect(events).toBe(same);

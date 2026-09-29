@@ -18,6 +18,7 @@ export interface VerifiedWorkerWorkspace {
 export interface ValidationCommand { name: string; command: string; args: string[]; cwd?: string; /** Keep the host network for this command. Unset means a recognised package-manager install gets it and everything else runs offline (`defaultNetworkAccess`); an explicit boolean always wins. */ network?: boolean }
 export interface ValidationObservation { name: string; command: string; args: string[]; exitCode: number|null; signal?: string; timedOut: boolean; output: string; outputTruncated: boolean; startedAt: string; finishedAt: string; sandbox: 'bwrap'|'none'; /** True when the command could reach the network: it asked for it, or nothing isolated it (sandbox none). */ network: boolean }
 export interface ControllerValidationEvidence { passed: boolean; checks: ValidationObservation[] }
+export interface ValidationCheckCallbacks { started?(command:ValidationCommand,startedAt:string):void|Promise<void>; output?(command:ValidationCommand,output:string):void|Promise<void>; finished?(observation:ValidationObservation):void|Promise<void> }
 const SHA=/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
 
 /** Per-call bridge options. A bare number is the timeout in ms; `token` is the bridge's bearer token, sent only to the validated loopback bridge URL and never echoed in errors. */
@@ -205,7 +206,7 @@ export async function materializeVerifiedWorkspace(repoPath:string,evidence:Veri
   } catch(error){await rm(root,{recursive:true,force:true});throw error;}
 }
 
-export async function validateWorkerOutput(input:{repoPath:string;evidence:VerifiedWorkerWorkspace;commands:readonly ValidationCommand[];timeoutMs?:number;maxOutputBytes?:number;sandbox?:ValidationSandboxConfig}):Promise<ControllerValidationEvidence>{
+export async function validateWorkerOutput(input:{repoPath:string;evidence:VerifiedWorkerWorkspace;commands:readonly ValidationCommand[];timeoutMs?:number;maxOutputBytes?:number;sandbox?:ValidationSandboxConfig;callbacks?:ValidationCheckCallbacks}):Promise<ControllerValidationEvidence>{
   const sandbox=input.sandbox??{};
   if((sandbox.mode??'bwrap')==='bwrap'){await assertBwrapUsable(sandbox.bwrapPath);if(sandbox.cacheDir)await ensureSandboxCache(sandbox.cacheDir);}
   const {workspacePath,cleanup}=await materializeVerifiedWorkspace(input.repoPath,input.evidence);
@@ -213,13 +214,13 @@ export async function validateWorkerOutput(input:{repoPath:string;evidence:Verif
     const checks:ValidationObservation[]=[];
     for(const command of input.commands){
       if(!command.name.trim()||!command.command||!Array.isArray(command.args)||command.args.some(a=>typeof a!=='string'))throw new Error('Validation commands require a name and explicit argv');
-      checks.push(await runOne(workspacePath,input.repoPath,command,input.timeoutMs??120_000,input.maxOutputBytes??1024*1024,sandbox));
+      checks.push(await runOne(workspacePath,input.repoPath,command,input.timeoutMs??120_000,input.maxOutputBytes??1024*1024,sandbox,input.callbacks));
     }
     return {passed:checks.length>0&&checks.every(c=>c.exitCode===0&&!c.timedOut&&!c.outputTruncated),checks};
   } finally {await cleanup();}
 }
 
-export async function runOne(root:string,repoPath:string,command:ValidationCommand,timeoutMs:number,maxBytes:number,sandbox:ValidationSandboxConfig):Promise<ValidationObservation>{
+export async function runOne(root:string,repoPath:string,command:ValidationCommand,timeoutMs:number,maxBytes:number,sandbox:ValidationSandboxConfig,callbacks?:ValidationCheckCallbacks):Promise<ValidationObservation>{
   if(!Number.isSafeInteger(timeoutMs)||timeoutMs<1||!Number.isSafeInteger(maxBytes)||maxBytes<1)throw new Error('Invalid validation bounds');
   if(command.network!==undefined&&typeof command.network!=='boolean')throw new Error('Validation command network must be a boolean');
   const cwd=command.cwd?resolve(root,command.cwd):root;if(cwd!==root&&!cwd.startsWith(root+sep))throw new Error('Validation cwd escapes disposable workspace');
@@ -229,14 +230,19 @@ export async function runOne(root:string,repoPath:string,command:ValidationComma
   const launch=mode==='bwrap'
     ?{file:sandbox.bwrapPath??'bwrap',args:buildSandboxArgs({workspacePath:root,cwd:relCwd.join(sep),command:command.command,args:command.args,network,env:{path:hostEnv.PATH,lang:hostEnv.LANG,lcAll:hostEnv.LC_ALL},home:homedir(),tmpDir:tmpdir(),repoPath,dataDir:sandbox.dataDir,cacheDir:sandbox.cacheDir,roPaths:sandbox.roPaths}),cwd:root,env:{PATH:hostEnv.PATH}}
     :{file:command.command,args:command.args,cwd,env:hostEnv};
-  const startedAt=new Date().toISOString();return new Promise(resolvePromise=>{
+  const startedAt=new Date().toISOString();await callbacks?.started?.(command,startedAt);return new Promise((resolvePromise,rejectPromise)=>{
     const child=spawn(launch.file,launch.args,{cwd:launch.cwd,stdio:['ignore','pipe','pipe'],windowsHide:true,detached:process.platform!=='win32',env:launch.env});
-    const chunks:Buffer[]=[];let size=0,truncated=false,timedOut=false,exitCode:number|null=null,signal:string|undefined;
-    const collect=(chunk:Buffer)=>{if(size<maxBytes){const keep=chunk.subarray(0,maxBytes-size);chunks.push(keep);size+=keep.length;}if(size>=maxBytes&&chunk.length>0){truncated=true;killTree(child);}};
+    const chunks:Buffer[]=[];let size=0,truncated=false,timedOut=false,exitCode:number|null=null,signal:string|undefined,pending=Buffer.alloc(0),callbackQueue=Promise.resolve(),callbackError:unknown,settled=false;const decoder=new TextDecoder();
+    const enqueue=(text:string)=>{callbackQueue=callbackQueue.then(async()=>{if(callbackError)throw callbackError;await callbacks?.output?.(command,text);}).catch(error=>{callbackError=error;killTree(child);});};
+    const queueOutput=(bytes:Buffer)=>{pending=Buffer.concat([pending,bytes]);while(pending.length>=4096){const batch=pending.subarray(0,4096);pending=pending.subarray(4096);enqueue(decoder.decode(batch,{stream:true}));}};
+    const flushOutput=(final=false)=>{if(pending.length){enqueue(decoder.decode(pending,{stream:!final}));pending=Buffer.alloc(0);}if(final){const tail=decoder.decode();if(tail)enqueue(tail);}return callbackQueue;};
+    const streamTimer=setInterval(()=>{void flushOutput(false);},150);streamTimer.unref();
+    const complete=async(observation:ValidationObservation)=>{if(settled)return;settled=true;clearInterval(streamTimer);try{await flushOutput(true);if(callbackError)throw callbackError;await callbacks?.finished?.(observation);resolvePromise(observation);}catch(error){rejectPromise(error);}};
+    const collect=(chunk:Buffer)=>{const room=Math.max(0,maxBytes-size),keep=chunk.subarray(0,room);if(keep.length){chunks.push(keep);size+=keep.length;queueOutput(keep);}if(keep.length<chunk.length){truncated=true;killTree(child);}};
     child.stdout.on('data',collect);child.stderr.on('data',collect);
     const timer=setTimeout(()=>{timedOut=true;killTree(child);},timeoutMs);
-    child.once('error',()=>{clearTimeout(timer);exitCode=127;resolvePromise({name:command.name,command:command.command,args:[...command.args],exitCode,signal,timedOut,output:Buffer.concat(chunks).toString('utf8'),outputTruncated:truncated,startedAt,finishedAt:new Date().toISOString(),sandbox:mode,network});});
-    child.once('close',(code,term)=>{clearTimeout(timer);exitCode=code;signal=term??undefined;resolvePromise({name:command.name,command:command.command,args:[...command.args],exitCode,signal,timedOut,output:Buffer.concat(chunks).toString('utf8'),outputTruncated:truncated,startedAt,finishedAt:new Date().toISOString(),sandbox:mode,network});});
+    child.once('error',()=>{clearTimeout(timer);exitCode=127;void complete({name:command.name,command:command.command,args:[...command.args],exitCode,signal,timedOut,output:Buffer.concat(chunks).toString('utf8'),outputTruncated:truncated,startedAt,finishedAt:new Date().toISOString(),sandbox:mode,network});});
+    child.once('close',(code,term)=>{clearTimeout(timer);exitCode=code;signal=term??undefined;void complete({name:command.name,command:command.command,args:[...command.args],exitCode,signal,timedOut,output:Buffer.concat(chunks).toString('utf8'),outputTruncated:truncated,startedAt,finishedAt:new Date().toISOString(),sandbox:mode,network});});
   });
 }
 

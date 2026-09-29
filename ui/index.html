@@ -3,8 +3,20 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#071321" />
-    <title>Foreman — Local Engineering Control Plane</title>
+    <meta name="theme-color" content="#000000" />
+    <script>
+      (() => {
+        try {
+          const theme = localStorage.getItem('foreman-theme');
+          document.documentElement.dataset.theme = theme === 'light' ? 'light' : 'dark';
+        } catch {
+          document.documentElement.dataset.theme = 'dark';
+        }
+        document.documentElement.style.colorScheme = document.documentElement.dataset.theme;
+        document.querySelector('meta[name="theme-color"]').content = document.documentElement.dataset.theme === 'light' ? '#f5f5f2' : '#000000';
+      })();
+    </script>
+    <title>Foreman</title>
   </head>
   <body>
     <div id="root"></div>

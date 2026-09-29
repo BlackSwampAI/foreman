@@ -142,6 +142,47 @@ test('Planner continuation binds the same native session and keeps a workspace-f
   assert.deepEqual(second.metadata.cli_invocation.args.slice(-2),['--resume','planner-native-session']);
   assert.equal(second.metadata.role_session.state_path,first.metadata.role_session.state_path);
 });
+test('snapshot-backed Orchestrator persists transcripts and resumes with its read-only repository across restart', async t => {
+  const body = `import {readFileSync,writeFileSync} from 'node:fs';process.stdin.resume();process.stdin.on('end',()=>{const resumed=process.argv.includes('--resume');const transcript='/auth/projects/snapshot-session.txt';const repo=readFileSync('/workspace/edit.txt','utf8');if(repo!=='edit before\\n')process.exit(21);if(resumed&&readFileSync(transcript,'utf8')!=='first turn')process.exit(22);let readonly=false;try{writeFileSync('/workspace/.forbidden-write','changed')}catch{readonly=true}if(!readonly)process.exit(23);if(!resumed)writeFileSync(transcript,'first turn');console.log(JSON.stringify({type:'system',subtype:'init',model:'claude-requested',session_id:'snapshot-native-session'}));console.log(JSON.stringify({type:'result',subtype:'success',result:resumed?'resumed with repository':'first snapshot turn',model:'claude-requested',session_id:'snapshot-native-session',usage:{input_tokens:2,output_tokens:1}}));});`;
+  const {base,baseCommit,env,restart} = await setup(t,{claudeBody:body});
+  const seeded = await (await fetch(`${base}/extensions/foreman-workspace/v1/workspaces`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({base_commit:baseCommit})})).json();
+  const turn = async (key,previousResponseId,workspaceId) => {
+    const response = await fetch(`${base}/v1/responses`,{method:'POST',headers:{'Content-Type':'application/json',Accept:'text/event-stream','Idempotency-Key':key},body:JSON.stringify({input:'Plan the correction from the verified result inbox.',model:'claude-requested',previous_response_id:previousResponseId,metadata:{harness_id:'claude-code',foreman_run_id:'run-snapshot-session',foreman_role_id:'orchestrator',foreman_project_id:'project-snapshot-session',...(workspaceId?{foreman_read_only_workspace_id:workspaceId}:{})},stream:true,timeout_seconds:5,max_step:1})});
+    const text = await response.text(); assert.equal(response.status,200,text);
+    return terminalEvent(text.split('\n').filter(line=>line.startsWith('data: ')).map(line=>JSON.parse(line.slice(6)))).response;
+  };
+  const first = await turn('snapshot-session-first',undefined,seeded.workspace_id);
+  assert.equal(first.status,'completed',JSON.stringify(first));
+  assert.equal(await readFile(join(first.metadata.role_session.state_path,'claude-projects','snapshot-session.txt'),'utf8'),'first turn');
+  assert.equal(await stat(join(env.CLAUDE_CONFIG_DIR,'projects','snapshot-session.txt')).catch(()=>null),null);
+  await restart();
+  const second = await turn('snapshot-session-second',first.id);
+  assert.equal(second.status,'completed',JSON.stringify(second));
+  assert.equal(second.output_text,'resumed with repository');
+  assert.equal(second.metadata.foreman_read_only_workspace_id,seeded.workspace_id);
+  assert.equal(second.metadata.role_session.state_path,first.metadata.role_session.state_path);
+  assert.equal(second.session_id,first.session_id);
+});
+
+test('a missing native resume is classified without treating the failed response as a valid predecessor', async t => {
+  const body = `process.stdin.resume();process.stdin.on('end',()=>{if(process.argv.includes('--resume')){console.error('No conversation found with session ID: fixture-missing');process.exit(2)}console.log(JSON.stringify({type:'system',subtype:'init',model:'claude-requested',session_id:'fixture-missing'}));console.log(JSON.stringify({type:'result',subtype:'success',result:'first turn',model:'claude-requested',session_id:'fixture-missing'}));});`;
+  const {base} = await setup(t,{claudeBody:body});
+  const turn = async (key,previousResponseId) => {
+    const response = await fetch(`${base}/v1/responses`,{method:'POST',headers:{'Content-Type':'application/json',Accept:'text/event-stream','Idempotency-Key':key},body:JSON.stringify({input:'Plan a correction.',model:'claude-requested',previous_response_id:previousResponseId,metadata:{harness_id:'claude-code',foreman_run_id:'run-missing-resume',foreman_role_id:'orchestrator',foreman_project_id:'project-missing-resume'},stream:true,timeout_seconds:5,max_step:1})});
+    const text = await response.text();
+    return {status:response.status,result:response.status===200?terminalEvent(text.split('\n').filter(line=>line.startsWith('data: ')).map(line=>JSON.parse(line.slice(6)))).response:JSON.parse(text)};
+  };
+  const first = (await turn('missing-resume-first')).result;
+  assert.equal(first.status,'completed');
+  const failed = (await turn('missing-resume-second',first.id)).result;
+  assert.equal(failed.status,'failed');
+  assert.equal(failed.metadata.cli_failure_category,'session_resume_unavailable');
+  assert.ok(!JSON.stringify(failed).includes('No conversation found with session ID'));
+  const invalid = await turn('missing-resume-third',failed.id);
+  assert.equal(invalid.status,409);
+  assert.equal(invalid.result.error.code,'previous_response_invalid');
+});
+
 test('Claude role mounts create missing transcript directories outside the host auth view', async t => {
   const body=`import {readFileSync} from 'node:fs';process.stdin.resume();process.stdin.on('end',()=>{const ca=readFileSync(process.env.SSL_CERT_FILE,'utf8').includes('-----BEGIN CERTIFICATE-----');const keys=['ANTHROPIC_API_KEY','OPENAI_API_KEY','AWS_ACCESS_KEY_ID','GOOGLE_API_KEY','CODEX_API_KEY','CLAUDE_CODE_USE_BEDROCK','CLAUDE_CODE_USE_VERTEX','CLAUDE_CODE_USE_FOUNDRY'].some(k=>process.env[k]);const proxy=process.env.HTTP_PROXY==='http://fixture-proxy.invalid:8080';console.log(JSON.stringify({type:'system',subtype:'init',model:'claude-requested',session_id:'missing-dirs-session'}));console.log(JSON.stringify({type:'result',subtype:'success',result:'ca='+ca+';proxy='+proxy+';provider_keys='+keys,model:'claude-requested',session_id:'missing-dirs-session',usage:{input_tokens:2,output_tokens:1}}));if(!ca||!proxy||keys)process.exit(9)});`;
   const {base,env}=await setup(t,{claudeAuthRoleDirsAbsent:true,claudeNetworkRequirements:true,claudeBody:body});
