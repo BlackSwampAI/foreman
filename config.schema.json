@@ -23,6 +23,7 @@
     "FOREMAN_FORMAT_COMMAND": { "type": "string", "description": "Optional JSON object {name, command, args, cwd?, network?} for a formatter Foreman runs in the sandboxed validation workspace (after the install commands) on the Worker's added or modified files, before validation. The formatted bytes become the evidence that validation, the Reviewer and promotion use. Runs without network access unless network is true" },
     "FOREMAN_VALIDATION_TIMEOUT_MS": { "type": "integer", "minimum": 1, "maximum": 600000, "default": 120000 },
     "FOREMAN_VALIDATION_MAX_OUTPUT_BYTES": { "type": "integer", "minimum": 1, "maximum": 16777216, "default": 1048576 },
+    "FOREMAN_WORKER_CHECK_ROUNDS": { "type": "integer", "minimum": 0, "maximum": 3, "default": 2, "description": "Worker check gate: after a Worker turn, Foreman runs the configured checks on the paused workspace and resumes the same Worker session with any failures, up to this many times. 0 turns the gate off" },
     "FOREMAN_VALIDATION_SANDBOX": { "type": "string", "enum": ["bwrap", "none"], "default": "bwrap", "description": "bwrap runs every validation command inside a bubblewrap sandbox and fails closed when it is unavailable; none runs them unsandboxed on the host (unsafe opt-out)" },
     "FOREMAN_VALIDATION_SANDBOX_RO_PATHS": { "type": "string", "description": "Comma-separated absolute paths (for example a toolchain under your home directory) mounted read-only into the validation sandbox" }
   }

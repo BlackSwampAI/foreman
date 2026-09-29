@@ -23,6 +23,8 @@ export interface ForemanConfig {
   formatCommand?: {name:string;command:string;args:string[];cwd?:string;network:boolean};
   validationTimeoutMs: number;
   validationMaxOutputBytes: number;
+  /** Worker check-gate rounds: how many times a Worker is resumed in its own session with failing checks before its turn ends. 0 turns the gate off. */
+  workerCheckRounds: number;
   validationSandbox: { mode: ValidationSandboxMode; roPaths: string[]; dataDir: string; cacheDir: string };
 }
 
@@ -95,6 +97,7 @@ export function loadConfig(): ForemanConfig {
     ...(formatCommand ? { formatCommand } : {}),
     validationTimeoutMs: integer('FOREMAN_VALIDATION_TIMEOUT_MS', 120000, 1, 600000),
     validationMaxOutputBytes: integer('FOREMAN_VALIDATION_MAX_OUTPUT_BYTES', 1048576, 1, 16777216),
+    workerCheckRounds: integer('FOREMAN_WORKER_CHECK_ROUNDS', 2, 0, 3),
     validationSandbox: { mode: sandboxMode, roPaths: sandboxRoPaths.map(path => resolve(path)), dataDir, cacheDir: resolve(dataDir, 'validation-cache') }
   };
 }

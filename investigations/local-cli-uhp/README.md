@@ -234,6 +234,12 @@ idempotency key, and a persisted workspace ID for replay.
 `LOCAL_CLI_UHP_SMOKE_KEY_FILE`
 and `LOCAL_CLI_UHP_EVIDENCE_FILE` select the key and evidence paths.
 
+## Worker check gate
+
+A Worker request may carry `metadata.foreman_worker_gate: {"max_rounds": 1-3}` (Reviewer and Planner/Orchestrator requests are refused with `worker_gate_role_unsupported`). Discovery advertises it as `extensions.foreman_worker_gate_v1`.
+
+After each completed Worker turn the task stays `in_progress` and the bridge records a `response.activity` event with `kind: "worker_gate"` and `gate_round: N`. While paused, no CLI is running, so the workspace snapshot endpoint serves a complete snapshot for Foreman's checks (overlay stays refused). Foreman answers with `POST /extensions/foreman-workspace/v1/responses/{id}/worker-gate` and `{"round": N, "status": "passed" | "failed" | "skipped", "feedback"?, "failed_checks"?}`; a verdict for any other round is refused with 409. On `failed`, the bridge resumes the same native session with the feedback: `--resume` for Claude Code (the transcript directories are bound per workspace, like a role session), `exec resume` without `--ephemeral` for Codex (its per-workspace `CODEX_HOME` is kept), and `--conversation` for Antigravity (its per-workspace state directory is kept). Any other verdict, no verdict within `LOCAL_CLI_UHP_WORKER_GATE_TIMEOUT_MS` (default 15 minutes), a failed turn or a cancellation ends the task as the last turn left it. `metadata.worker_gate` records each round; usage is summed across Claude Code and Codex turns and taken from the last Antigravity turn, whose usage is cumulative per conversation. `cli_invocation` stays the first turn's invocation. The kept session state is deleted when the task ends.
+
 ## Recorded live proof
 
 The first Claude workspace attempt failed closed at `boundary_probe` before CLI

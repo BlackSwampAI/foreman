@@ -17,6 +17,7 @@ import { roleSessionBinding, roleStatePath, resolvePreviousRoleSession, withRole
 import { claudeCodeCliArgs, codexCliArgs } from './cli-args.mjs';
 import { bwrapBaseArgs } from './bwrap-args.mjs';
 import { readClaudeControlUsage } from './claude-quota.mjs';
+import { parseWorkerGateRequest, parseWorkerGateVerdict, workerGatePrompt, addUsage, MAX_WORKER_GATE_ROUNDS } from './worker-gate.mjs';
 
 const VERSION = '2026-09-12';
 const utf8 = new TextDecoder('utf-8', { fatal: true });
@@ -35,6 +36,8 @@ const BWRAP = process.env.LOCAL_CLI_UHP_BWRAP ?? 'bwrap';
 const MAX_PROMPT = 16_000;
 const MAX_OUTPUT = 64_000;
 const MAX_TIMEOUT = 900;
+// How long a gated Worker waits for Foreman's check verdict before ending its turn as it is.
+const WORKER_GATE_TIMEOUT_MS = (() => { const value = Number(process.env.LOCAL_CLI_UHP_WORKER_GATE_TIMEOUT_MS); return Number.isFinite(value) && value > 0 ? value : 15 * 60_000; })();
 const MAX_REVIEW_DIFF = 48_000;
 const SSE_KEEPALIVE_MS = (() => { const value = Number(process.env.LOCAL_CLI_UHP_KEEPALIVE_MS); return Number.isFinite(value) && value > 0 ? Math.min(value, 60_000) : 10_000; })();
 const AGY_WORKER_AGENT = 'foreman-worker';
@@ -199,11 +202,12 @@ function safeToolName(value) {
   const name = value.replace(/[^A-Za-z0-9_.-]/g, '').slice(0, 40);
   return name ? `the ${name} tool` : 'a tool';
 }
-function recordActivity(task, summary) {
-  if (task.activityTotal >= ACTIVITY_TOTAL_LIMIT) return;
+function recordActivity(task, summary, gateRound) {
+  if (task.activityTotal >= ACTIVITY_TOTAL_LIMIT && !gateRound) return;
   const safe = safeActivityText(summary);
   if (!safe || task.activity.at(-1)?.summary === safe) return;
-  task.activity.push({ index: ++task.activityTotal, kind: /^Using /.test(safe) ? 'tool' : 'commentary', summary: safe });
+  // A Worker check-gate pause is always recorded: Foreman acts on it, so the activity cap must not drop it.
+  task.activity.push({ index: ++task.activityTotal, kind: gateRound ? 'worker_gate' : /^Using /.test(safe) ? 'tool' : 'commentary', summary: safe, ...(gateRound ? { gate_round: gateRound } : {}) });
   if (task.activity.length > ACTIVITY_LIMIT) task.activity.splice(0, task.activity.length - ACTIVITY_LIMIT);
   for (const notify of task.activityListeners) notify();
 }
@@ -479,9 +483,9 @@ function parseAgy(text, stderr = '') {
   const distinctToolSteps = new Set(toolEvents.map((update, ordinal) => Number.isSafeInteger(update.step_index) ? String(update.step_index) : `unindexed:${ordinal}`));
   return { text: responseText, model, session: conversation, turnCompleted: !!result, isError: result?.status !== 'SUCCESS', mutationAttempted, malformedOutput, unrecognizedOutput, usage: result?.usage && typeof result.usage === 'object' ? result.usage : undefined, diagnostic:{ permission_mode:permissionMode, observed_agent:agent ?? 'unreported', cwd, available_tools:initTools, available_tools_semantics:'headless_init_tools_available_to_cli_not_profile_allowlist', tool_events:toolEvents, tool_lifecycle_update_count:toolUpdates.length, distinct_tool_step_count:distinctToolSteps.size, reported_cli_turns:reportedCliTurns, soft_denial_observed:softDenialObserved, result_status:typeof result?.status === 'string' && /^(SUCCESS|ERROR|CANCELED|INTERRUPTED|INVALID|WAITING|RUNNING)$/.test(result.status) ? result.status : 'unreported', response_empty:responseText.length === 0, response_characters:responseText.length, streamed_agent_text_characters:chunks.reduce((n,s)=>n+s.length,0) } };
 }
-function cliArgs(kind, model, timeout, maxStep, reviewer = false, sessionId, persistentContext = false) {
+function cliArgs(kind, model, timeout, maxStep, reviewer = false, sessionId, persistentContext = false, keepSession = false) {
   if (kind === 'claude') return claudeCodeCliArgs(model, { reviewer, sessionId, persistentContext, maxStep });
-  return codexCliArgs(model, { reviewer, sessionId, persistentContext });
+  return codexCliArgs(model, { reviewer, sessionId, persistentContext, keepSession });
 }
 function agyArgs(model, timeout, conversationId, reviewer = false, worker = false) {
   return ['--output-format', 'stream-json', '--model', model, '--print-timeout', `${timeout}s`, `--mode=${reviewer ? 'plan' : 'accept-edits'}`, ...(worker ? ['--add-dir','/workspace','--agent', AGY_WORKER_AGENT, ...(AGY_WORKER_EFFORT ? ['--effort', AGY_WORKER_EFFORT] : [])] : []), ...(conversationId ? ['--conversation', conversationId] : [])];
@@ -783,9 +787,11 @@ async function claudeAuthMountArgs(ws) {
   }
   // Claude may create these directories even on its first turn. Keep its role
   // transcript/state writable while the host sign-in/config view stays RO.
-  if (ws.roleStatePath) {
+  // A gated Worker keeps its transcript the same way, per workspace, so a check round can resume the session.
+  const statePath = ws.roleStatePath ?? ws.workerSessionPath;
+  if (statePath) {
     for (const name of CLAUDE_ROLE_DIRS) {
-      const source = join(ws.roleStatePath, `claude-${name}`);
+      const source = join(statePath, `claude-${name}`);
       await mkdir(source, { recursive:true, mode:0o700 });
       args.push('--dir',`/auth/${name}`,'--bind',source,`/auth/${name}`);
     }
@@ -1041,6 +1047,63 @@ async function resolveBinary(name) {
 }
 
 async function runTask(record, prompt) {
+  const active = tasks.get(record.id), gate = active.gate;
+  if (!gate) return (await runCliTurn(record, prompt)).finalize();
+  return runGatedWorkerTask(record, prompt, active, gate);
+}
+
+/**
+ * A Worker turn with Foreman's check gate: after each completed CLI turn the task stays in progress while Foreman
+ * checks the workspace. A failed verdict resumes the same CLI session with the failures, up to the requested number
+ * of rounds. Any other verdict, a timeout, a failed turn or a cancellation ends the task as the last turn left it.
+ */
+async function runGatedWorkerTask(record, prompt, active, gate) {
+  const ws = workspaces.get(record.metadata.workspace_id);
+  if (ws) { ws.workerSessionPath = join(ROOT, `${ws.id}.worker-session`); await mkdir(ws.workerSessionPath, { recursive: true, mode: 0o700 }); }
+  let turn;
+  try {
+    turn = await runCliTurn(record, prompt, { hold: true, keepSession: true });
+    const firstInvocation = record.metadata.cli_invocation, cumulativeUsage = record.metadata.harness_id === 'antigravity-cli';
+    let usage = record.usage;
+    const rounds = [];
+    const publish = state => { record.metadata.worker_gate = { max_rounds: gate.maxRounds, state, rounds: rounds.map(r => ({ ...r })) }; };
+    publish('running');
+    while (turn.status === 'completed' && rounds.length < gate.maxRounds && !active.cancelRequested) {
+      const round = rounds.length + 1;
+      publish('awaiting_check');
+      const verdict = await awaitWorkerGateVerdict(active, round, gate.maxRounds);
+      rounds.push({ round, status: verdict.status, ...(verdict.failedChecks ? { failed_checks: verdict.failedChecks } : {}), ...(verdict.reason ? { reason: verdict.reason } : {}) });
+      if (verdict.status !== 'failed' || !record.session_id || active.cancelRequested) break;
+      publish('fixing');
+      recordActivity(active, `Foreman checks failed; resuming the Worker to fix them (round ${round} of ${gate.maxRounds})`);
+      turn = await runCliTurn(record, workerGatePrompt(verdict.feedback, round, gate.maxRounds), { hold: true, keepSession: true, resumeSession: record.session_id });
+      usage = cumulativeUsage ? record.usage : addUsage(usage, record.usage);
+    }
+    publish('finished');
+    if (usage) record.usage = usage;
+    if (firstInvocation) record.metadata.cli_invocation = firstInvocation;
+    record.status = active.cancelRequested ? 'cancelled' : turn.status;
+    if (record.status === 'cancelled' && !record.error) record.error = { message: 'CLI task was cancelled' };
+  } finally {
+    gate.pending = undefined;
+    if (ws?.workerSessionPath) { await rm(ws.workerSessionPath, { recursive: true, force: true }).catch(() => undefined); ws.workerSessionPath = undefined; }
+  }
+  await turn.finalize();
+}
+
+/** Pause until Foreman posts the verdict for `round`, the task is cancelled, or the wait times out (then the turn simply ends). */
+function awaitWorkerGateVerdict(active, round, maxRounds) {
+  return new Promise(resolveVerdict => {
+    const settle = verdict => { if (active.gate.pending?.round !== round) return; clearTimeout(timer); active.gate.pending = undefined; resolveVerdict(verdict); };
+    const timer = setTimeout(() => settle({ round, status: 'skipped', reason: 'verdict_timeout' }), WORKER_GATE_TIMEOUT_MS);
+    timer.unref?.();
+    active.gate.pending = { round, settle };
+    recordActivity(active, `Waiting for Foreman checks (round ${round} of ${maxRounds})`, round);
+    if (active.cancelRequested) settle({ round, status: 'skipped', reason: 'cancelled' });
+  });
+}
+
+async function runCliTurn(record, prompt, turn = {}) {
   const h = cliFor(record.metadata.harness_id), kind = h.id === 'claude-code' ? 'claude' : h.id === 'codex-cli' ? 'codex-cli' : 'agy';
   const reviewer = record.metadata.foreman_review_mode === 'read_only';
   const persistentRole = record.metadata.role_session_binding !== undefined;
@@ -1064,16 +1127,16 @@ async function runTask(record, prompt) {
   const inheritedNames = new Set(['PATH','HOME','USER','LOGNAME','LANG','LC_ALL','TERM','TMPDIR','TMP','TEMP','XDG_RUNTIME_DIR','SSL_CERT_FILE','SSL_CERT_DIR','NODE_EXTRA_CA_CERTS','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY','DBUS_SESSION_BUS_ADDRESS']);
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => inheritedNames.has(name)));
   Object.assign(env, kind === 'claude' ? { CLAUDE_CONFIG_DIR: '/auth' } : kind === 'codex-cli' ? { CODEX_HOME: reviewer ? h.authDir : '/auth' } : {});
-  const nativeSessionId = record.metadata.conversation_id;
+  const nativeSessionId = turn.resumeSession ?? record.metadata.conversation_id;
   const agyWorker = kind === 'agy' && !reviewer && !persistentRole;
-  const args = kind === 'agy' ? agyArgs(record.requested_model, record.timeout_seconds, nativeSessionId, reviewer || persistentRole, agyWorker) : cliArgs(kind, record.requested_model, record.timeout_seconds, record.max_step, reviewer, nativeSessionId, persistentRole);
+  const args = kind === 'agy' ? agyArgs(record.requested_model, record.timeout_seconds, nativeSessionId, reviewer || persistentRole, agyWorker) : cliArgs(kind, record.requested_model, record.timeout_seconds, record.max_step, reviewer, nativeSessionId, persistentRole, turn.keepSession === true);
   if (kind === 'agy') {
     record.metadata.cli_invocation = { executable: '/opt/agy', host_executable: h.bin, args: ['-p', '<bounded prompt>', ...args] };
     record.metadata.actual_model_status = 'unavailable';
   }
   if (kind === 'claude' && persistentRole) record.metadata.cli_invocation = { executable: '/opt/claude', host_executable: h.bin, args: [...args] };
   const input = reviewer ? reviewerPrompt(prompt, record.metadata.review_evidence) : kind === 'agy' && !persistentRole ? agyWorkerPrompt(prompt) : prompt;
-  if (kind !== 'claude' && !reviewer) record.metadata.submitted_prompt_sha256 = createHash('sha256').update(input).digest('hex');
+  if (kind !== 'claude' && !reviewer && !turn.resumeSession) record.metadata.submitted_prompt_sha256 = createHash('sha256').update(input).digest('hex');
   const reviewerState = reviewer ? { dir: work, authDir: kind === 'claude' ? await realpath(h.authDir) : undefined } : undefined;
   let codexRuntime;
   if (kind === 'codex-cli') {
@@ -1134,7 +1197,9 @@ async function runTask(record, prompt) {
   const invalidAgyWorkerPolicy = !!agyWorker && (!agyWorkerPolicy?.selected_agent_matches || !agyWorkerPolicy.executed_tools_within_profile);
   if (agyWorkerPolicy) record.metadata.agy_worker_tool_policy = { ...agyWorkerPolicy, configured_agent: AGY_WORKER_AGENT, command_execution_policy: 'off', available_tools_are_diagnostic_only:true, execution_observations_passed: !invalidAgyWorkerPolicy };
   if (agyWorkerPolicy?.tolerated_tool_events?.length) record.metadata.tolerated_tool_warning = `Worker used tolerated AGY built-in tool(s) (assumed no filesystem/command effect; snapshot diff and commandExecutionPolicy "off" are the safety boundary): ${agyWorkerPolicy.tolerated_tool_events.join(', ')}`;
-  record.status = active.cancelRequested ? 'cancelled' : spawnError ? 'failed' : parsed.isError || invalidJsonStream || invalidAgyWorkerPolicy || missingReportedIdentity || reviewerFailed ? 'failed' : exit.code === 0 ? 'completed' : exit.signal === 'SIGTERM' ? 'incomplete' : 'failed';
+  const status = active.cancelRequested ? 'cancelled' : spawnError ? 'failed' : parsed.isError || invalidJsonStream || invalidAgyWorkerPolicy || missingReportedIdentity || reviewerFailed ? 'failed' : exit.code === 0 ? 'completed' : exit.signal === 'SIGTERM' ? 'incomplete' : 'failed';
+  // A held (gated) turn leaves the task in progress; the gate loop sets the final status.
+  if (!turn.hold) record.status = status;
   record.output_text = parsed.text;
   if (parsed.model) record.model = parsed.model;
   if (kind === 'codex-cli') record.metadata.actual_model_status = parsed.model ? 'observed' : 'unavailable';
@@ -1167,7 +1232,7 @@ async function runTask(record, prompt) {
   }
   if (reviewer) { record.metadata.foreman_review_mode = 'read_only'; record.metadata.reviewer_mutation_attempted = parsed.mutationAttempted === true; record.metadata.reviewer_output_overflow = cliOutputOverflow; record.metadata.reviewer_validation = record.metadata.review_evidence.controllerValidation; if (kind === 'agy') record.metadata.reviewer_boundary = { ...record.metadata.reviewer_boundary, tool_attempts_blocked: parsed.mutationAttempted === true, proven: true }; }
   if (kind !== 'claude' && !reviewer) record.metadata.cli_output_overflow = cliOutputOverflow;
-  if (record.status !== 'completed') record.error = { message: spawnError ? 'CLI could not be started' : invalidAgyWorkerPolicy ? agyWorkerPolicyFailureMessage({ ...parsed.diagnostic, ...agyWorkerPolicy }) : reviewer && parsed.mutationAttempted ? 'Reviewer attempted to use a tool or mutate state' : cliOutputOverflow ? 'CLI output exceeded the bounded stream limit' : (reviewer || kind !== 'claude') && (parsed.malformedOutput || parsed.unrecognizedOutput) ? 'CLI output contained malformed or unrecognized stream records' : kind === 'codex-cli' && !reviewer && !parsed.session ? exit.code !== 0 || exit.signal ? 'Codex CLI exited before reporting a session id' : 'Codex CLI did not report a session id' : (kind === 'codex-cli' || kind === 'agy') && !reviewer && !parsed.turnCompleted ? `${kind === 'agy' ? 'Antigravity CLI' : 'Codex CLI'} exited without completing a turn` : parsed.isError ? kind === 'claude' ? 'Claude Code reported an unsuccessful task' : kind === 'agy' ? 'Antigravity CLI reported an unsuccessful task' : 'Codex CLI reported an unsuccessful task' : missingReportedIdentity ? 'CLI did not report an actual model and session id' : active.cancelRequested ? 'CLI task was cancelled' : exit.signal ? `CLI terminated by ${exit.signal}` : 'CLI exited unsuccessfully' };
+  if (status !== 'completed') record.error = { message: spawnError ? 'CLI could not be started' : invalidAgyWorkerPolicy ? agyWorkerPolicyFailureMessage({ ...parsed.diagnostic, ...agyWorkerPolicy }) : reviewer && parsed.mutationAttempted ? 'Reviewer attempted to use a tool or mutate state' : cliOutputOverflow ? 'CLI output exceeded the bounded stream limit' : (reviewer || kind !== 'claude') && (parsed.malformedOutput || parsed.unrecognizedOutput) ? 'CLI output contained malformed or unrecognized stream records' : kind === 'codex-cli' && !reviewer && !parsed.session ? exit.code !== 0 || exit.signal ? 'Codex CLI exited before reporting a session id' : 'Codex CLI did not report a session id' : (kind === 'codex-cli' || kind === 'agy') && !reviewer && !parsed.turnCompleted ? `${kind === 'agy' ? 'Antigravity CLI' : 'Codex CLI'} exited without completing a turn` : parsed.isError ? kind === 'claude' ? 'Claude Code reported an unsuccessful task' : kind === 'agy' ? 'Antigravity CLI reported an unsuccessful task' : 'Codex CLI reported an unsuccessful task' : missingReportedIdentity ? 'CLI did not report an actual model and session id' : active.cancelRequested ? 'CLI task was cancelled' : exit.signal ? `CLI terminated by ${exit.signal}` : 'CLI exited unsuccessfully' };
   if (record.error && kind === 'agy') {
     const denied = (parsed.diagnostic?.tool_events ?? []).filter(e => e.error_category === 'permission_denied');
     if (denied.length >= 3) {
@@ -1179,6 +1244,7 @@ async function runTask(record, prompt) {
   if (persistentRole && parsed.session) {
     record.metadata.role_session = { binding: record.metadata.role_session_binding, cli_session_id: parsed.session, state_path: record.metadata.role_session_state_path };
   }
+  const finalize = async () => {
   await persist();
   touchWorkspace(ws); touchWorkspace(roWs);
   for (const finish of active.finishListeners ?? []) finish();
@@ -1188,6 +1254,8 @@ async function runTask(record, prompt) {
   }
   if (kind === 'agy' && taskWorkspace.agyStateDir) { await rm(taskWorkspace.agyStateDir, { recursive: true, force: true }).catch(() => undefined); taskWorkspace.agyStateDir = undefined; }
   if (reviewer) { await rm(work, { recursive: true, force: true }); tasks.get(record.id).reviewerWorkDir = undefined; }
+  };
+  return { status, finalize };
 }
 
 function classifyCodexFailure(stderr, exit, spawnError) {
@@ -1291,7 +1359,7 @@ async function runAgySandboxed(ws, reviewer, args, env, prompt, preflight = fals
   const configPath = `${isolatedHome}/.gemini/antigravity-cli`;
   const stateDir = ws.roleStatePath ? join(ws.roleStatePath, 'agy-state') : join(ROOT, `${ws.id}.agy-state`);
   const writableConfigDirs = ['log','crashes','brain','conversations','cache','updater','presence','annotations','implicit','scratch'];
-  await mkdir(stateDir, { recursive: persistentContext, mode: 0o700 });
+  await mkdir(stateDir, { recursive: persistentContext || !!ws.workerSessionPath, mode: 0o700 });
   const stateMounts = [];
   for (const name of writableConfigDirs) {
     const source = join(stateDir, name); await mkdir(source, { recursive: true, mode: 0o700 });
@@ -1421,7 +1489,7 @@ const server = createServer(async (req, res) => {
   let url;
   try { url = new URL(req.url, 'http://localhost'); } catch { return send(res, 400, { error: { code: 'invalid_url' } }); }
   try {
-    if (req.method === 'GET' && url.pathname === '/v1/uhp') return send(res, 200, { protocol: 'uhp', versions: [VERSION], default_version: VERSION, implementation: { name: 'local-cli-uhp', experimental: true }, capabilities: { streaming: true, idempotency: true, sessions: true, cancellation: true, readOnlyReviewer: true, extensions: { foreman_workspace_bridge_v1: { version: 1, seed: !!SOURCE_REPO, complete_snapshot: true, execution_boundary: 'bubblewrap' } } } });
+    if (req.method === 'GET' && url.pathname === '/v1/uhp') return send(res, 200, { protocol: 'uhp', versions: [VERSION], default_version: VERSION, implementation: { name: 'local-cli-uhp', experimental: true }, capabilities: { streaming: true, idempotency: true, sessions: true, cancellation: true, readOnlyReviewer: true, extensions: { foreman_workspace_bridge_v1: { version: 1, seed: !!SOURCE_REPO, complete_snapshot: true, execution_boundary: 'bubblewrap' }, foreman_worker_gate_v1: { version: 1, max_rounds: MAX_WORKER_GATE_ROUNDS } } } });
     if (req.method === 'POST' && url.pathname === '/extensions/foreman-workspace/v1/workspaces') {
       const b = await body(req); const ws = await seedWorkspace(b.base_commit);
       return send(res, 201, { workspace_id: ws.id, base_commit: ws.baseCommit });
@@ -1448,9 +1516,11 @@ const server = createServer(async (req, res) => {
       const ws = workspaces.get(decodeURIComponent(snapshotPath[1]));
       if (!ws) return send(res, 404, { error: { code: 'workspace_not_found' } });
       const response = ws.responseId ? state.responses[ws.responseId] : undefined;
-      if (response?.status === 'in_progress') return send(res, 409, { error: { code: 'workspace_task_in_progress' } });
+      // A Worker paused for Foreman's checks has no CLI running, so its workspace can be read for those checks.
+      const pausedForChecks = response?.status === 'in_progress' && !!tasks.get(ws.responseId)?.gate?.pending;
+      if (response?.status === 'in_progress' && !pausedForChecks) return send(res, 409, { error: { code: 'workspace_task_in_progress' } });
       const snapshot = await withWorkspaceOp(ws, () => snapshotWorkspace(ws));
-      if (ws.responseId && response?.status !== 'completed') {
+      if (ws.responseId && response?.status !== 'completed' && !pausedForChecks) {
         snapshot.complete = false;
         snapshot.errors.push({ path: '.', error: `task_status_${response?.status ?? 'unknown'}` });
       }
@@ -1474,8 +1544,18 @@ const server = createServer(async (req, res) => {
     }
     const responsePath = url.pathname.match(/^\/v1\/responses\/([^/]+)$/);
     if (req.method === 'GET' && responsePath) { const r = state.responses[decodeURIComponent(responsePath[1])]; return r ? send(res, 200, r) : send(res, 404, { error: { code: 'not_found' } }); }
+    const gatePath = url.pathname.match(/^\/extensions\/foreman-workspace\/v1\/responses\/([^/]+)\/worker-gate$/);
+    if (req.method === 'POST' && gatePath) {
+      const t = tasks.get(decodeURIComponent(gatePath[1]));
+      if (!t?.gate) return send(res, 404, { error: { code: 'worker_gate_not_found' } });
+      let verdict;
+      try { verdict = parseWorkerGateVerdict(await body(req)); } catch (error) { return send(res, 400, { error: { code: 'worker_gate_verdict_invalid', message: error.message } }); }
+      if (t.gate.pending?.round !== verdict.round) return send(res, 409, { error: { code: 'worker_gate_not_awaiting', message: `the task is not waiting for check round ${verdict.round}` } });
+      t.gate.pending.settle(verdict);
+      return send(res, 202, { id: t.response.id, round: verdict.round, accepted: true });
+    }
     const cancelPath = url.pathname.match(/^\/v1\/responses\/([^/]+)\/cancel$/);
-    if (req.method === 'POST' && cancelPath) { const t = tasks.get(decodeURIComponent(cancelPath[1])); if (!t) return send(res, 404, { error: { code: 'not_found' } }); if (t.child && t.response.status === 'in_progress') { t.cancelRequested = true; t.child.kill('SIGTERM'); } return send(res, 200, { status: t.response.status === 'in_progress' ? 'cancelling' : t.response.status }); }
+    if (req.method === 'POST' && cancelPath) { const t = tasks.get(decodeURIComponent(cancelPath[1])); if (!t) return send(res, 404, { error: { code: 'not_found' } }); if (t.child && t.response.status === 'in_progress') { t.cancelRequested = true; t.child.kill('SIGTERM'); } if (t.gate?.pending) { t.cancelRequested = true; t.gate.pending.settle({ round: t.gate.pending.round, status: 'skipped', reason: 'cancelled' }); } return send(res, 200, { status: t.response.status === 'in_progress' ? 'cancelling' : t.response.status }); }
     if (req.method === 'POST' && url.pathname === '/v1/responses') {
       const key = req.headers['idempotency-key']; if (typeof key !== 'string' || !key) return send(res, 400, { error: { code: 'idempotency_key_required' } });
       const prior = state.keys[key];
@@ -1497,6 +1577,9 @@ const server = createServer(async (req, res) => {
       const roleId = b.metadata?.foreman_role_id ?? b.metadata?.role_id;
       const persistentRole = roleId === 'planner' || roleId === 'orchestrator';
       const roWorkspaceId = typeof b.metadata?.foreman_read_only_workspace_id === 'string' ? b.metadata.foreman_read_only_workspace_id : undefined;
+      let workerGate;
+      try { workerGate = parseWorkerGateRequest(b.metadata.foreman_worker_gate); } catch (error) { return send(res, 400, { error: { code: 'worker_gate_invalid', message: error.message } }); }
+      if (workerGate && (reviewer || persistentRole)) return send(res, 400, { error: { code: 'worker_gate_role_unsupported' } });
       let roleSession;
       if (b.previous_response_id !== undefined && !persistentRole) return send(res, 400, { error: { code: 'session_role_unsupported' } });
       if (persistentRole) {
@@ -1536,7 +1619,7 @@ const server = createServer(async (req, res) => {
       const record = { id, object: 'response', status: 'in_progress', requested_model: b.model, metadata: { ...b.metadata, harness_id: h.id, ...(workspaceId ? { workspace_id: workspaceId } : {}) }, timeout_seconds: timeout, max_step: steps };
       if (ws) { ws.responseId = id; state.workspaces[ws.id].responseId = id; touchWorkspace(ws); }
       touchWorkspace(workspaces.get(roWorkspaceId));
-      state.keys[key] = id; state.responses[id] = record; const task = { response: record, finishListeners: new Set(), activity: [], activityTotal: 0, activityListeners: new Set(), activityRemainder: '' }; recordActivity(task, 'Preparing isolated runtime'); tasks.set(id, task);
+      state.keys[key] = id; state.responses[id] = record; const task = { response: record, finishListeners: new Set(), activity: [], activityTotal: 0, activityListeners: new Set(), activityRemainder: '', ...(workerGate ? { gate: workerGate } : {}) }; recordActivity(task, 'Preparing isolated runtime'); tasks.set(id, task);
       await persist(); // durable idempotency intent before spawning any CLI process
       runTask(record, b.input).catch(async error => { record.status = 'failed'; record.error = { message: 'CLI task failed internally' }; if(task.reviewerWorkDir) { await rm(task.reviewerWorkDir,{recursive:true,force:true}).catch(()=>undefined); task.reviewerWorkDir=undefined; } const ws = workspaces.get(record.metadata.workspace_id); if (ws) { record.metadata.execution_boundary = ws.boundary ?? { proven: false, error: 'execution_boundary_unavailable' }; record.metadata.execution_stage = ws.executionStage ?? 'task_setup'; if (ws.boundaryDiagnostic) record.metadata.execution_boundary_diagnostic = ws.boundaryDiagnostic; else if (/^boundary_probe_failed:/.test(String(error?.message))) record.metadata.execution_boundary_diagnostic = { category: String(error.message).split(':')[1] ?? 'probe_failed', exit_code: Number(String(error.message).split(':')[2]) || null, signal: null }; if (record.metadata.harness_id === 'codex-cli' && record.metadata.foreman_review_mode !== 'read_only') { record.metadata.cli_exit = { exit_code: null, signal: null }; record.metadata.cli_failure_category = record.metadata.execution_stage === 'resolve_auth' ? 'host_auth_unavailable' : record.metadata.execution_stage === 'boundary_probe' ? 'boundary_setup' : record.metadata.execution_stage === 'runtime_mount' ? 'runtime_setup' : 'cli_setup'; await rm(ws.codexHome, { recursive: true, force: true }).catch(() => undefined); } } await persist(); for (const finish of task.finishListeners) finish(); });
       return streamResponse(res, record, task);
@@ -1559,7 +1642,7 @@ function streamResponse(res, record, task = tasks.get(record.id)) {
       const activity = items.find(item => item.index === activityCursor);
       activityCursor++;
       if (!activity) continue;
-      event(res, 'response.activity', sequence++, { id: record.id, object: 'response', status: 'in_progress', activity: { kind: activity.kind, summary: activity.summary } });
+      event(res, 'response.activity', sequence++, { id: record.id, object: 'response', status: 'in_progress', activity: { kind: activity.kind, summary: activity.summary, ...(activity.gate_round ? { gate_round: activity.gate_round } : {}) } });
     }
   };
   const stopHeartbeat = () => { if (heartbeat) { clearInterval(heartbeat); heartbeat = undefined; } };

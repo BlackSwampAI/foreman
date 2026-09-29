@@ -59,6 +59,14 @@ export async function overlayBridgeWorkspace(baseUrl:string,workspaceId:string,e
   if(typeof body.workspace_id!=='string'||typeof body.applied!=='number')throw new Error('Workspace bridge returned an invalid overlay result');
   return {workspaceId:body.workspace_id,applied:body.applied};
 }
+/** Report Foreman's check verdict for a Worker the bridge paused after its turn (the Worker check gate). */
+export async function postWorkerGateVerdict(baseUrl:string,responseId:string,verdict:{round:number;status:'passed'|'failed'|'skipped';feedback?:string;failedChecks?:string[]},options:number|BridgeRequestOptions=15_000):Promise<void>{
+  if(!responseId||responseId.includes('/')||responseId.includes('\\'))throw new Error('Invalid bridge response ID');
+  const endpoint=bridgeEndpoint(baseUrl,`/extensions/foreman-workspace/v1/responses/${encodeURIComponent(responseId)}/worker-gate`);
+  const body={round:verdict.round,status:verdict.status,...(verdict.feedback?{feedback:verdict.feedback}:{}),...(verdict.failedChecks?.length?{failed_checks:verdict.failedChecks}:{})};
+  const response=await fetch(endpoint,{method:'POST',headers:bridgeHeaders(options,{'content-type':'application/json'}),body:JSON.stringify(body),signal:AbortSignal.timeout(bridgeTimeout(options))});
+  if(!response.ok)throw bridgeFailure('check verdict request failed',response.status);
+}
 export async function seedBridgeWorkspace(baseUrl:string,pinnedBaseCommit:string,options:number|BridgeRequestOptions=15_000):Promise<{workspaceId:string;baseCommit:string}>{
   if(!SHA.test(pinnedBaseCommit))throw new Error('A full pinned base commit SHA is required');
   const timeoutMs=bridgeTimeout(options);
