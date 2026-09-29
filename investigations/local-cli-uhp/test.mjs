@@ -1221,3 +1221,130 @@ test('the TTL sweep removes idle workspaces but never one with a running respons
   assert.ok(await until(async () => !(await exists(busyDir))), 'the finished workspace was never swept once idle');
   const persisted = JSON.parse(await readFile(env.LOCAL_CLI_UHP_STATE, 'utf8')).workspaces; assert.equal(persisted[idle], undefined); assert.equal(persisted[busy], undefined);
 });
+
+// Worker check gate: the bridge pauses a completed Worker turn, Foreman checks the paused workspace, and a failed verdict
+// resumes the same CLI session with the failures.
+async function streamGatedWorker(base, { harness, model, key, workspaceId, rounds = 2, onGate }) {
+  const r = await fetch(`${base}/v1/responses`, { method:'POST', headers:{ 'Content-Type':'application/json', Accept:'text/event-stream', 'UHP-Version':'2026-09-12', 'Idempotency-Key':key }, body:JSON.stringify({ input:'Change README.md', model, metadata:{ harness_id:harness, workspace_id:workspaceId, foreman_worker_gate:{ max_rounds:rounds } }, stream:true, timeout_seconds:5, max_step:1 }) });
+  if (r.status !== 200) assert.fail(await r.text());
+  const reader = r.body.getReader(), decoder = new TextDecoder(), events = []; let buffer = '';
+  for (;;) {
+    const { value, done } = await reader.read(); if (done) break;
+    buffer += decoder.decode(value, { stream:true });
+    let cut; while ((cut = buffer.indexOf('\n\n')) >= 0) {
+      const chunk = buffer.slice(0, cut); buffer = buffer.slice(cut + 2);
+      const line = chunk.split('\n').find(x => x.startsWith('data: ')); if (!line) continue;
+      const item = JSON.parse(line.slice(6)); events.push(item);
+      if (item.type === 'response.activity' && item.response.activity.kind === 'worker_gate') await onGate(item.response.activity.gate_round, item.response.id);
+    }
+  }
+  return events;
+}
+const postVerdict = (base, responseId, verdict) => fetch(`${base}/extensions/foreman-workspace/v1/responses/${responseId}/worker-gate`, { method:'POST', headers:{ 'Content-Type':'application/json' }, body:JSON.stringify(verdict) });
+const seedWorkspace = async (base, baseCommit) => (await (await fetch(`${base}/extensions/foreman-workspace/v1/workspaces`, { method:'POST', headers:{ 'Content-Type':'application/json' }, body:JSON.stringify({ base_commit:baseCommit }) })).json()).workspace_id;
+
+test('check gate resumes a Claude Worker in its own kept session with the failure feedback', async t => {
+  // First turn writes a wrong README and records a transcript; the resumed turn must see that transcript and the feedback.
+  const claudeBody = `import {writeFileSync,readFileSync,existsSync,appendFileSync,mkdirSync} from 'node:fs'; let prompt='';process.stdin.setEncoding('utf8');process.stdin.on('data',c=>prompt+=c);process.stdin.on('end',()=>{const resume=process.argv.includes('--resume')?process.argv[process.argv.indexOf('--resume')+1]:''; const transcript=process.env.CLAUDE_CONFIG_DIR+'/projects/gate-transcript'; const kept=existsSync(transcript); mkdirSync(process.env.CLAUDE_CONFIG_DIR+'/projects',{recursive:true}); writeFileSync(transcript,'turn'); appendFileSync('.gate-log',JSON.stringify({resume,kept,feedback:prompt.includes('lint failed: README must say fixed')})+'\\n'); writeFileSync('README.md',resume?'fixed\\n':'first\\n'); const model='claude-actual'; console.log(JSON.stringify({type:'system',subtype:'init',model,session_id:'gate-session'})); console.log(JSON.stringify({type:'result',subtype:'success',is_error:false,result:resume?'Fixed the check.':'Changed README.',model,session_id:'gate-session',usage:{input_tokens:7,output_tokens:3,cache_read_input_tokens:2}}));});`;
+  const { base, baseCommit, env } = await setup(t, { claudeBody });
+  const workspaceId = await seedWorkspace(base, baseCommit);
+  const seen = [];
+  const events = await streamGatedWorker(base, { harness:'claude-code', model:'claude-requested', key:'gate-claude', workspaceId, onGate: async (round, responseId) => {
+    const snapshot = await (await fetch(`${base}/extensions/foreman-workspace/v1/workspaces/${workspaceId}/snapshot`)).json();
+    const readme = Buffer.from(snapshot.entries.find(e => e.path === 'README.md').contentBase64, 'base64').toString('utf8');
+    seen.push({ round, complete:snapshot.complete, errors:snapshot.errors.length, readme });
+    assert.equal((await postVerdict(base, responseId, { round:round + 1, status:'passed' })).status, 409, 'a verdict for another round is refused');
+    const verdict = round === 1 ? { round, status:'failed', feedback:'lint failed: README must say fixed', failed_checks:['lint'] } : { round, status:'passed' };
+    assert.equal((await postVerdict(base, responseId, verdict)).status, 202);
+  } });
+  const final = events.at(-1);
+  assert.equal(final.type, 'response.completed', JSON.stringify(final));
+  assert.deepEqual(seen, [{ round:1, complete:true, errors:0, readme:'first\n' }, { round:2, complete:true, errors:0, readme:'fixed\n' }]);
+  assert.deepEqual(final.response.metadata.worker_gate, { max_rounds:2, state:'finished', rounds:[{ round:1, status:'failed', failed_checks:['lint'] }, { round:2, status:'passed' }] });
+  assert.equal(final.response.session_id, 'gate-session');
+  assert.deepEqual(final.response.usage, { input_tokens:14, output_tokens:6, input_tokens_details:{ cached_tokens:4 } });
+  const work = join(env.LOCAL_CLI_UHP_WORK, workspaceId);
+  const log = (await readFile(join(work, '.gate-log'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(log, [{ resume:'', kept:false, feedback:false }, { resume:'gate-session', kept:true, feedback:true }]);
+  assert.equal(await exists(`${work}.worker-session`), false, 'the kept session is removed when the task ends');
+  const snapshot = await (await fetch(`${base}/extensions/foreman-workspace/v1/workspaces/${workspaceId}/snapshot`)).json();
+  assert.equal(snapshot.complete, true);
+});
+
+test('check gate ends the Worker turn as it is on a passed first verdict, a timeout, or a cancellation', async t => {
+  const claudeBody = `import {writeFileSync,appendFileSync} from 'node:fs'; process.stdin.resume(); process.stdin.on('end',()=>{appendFileSync('.gate-count','x'); writeFileSync('README.md','edited\\n'); const model='claude-actual'; console.log(JSON.stringify({type:'system',subtype:'init',model,session_id:'s'})); console.log(JSON.stringify({type:'result',subtype:'success',is_error:false,result:'ok',model,session_id:'s',usage:{input_tokens:1,output_tokens:1}}));});`;
+  const { base, baseCommit, env } = await setup(t, { claudeBody, extraEnv:{ LOCAL_CLI_UHP_WORKER_GATE_TIMEOUT_MS:'300' } });
+  const passedWs = await seedWorkspace(base, baseCommit);
+  const passed = await streamGatedWorker(base, { harness:'claude-code', model:'claude-requested', key:'gate-pass', workspaceId:passedWs, onGate: async (round, id) => { assert.equal((await postVerdict(base, id, { round, status:'passed' })).status, 202); } });
+  assert.equal(passed.at(-1).type, 'response.completed');
+  assert.deepEqual(passed.at(-1).response.metadata.worker_gate.rounds, [{ round:1, status:'passed' }]);
+  assert.equal(await readFile(join(env.LOCAL_CLI_UHP_WORK, passedWs, '.gate-count'), 'utf8'), 'x');
+  const timedWs = await seedWorkspace(base, baseCommit);
+  const timed = await streamGatedWorker(base, { harness:'claude-code', model:'claude-requested', key:'gate-timeout', workspaceId:timedWs, onGate: async () => {} });
+  assert.equal(timed.at(-1).type, 'response.completed');
+  assert.deepEqual(timed.at(-1).response.metadata.worker_gate.rounds, [{ round:1, status:'skipped', reason:'verdict_timeout' }]);
+  const cancelWs = await seedWorkspace(base, baseCommit);
+  const cancelled = await streamGatedWorker(base, { harness:'claude-code', model:'claude-requested', key:'gate-cancel', workspaceId:cancelWs, onGate: async (round, id) => { assert.equal((await fetch(`${base}/v1/responses/${id}/cancel`, { method:'POST' })).status, 200); } });
+  assert.equal(cancelled.at(-1).type, 'response.cancelled', JSON.stringify(cancelled.at(-1)));
+});
+
+test('check gate requests are validated and refused for Reviewer and role sessions', async t => {
+  const { base, baseCommit } = await setup(t);
+  const workspaceId = await seedWorkspace(base, baseCommit);
+  const post = (key, metadata) => fetch(`${base}/v1/responses`, { method:'POST', headers:{ 'Content-Type':'application/json', 'UHP-Version':'2026-09-12', 'Idempotency-Key':key }, body:JSON.stringify({ input:'x', model:'claude-requested', metadata:{ harness_id:'claude-code', ...metadata }, stream:true, timeout_seconds:5, max_step:1 }) });
+  assert.equal((await (await post('gate-bad-rounds', { workspace_id:workspaceId, foreman_worker_gate:{ max_rounds:9 } })).json()).error.code, 'worker_gate_invalid');
+  assert.equal((await (await post('gate-planner', { foreman_role_id:'planner', foreman_run_id:'run_1', foreman_worker_gate:{ max_rounds:1 } })).json()).error.code, 'worker_gate_role_unsupported');
+  const discovery = await (await fetch(`${base}/v1/uhp`)).json();
+  assert.deepEqual(discovery.capabilities.extensions.foreman_worker_gate_v1, { version:1, max_rounds:3 });
+  assert.equal((await postVerdict(base, 'resp_missing', { round:1, status:'passed' })).status, 404);
+});
+
+test('Foreman answers check rounds so a Codex Worker fixes a failing check in its kept session within one attempt', async t => {
+  const fixture = await createWorkspaceFixture(); t.after(fixture.cleanup);
+  const parent = await mkdtemp(join(tmpdir(),'foreman-worker-gate-')); t.after(()=>rm(parent,{recursive:true,force:true}));
+  const codexBody = `import {readFileSync,writeFileSync,existsSync,appendFileSync,mkdirSync} from 'node:fs'; let prompt='';process.stdin.setEncoding('utf8');process.stdin.on('data',c=>prompt+=c);process.stdin.on('end',()=>{const i=process.argv.indexOf('resume'); const resume=i>=0?process.argv[i+1]:''; const marker=process.env.CODEX_HOME+'/sessions/gate'; const kept=existsSync(marker); mkdirSync(process.env.CODEX_HOME+'/sessions',{recursive:true}); writeFileSync(marker,'x'); appendFileSync('.gate-log',JSON.stringify({resume,kept,ephemeral:process.argv.includes('--ephemeral'),feedback:prompt.includes('assert fixed README')&&prompt.includes('README is not fixed yet')})+'\\n'); writeFileSync('README.md',resume?'# Fixture\\n\\nfixed\\n':'# Fixture\\n\\nfirst try\\n'); console.log(JSON.stringify({type:'thread.started',thread_id:'codex-gate-thread'})); console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'Edited README.md.'}})); console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:11,output_tokens:7}}));});`;
+  const claudeBody=`let prompt='';process.stdin.setEncoding('utf8');process.stdin.on('data',chunk=>prompt+=chunk);process.stdin.on('end',()=>{const model='claude-actual';const result=prompt.includes('"workerTask"')&&prompt.includes('"targetFiles"')?JSON.stringify({workerTask:'Change README.md with one short sentence.',targetFiles:['README.md']}):'Planner recommends a concise README note.';console.log(JSON.stringify({type:'system',subtype:'init',model,session_id:'judgment-session'}));console.log(JSON.stringify({type:'result',subtype:'success',result,model,session_id:'judgment-session',usage:{input_tokens:5,output_tokens:2}}));});`;
+  const {base,env}=await setup(t,{sourceRepo:fixture.repo,baseCommit:fixture.baseCommit,codexBody,claudeBody});
+  const uhp = new UhpClient({baseUrl:base,timeoutMs:20_000});
+  const controller = new Controller(new JsonStore(join(parent,'foreman-state.json')),uhp,false,true);
+  const check = `const fs=require('node:fs');if(!fs.readFileSync('README.md','utf8').includes('fixed')){console.log('README is not fixed yet');process.exit(1)}`;
+  controller.configureVerifiedWorkspace({repoPath:fixture.repo,allowedScope:['README.md','.gate-log'],commands:[{name:'assert fixed README',command:process.execPath,args:['-e',check]}],bridgeBaseUrl:base,timeoutMs:10_000,maxOutputBytes:2_000,workerCheckRounds:2});
+  await controller.refreshDiscovery();
+  const project=await controller.createProject('Worker check gate fixture');
+  const task=await controller.createTask(project.id,'Edit the assigned README');
+  const run=await controller.createRun(task.id);
+  for (const role of ['planner','orchestrator']) await controller.selectRoleConfig(role,{harnessId:'claude-code',model:'claude-requested',options:{timeoutSeconds:5,maxStep:1}},undefined,run.id);
+  await controller.selectRoleConfig('worker',{harnessId:'codex-cli',model:'codex-requested',options:{timeoutSeconds:5,maxStep:1}},undefined,run.id);
+  await controller.prepareWorkerWorkspace(run.id,fixture.baseCommit);
+  await controller.addGuidance(run.id,'Keep the README change to one short note.');
+  const orchestration=await controller.orchestrate(run.id,'Implement the requested README note.');
+  assert.ok(orchestration.proposal, JSON.stringify(orchestration.assignment));
+  const assignment=await controller.dispatchWorkerProposal(run.id,orchestration.proposal.id);
+  assert.equal(assignment.status,'succeeded',JSON.stringify(assignment));
+  assert.equal(assignment.usage.inputTokens,22,'both Codex turns are counted');
+  assert.deepEqual(assignment.cliInvocation?.args.slice(-3),['--model','codex-requested','-']);
+  const response=await uhp.retrieve(assignment.responseId);
+  assert.deepEqual(response.metadata.worker_gate.rounds,[{round:1,status:'failed',failed_checks:['assert fixed README']},{round:2,status:'passed'}]);
+  const log=(await readFile(join(env.LOCAL_CLI_UHP_WORK,response.metadata.workspace_id,'.gate-log'),'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+  assert.deepEqual(log,[{resume:'',kept:false,ephemeral:false,feedback:false},{resume:'codex-gate-thread',kept:true,ephemeral:false,feedback:true}]);
+  const state=await controller.state();
+  assert.deepEqual(state.events.filter(e=>e.type==='worker.check_round').map(e=>[e.data.round,e.data.status,e.data.failedChecks]),[[1,'failed',['assert fixed README']],[2,'passed',[]]]);
+  const verified=await controller.verifyWorkerOutput(run.id,assignment.id);
+  assert.equal(verified.validation.status,'passed',JSON.stringify(verified.validation));
+  assert.equal((await controller.state()).projects[0].tasks[0].runs[0].assignments.filter(a=>a.roleId==='worker').length,1,'the fix used no second Worker attempt');
+});
+
+test('check gate resumes an Antigravity Worker in its kept conversation', async t => {
+  const agyBody = `import {writeFileSync,existsSync,appendFileSync} from 'node:fs'; if(process.argv[2]==='models'){console.log('gemini-3.8-flash-medium\\tGemini 3.8 Flash (Medium)');process.exit(0)} const ci=process.argv.indexOf('--conversation'); const resume=ci>=0?process.argv[ci+1]:''; const prompt=process.argv[process.argv.indexOf('-p')+1]||''; const marker=process.env.HOME+'/.gemini/antigravity-cli/conversations/gate'; const kept=existsSync(marker); writeFileSync(marker,'x'); appendFileSync('.gate-log',JSON.stringify({resume,kept,feedback:prompt.includes('typecheck failed here')})+'\\n'); writeFileSync('README.md',resume?'fixed\\n':'first\\n'); const conversation_id='agy-gate-conversation'; const model='gemini-3.8-flash-medium'; console.log(JSON.stringify({event:'init',conversation_id,agent:'foreman-worker',init:{cwd:'/workspace',model,tools:['view_file','write_to_file','finish']}})); console.log(JSON.stringify({event:'step_update',step_update:{conversation_id,step_index:0,state:'DONE',step_type:'tool',tool_name:'write_to_file',tool_info:{name:'write_to_file'}}})); console.log(JSON.stringify({event:'result',result:{conversation_id,status:'SUCCESS',response:'Edited README.',model,usage:{input_tokens:resume?30:10,output_tokens:resume?8:4}}}));`;
+  const { base, baseCommit, env } = await setup(t, { agyEnabled:true, agyBody });
+  const workspaceId = await seedWorkspace(base, baseCommit);
+  const events = await streamGatedWorker(base, { harness:'antigravity-cli', model:'gemini-3.8-flash-medium', key:'gate-agy', workspaceId, rounds:1, onGate: async (round, id) => {
+    assert.equal((await postVerdict(base, id, { round, status:'failed', feedback:'typecheck failed here', failed_checks:['typecheck'] })).status, 202);
+  } });
+  const final = events.at(-1);
+  assert.equal(final.type, 'response.completed', JSON.stringify(final));
+  assert.deepEqual(final.response.metadata.worker_gate.rounds, [{ round:1, status:'failed', failed_checks:['typecheck'] }]);
+  assert.equal(final.response.usage.input_tokens, 30, 'Antigravity reports cumulative conversation usage, so the last turn is the total');
+  const log = (await readFile(join(env.LOCAL_CLI_UHP_WORK, workspaceId, '.gate-log'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(log, [{ resume:'', kept:false, feedback:false }, { resume:'agy-gate-conversation', kept:true, feedback:true }]);
+});
