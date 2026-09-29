@@ -710,6 +710,16 @@ describe('checks pipeline',()=>{
     expect(station('tests')).not.toContain('Network');
     expect(station('legacy')).not.toContain('Network');
   });
+
+  it('badges only failed checks that also fail on the base commit',()=>{
+    const obs=[{...sampleObservation('smoke',false),failsOnBase:true},{...sampleObservation('tests',false),failsOnBase:false},sampleObservation('lint',false),sampleObservation('build',true)];
+    const html=renderToStaticMarkup(createElement(ChecksPipeline,{observations:obs}));
+    const station=(name:string)=>html.split('<details').find(part=>part.includes(`class="station-name">${name}<`))??'';
+    expect(html.match(/Fails on base</g)).toHaveLength(1);
+    expect(station('smoke')).toContain('aria-label="Also fails on the base commit">Fails on base<');
+    expect(station('smoke')).toContain('also fails on the base commit"');
+    for(const name of ['tests','lint','build'])expect(station(name)).not.toContain('Fails on base');
+  });
 });
 
 // ── Open-repository dialog: validation command list ──────────────────────────
