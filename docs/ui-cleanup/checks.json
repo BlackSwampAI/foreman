@@ -1,0 +1,3329 @@
+{
+  "baselineCommit": "b826f88",
+  "afterCommit": "1655af6",
+  "matrixSummary": {
+    "cases": 48,
+    "perPhase": 24,
+    "states": [
+      "idle",
+      "active",
+      "failed",
+      "approval"
+    ],
+    "themes": [
+      "dark",
+      "light"
+    ],
+    "widths": [
+      1024,
+      1440,
+      1920
+    ],
+    "allMatchRequestedTheme": true,
+    "pageErrors": 0,
+    "apiWrites": 0,
+    "pageHorizontalOverflowCases": 0,
+    "containerHorizontalOverflowCases": 0
+  },
+  "cases": [
+    {
+      "phase": "before",
+      "state": "active",
+      "theme": "dark",
+      "width": 1024,
+      "actualTheme": "dark",
+      "themeToggle": "Switch to light theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 992,
+          "scrollWidth": 992,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 561,
+          "scrollHeight": 561,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 520,
+          "scrollWidth": 520,
+          "clientHeight": 954,
+          "scrollHeight": 2182,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 278,
+          "scrollHeight": 304,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 544,
+          "scrollHeight": 544,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 335,
+          "scrollHeight": 335,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "before",
+      "state": "active",
+      "theme": "dark",
+      "width": 1440,
+      "actualTheme": "dark",
+      "themeToggle": "Switch to light theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1408,
+          "scrollWidth": 1408,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 591,
+          "scrollHeight": 591,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 832,
+          "scrollWidth": 832,
+          "clientHeight": 954,
+          "scrollHeight": 1861,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 225,
+          "scrollHeight": 225,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 598,
+          "scrollHeight": 598,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 305,
+          "scrollHeight": 305,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "before",
+      "state": "active",
+      "theme": "dark",
+      "width": 1920,
+      "actualTheme": "dark",
+      "themeToggle": "Switch to light theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1888,
+          "scrollWidth": 1888,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 591,
+          "scrollHeight": 591,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 1214,
+          "scrollWidth": 1214,
+          "clientHeight": 954,
+          "scrollHeight": 1849,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 210,
+          "scrollHeight": 210,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 613,
+          "scrollHeight": 613,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 305,
+          "scrollHeight": 305,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "before",
+      "state": "active",
+      "theme": "light",
+      "width": 1024,
+      "actualTheme": "light",
+      "themeToggle": "Switch to dark theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 992,
+          "scrollWidth": 992,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 561,
+          "scrollHeight": 561,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 520,
+          "scrollWidth": 520,
+          "clientHeight": 954,
+          "scrollHeight": 2182,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 278,
+          "scrollHeight": 304,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 544,
+          "scrollHeight": 544,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 335,
+          "scrollHeight": 335,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "before",
+      "state": "active",
+      "theme": "light",
+      "width": 1440,
+      "actualTheme": "light",
+      "themeToggle": "Switch to dark theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1408,
+          "scrollWidth": 1408,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 591,
+          "scrollHeight": 591,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 832,
+          "scrollWidth": 832,
+          "clientHeight": 954,
+          "scrollHeight": 1861,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 225,
+          "scrollHeight": 225,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 598,
+          "scrollHeight": 598,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 305,
+          "scrollHeight": 305,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "before",
+      "state": "active",
+      "theme": "light",
+      "width": 1920,
+      "actualTheme": "light",
+      "themeToggle": "Switch to dark theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1888,
+          "scrollWidth": 1888,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 591,
+          "scrollHeight": 591,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 1214,
+          "scrollWidth": 1214,
+          "clientHeight": 954,
+          "scrollHeight": 1849,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 210,
+          "scrollHeight": 210,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 613,
+          "scrollHeight": 613,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 305,
+          "scrollHeight": 305,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "before",
+      "state": "approval",
+      "theme": "dark",
+      "width": 1024,
+      "actualTheme": "dark",
+      "themeToggle": "Switch to light theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 992,
+          "scrollWidth": 992,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 561,
+          "scrollHeight": 561,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 520,
+          "scrollWidth": 520,
+          "clientHeight": 954,
+          "scrollHeight": 2275,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 64,
+          "scrollHeight": 64,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 759,
+          "scrollHeight": 759,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 335,
+          "scrollHeight": 335,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "before",
+      "state": "approval",
+      "theme": "dark",
+      "width": 1440,
+      "actualTheme": "dark",
+      "themeToggle": "Switch to light theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1408,
+          "scrollWidth": 1408,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 591,
+          "scrollHeight": 591,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 832,
+          "scrollWidth": 832,
+          "clientHeight": 954,
+          "scrollHeight": 1915,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 64,
+          "scrollHeight": 64,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 759,
+          "scrollHeight": 759,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 305,
+          "scrollHeight": 305,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "before",
+      "state": "approval",
+      "theme": "dark",
+      "width": 1920,
+      "actualTheme": "dark",
+      "themeToggle": "Switch to light theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1888,
+          "scrollWidth": 1888,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 591,
+          "scrollHeight": 591,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 1214,
+          "scrollWidth": 1214,
+          "clientHeight": 954,
+          "scrollHeight": 1865,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 46,
+          "scrollHeight": 46,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 777,
+          "scrollHeight": 777,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 305,
+          "scrollHeight": 305,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "before",
+      "state": "approval",
+      "theme": "light",
+      "width": 1024,
+      "actualTheme": "light",
+      "themeToggle": "Switch to dark theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 992,
+          "scrollWidth": 992,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 561,
+          "scrollHeight": 561,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 520,
+          "scrollWidth": 520,
+          "clientHeight": 954,
+          "scrollHeight": 2275,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 64,
+          "scrollHeight": 64,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 759,
+          "scrollHeight": 759,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 335,
+          "scrollHeight": 335,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "before",
+      "state": "approval",
+      "theme": "light",
+      "width": 1440,
+      "actualTheme": "light",
+      "themeToggle": "Switch to dark theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1408,
+          "scrollWidth": 1408,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 591,
+          "scrollHeight": 591,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 832,
+          "scrollWidth": 832,
+          "clientHeight": 954,
+          "scrollHeight": 1915,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 64,
+          "scrollHeight": 64,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 759,
+          "scrollHeight": 759,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 305,
+          "scrollHeight": 305,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "before",
+      "state": "approval",
+      "theme": "light",
+      "width": 1920,
+      "actualTheme": "light",
+      "themeToggle": "Switch to dark theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1888,
+          "scrollWidth": 1888,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 591,
+          "scrollHeight": 591,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 1214,
+          "scrollWidth": 1214,
+          "clientHeight": 954,
+          "scrollHeight": 1865,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 46,
+          "scrollHeight": 46,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 777,
+          "scrollHeight": 777,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 305,
+          "scrollHeight": 305,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "before",
+      "state": "failed",
+      "theme": "dark",
+      "width": 1024,
+      "actualTheme": "dark",
+      "themeToggle": "Switch to light theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 992,
+          "scrollWidth": 992,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 561,
+          "scrollHeight": 561,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 520,
+          "scrollWidth": 520,
+          "clientHeight": 954,
+          "scrollHeight": 2545,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 64,
+          "scrollHeight": 64,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 759,
+          "scrollHeight": 759,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 335,
+          "scrollHeight": 335,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "before",
+      "state": "failed",
+      "theme": "dark",
+      "width": 1440,
+      "actualTheme": "dark",
+      "themeToggle": "Switch to light theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1408,
+          "scrollWidth": 1408,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 591,
+          "scrollHeight": 591,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 832,
+          "scrollWidth": 832,
+          "clientHeight": 954,
+          "scrollHeight": 2145,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 64,
+          "scrollHeight": 64,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 759,
+          "scrollHeight": 759,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 305,
+          "scrollHeight": 305,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "before",
+      "state": "failed",
+      "theme": "dark",
+      "width": 1920,
+      "actualTheme": "dark",
+      "themeToggle": "Switch to light theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1888,
+          "scrollWidth": 1888,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 591,
+          "scrollHeight": 591,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 1214,
+          "scrollWidth": 1214,
+          "clientHeight": 954,
+          "scrollHeight": 2074,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 46,
+          "scrollHeight": 46,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 777,
+          "scrollHeight": 777,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 305,
+          "scrollHeight": 305,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "before",
+      "state": "failed",
+      "theme": "light",
+      "width": 1024,
+      "actualTheme": "light",
+      "themeToggle": "Switch to dark theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 992,
+          "scrollWidth": 992,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 561,
+          "scrollHeight": 561,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 520,
+          "scrollWidth": 520,
+          "clientHeight": 954,
+          "scrollHeight": 2545,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 64,
+          "scrollHeight": 64,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 759,
+          "scrollHeight": 759,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 335,
+          "scrollHeight": 335,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "before",
+      "state": "failed",
+      "theme": "light",
+      "width": 1440,
+      "actualTheme": "light",
+      "themeToggle": "Switch to dark theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1408,
+          "scrollWidth": 1408,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 591,
+          "scrollHeight": 591,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 832,
+          "scrollWidth": 832,
+          "clientHeight": 954,
+          "scrollHeight": 2145,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 64,
+          "scrollHeight": 64,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 759,
+          "scrollHeight": 759,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 305,
+          "scrollHeight": 305,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "before",
+      "state": "failed",
+      "theme": "light",
+      "width": 1920,
+      "actualTheme": "light",
+      "themeToggle": "Switch to dark theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1888,
+          "scrollWidth": 1888,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 591,
+          "scrollHeight": 591,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 1214,
+          "scrollWidth": 1214,
+          "clientHeight": 954,
+          "scrollHeight": 2074,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 46,
+          "scrollHeight": 46,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 777,
+          "scrollHeight": 777,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 305,
+          "scrollHeight": 305,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "before",
+      "state": "idle",
+      "theme": "dark",
+      "width": 1024,
+      "actualTheme": "dark",
+      "themeToggle": "Switch to light theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 992,
+          "scrollWidth": 992,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 591,
+          "scrollHeight": 591,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 520,
+          "scrollWidth": 520,
+          "clientHeight": 954,
+          "scrollHeight": 1120,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 64,
+          "scrollHeight": 64,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 759,
+          "scrollHeight": 759,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 305,
+          "scrollHeight": 305,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "before",
+      "state": "idle",
+      "theme": "dark",
+      "width": 1440,
+      "actualTheme": "dark",
+      "themeToggle": "Switch to light theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1408,
+          "scrollWidth": 1408,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 606,
+          "scrollHeight": 606,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 832,
+          "scrollWidth": 832,
+          "clientHeight": 954,
+          "scrollHeight": 1016,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 64,
+          "scrollHeight": 64,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 759,
+          "scrollHeight": 759,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 290,
+          "scrollHeight": 290,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "before",
+      "state": "idle",
+      "theme": "dark",
+      "width": 1920,
+      "actualTheme": "dark",
+      "themeToggle": "Switch to light theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1888,
+          "scrollWidth": 1888,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 606,
+          "scrollHeight": 606,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 1214,
+          "scrollWidth": 1214,
+          "clientHeight": 954,
+          "scrollHeight": 1016,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 46,
+          "scrollHeight": 46,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 777,
+          "scrollHeight": 777,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 290,
+          "scrollHeight": 290,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "before",
+      "state": "idle",
+      "theme": "light",
+      "width": 1024,
+      "actualTheme": "light",
+      "themeToggle": "Switch to dark theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 992,
+          "scrollWidth": 992,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 591,
+          "scrollHeight": 591,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 520,
+          "scrollWidth": 520,
+          "clientHeight": 954,
+          "scrollHeight": 1120,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 64,
+          "scrollHeight": 64,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 759,
+          "scrollHeight": 759,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 305,
+          "scrollHeight": 305,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "before",
+      "state": "idle",
+      "theme": "light",
+      "width": 1440,
+      "actualTheme": "light",
+      "themeToggle": "Switch to dark theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1408,
+          "scrollWidth": 1408,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 606,
+          "scrollHeight": 606,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 832,
+          "scrollWidth": 832,
+          "clientHeight": 954,
+          "scrollHeight": 1016,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 64,
+          "scrollHeight": 64,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 759,
+          "scrollHeight": 759,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 290,
+          "scrollHeight": 290,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "before",
+      "state": "idle",
+      "theme": "light",
+      "width": 1920,
+      "actualTheme": "light",
+      "themeToggle": "Switch to dark theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1888,
+          "scrollWidth": 1888,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 606,
+          "scrollHeight": 606,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 1214,
+          "scrollWidth": 1214,
+          "clientHeight": 954,
+          "scrollHeight": 1016,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 46,
+          "scrollHeight": 46,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 777,
+          "scrollHeight": 777,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 290,
+          "scrollHeight": 290,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "after",
+      "state": "active",
+      "theme": "dark",
+      "width": 1024,
+      "actualTheme": "dark",
+      "themeToggle": "Switch to light theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 992,
+          "scrollWidth": 992,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 561,
+          "scrollHeight": 561,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 520,
+          "scrollWidth": 520,
+          "clientHeight": 954,
+          "scrollHeight": 2175,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 278,
+          "scrollHeight": 304,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 544,
+          "scrollHeight": 544,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 335,
+          "scrollHeight": 335,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "after",
+      "state": "active",
+      "theme": "dark",
+      "width": 1440,
+      "actualTheme": "dark",
+      "themeToggle": "Switch to light theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1408,
+          "scrollWidth": 1408,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 591,
+          "scrollHeight": 591,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 832,
+          "scrollWidth": 832,
+          "clientHeight": 954,
+          "scrollHeight": 1854,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 225,
+          "scrollHeight": 225,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 598,
+          "scrollHeight": 598,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 305,
+          "scrollHeight": 305,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "after",
+      "state": "active",
+      "theme": "dark",
+      "width": 1920,
+      "actualTheme": "dark",
+      "themeToggle": "Switch to light theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1888,
+          "scrollWidth": 1888,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 591,
+          "scrollHeight": 591,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 1214,
+          "scrollWidth": 1214,
+          "clientHeight": 954,
+          "scrollHeight": 1842,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 210,
+          "scrollHeight": 210,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 613,
+          "scrollHeight": 613,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 305,
+          "scrollHeight": 305,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "after",
+      "state": "active",
+      "theme": "light",
+      "width": 1024,
+      "actualTheme": "light",
+      "themeToggle": "Switch to dark theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 992,
+          "scrollWidth": 992,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 561,
+          "scrollHeight": 561,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 520,
+          "scrollWidth": 520,
+          "clientHeight": 954,
+          "scrollHeight": 2175,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 278,
+          "scrollHeight": 304,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 544,
+          "scrollHeight": 544,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 335,
+          "scrollHeight": 335,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "after",
+      "state": "active",
+      "theme": "light",
+      "width": 1440,
+      "actualTheme": "light",
+      "themeToggle": "Switch to dark theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1408,
+          "scrollWidth": 1408,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 591,
+          "scrollHeight": 591,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 832,
+          "scrollWidth": 832,
+          "clientHeight": 954,
+          "scrollHeight": 1854,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 225,
+          "scrollHeight": 225,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 598,
+          "scrollHeight": 598,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 305,
+          "scrollHeight": 305,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "after",
+      "state": "active",
+      "theme": "light",
+      "width": 1920,
+      "actualTheme": "light",
+      "themeToggle": "Switch to dark theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1888,
+          "scrollWidth": 1888,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 591,
+          "scrollHeight": 591,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 1214,
+          "scrollWidth": 1214,
+          "clientHeight": 954,
+          "scrollHeight": 1842,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 210,
+          "scrollHeight": 210,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 613,
+          "scrollHeight": 613,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 305,
+          "scrollHeight": 305,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "after",
+      "state": "approval",
+      "theme": "dark",
+      "width": 1024,
+      "actualTheme": "dark",
+      "themeToggle": "Switch to light theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 992,
+          "scrollWidth": 992,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 561,
+          "scrollHeight": 561,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 520,
+          "scrollWidth": 520,
+          "clientHeight": 954,
+          "scrollHeight": 2269,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 64,
+          "scrollHeight": 64,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 759,
+          "scrollHeight": 759,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 335,
+          "scrollHeight": 335,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "after",
+      "state": "approval",
+      "theme": "dark",
+      "width": 1440,
+      "actualTheme": "dark",
+      "themeToggle": "Switch to light theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1408,
+          "scrollWidth": 1408,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 591,
+          "scrollHeight": 591,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 832,
+          "scrollWidth": 832,
+          "clientHeight": 954,
+          "scrollHeight": 1909,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 64,
+          "scrollHeight": 64,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 759,
+          "scrollHeight": 759,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 305,
+          "scrollHeight": 305,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "after",
+      "state": "approval",
+      "theme": "dark",
+      "width": 1920,
+      "actualTheme": "dark",
+      "themeToggle": "Switch to light theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1888,
+          "scrollWidth": 1888,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 591,
+          "scrollHeight": 591,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 1214,
+          "scrollWidth": 1214,
+          "clientHeight": 954,
+          "scrollHeight": 1859,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 46,
+          "scrollHeight": 46,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 777,
+          "scrollHeight": 777,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 305,
+          "scrollHeight": 305,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "after",
+      "state": "approval",
+      "theme": "light",
+      "width": 1024,
+      "actualTheme": "light",
+      "themeToggle": "Switch to dark theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 992,
+          "scrollWidth": 992,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 561,
+          "scrollHeight": 561,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 520,
+          "scrollWidth": 520,
+          "clientHeight": 954,
+          "scrollHeight": 2269,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 64,
+          "scrollHeight": 64,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 759,
+          "scrollHeight": 759,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 335,
+          "scrollHeight": 335,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "after",
+      "state": "approval",
+      "theme": "light",
+      "width": 1440,
+      "actualTheme": "light",
+      "themeToggle": "Switch to dark theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1408,
+          "scrollWidth": 1408,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 591,
+          "scrollHeight": 591,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 832,
+          "scrollWidth": 832,
+          "clientHeight": 954,
+          "scrollHeight": 1909,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 64,
+          "scrollHeight": 64,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 759,
+          "scrollHeight": 759,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 305,
+          "scrollHeight": 305,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "after",
+      "state": "approval",
+      "theme": "light",
+      "width": 1920,
+      "actualTheme": "light",
+      "themeToggle": "Switch to dark theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1888,
+          "scrollWidth": 1888,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 591,
+          "scrollHeight": 591,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 1214,
+          "scrollWidth": 1214,
+          "clientHeight": 954,
+          "scrollHeight": 1859,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 46,
+          "scrollHeight": 46,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 777,
+          "scrollHeight": 777,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 305,
+          "scrollHeight": 305,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "after",
+      "state": "failed",
+      "theme": "dark",
+      "width": 1024,
+      "actualTheme": "dark",
+      "themeToggle": "Switch to light theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 992,
+          "scrollWidth": 992,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 561,
+          "scrollHeight": 561,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 520,
+          "scrollWidth": 520,
+          "clientHeight": 954,
+          "scrollHeight": 2537,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 64,
+          "scrollHeight": 64,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 759,
+          "scrollHeight": 759,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 335,
+          "scrollHeight": 335,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "after",
+      "state": "failed",
+      "theme": "dark",
+      "width": 1440,
+      "actualTheme": "dark",
+      "themeToggle": "Switch to light theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1408,
+          "scrollWidth": 1408,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 591,
+          "scrollHeight": 591,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 832,
+          "scrollWidth": 832,
+          "clientHeight": 954,
+          "scrollHeight": 2137,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 64,
+          "scrollHeight": 64,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 759,
+          "scrollHeight": 759,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 305,
+          "scrollHeight": 305,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "after",
+      "state": "failed",
+      "theme": "dark",
+      "width": 1920,
+      "actualTheme": "dark",
+      "themeToggle": "Switch to light theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1888,
+          "scrollWidth": 1888,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 591,
+          "scrollHeight": 591,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 1214,
+          "scrollWidth": 1214,
+          "clientHeight": 954,
+          "scrollHeight": 2066,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 46,
+          "scrollHeight": 46,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 777,
+          "scrollHeight": 777,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 305,
+          "scrollHeight": 305,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "after",
+      "state": "failed",
+      "theme": "light",
+      "width": 1024,
+      "actualTheme": "light",
+      "themeToggle": "Switch to dark theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 992,
+          "scrollWidth": 992,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 561,
+          "scrollHeight": 561,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 520,
+          "scrollWidth": 520,
+          "clientHeight": 954,
+          "scrollHeight": 2537,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 64,
+          "scrollHeight": 64,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 759,
+          "scrollHeight": 759,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 335,
+          "scrollHeight": 335,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "after",
+      "state": "failed",
+      "theme": "light",
+      "width": 1440,
+      "actualTheme": "light",
+      "themeToggle": "Switch to dark theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1408,
+          "scrollWidth": 1408,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 591,
+          "scrollHeight": 591,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 832,
+          "scrollWidth": 832,
+          "clientHeight": 954,
+          "scrollHeight": 2137,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 64,
+          "scrollHeight": 64,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 759,
+          "scrollHeight": 759,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 305,
+          "scrollHeight": 305,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "after",
+      "state": "failed",
+      "theme": "light",
+      "width": 1920,
+      "actualTheme": "light",
+      "themeToggle": "Switch to dark theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1888,
+          "scrollWidth": 1888,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 591,
+          "scrollHeight": 591,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 1214,
+          "scrollWidth": 1214,
+          "clientHeight": 954,
+          "scrollHeight": 2066,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 46,
+          "scrollHeight": 46,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 777,
+          "scrollHeight": 777,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 305,
+          "scrollHeight": 305,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "after",
+      "state": "idle",
+      "theme": "dark",
+      "width": 1024,
+      "actualTheme": "dark",
+      "themeToggle": "Switch to light theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 992,
+          "scrollWidth": 992,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 591,
+          "scrollHeight": 591,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 520,
+          "scrollWidth": 520,
+          "clientHeight": 954,
+          "scrollHeight": 1120,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 64,
+          "scrollHeight": 64,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 759,
+          "scrollHeight": 759,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 305,
+          "scrollHeight": 305,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "after",
+      "state": "idle",
+      "theme": "dark",
+      "width": 1440,
+      "actualTheme": "dark",
+      "themeToggle": "Switch to light theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1408,
+          "scrollWidth": 1408,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 606,
+          "scrollHeight": 606,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 832,
+          "scrollWidth": 832,
+          "clientHeight": 954,
+          "scrollHeight": 1014,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 64,
+          "scrollHeight": 64,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 759,
+          "scrollHeight": 759,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 290,
+          "scrollHeight": 290,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "after",
+      "state": "idle",
+      "theme": "dark",
+      "width": 1920,
+      "actualTheme": "dark",
+      "themeToggle": "Switch to light theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1888,
+          "scrollWidth": 1888,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 606,
+          "scrollHeight": 606,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 1214,
+          "scrollWidth": 1214,
+          "clientHeight": 954,
+          "scrollHeight": 1014,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 46,
+          "scrollHeight": 46,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 777,
+          "scrollHeight": 777,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 290,
+          "scrollHeight": 290,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "after",
+      "state": "idle",
+      "theme": "light",
+      "width": 1024,
+      "actualTheme": "light",
+      "themeToggle": "Switch to dark theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 992,
+          "scrollWidth": 992,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 591,
+          "scrollHeight": 591,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 520,
+          "scrollWidth": 520,
+          "clientHeight": 954,
+          "scrollHeight": 1120,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 64,
+          "scrollHeight": 64,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 250,
+          "scrollWidth": 250,
+          "clientHeight": 759,
+          "scrollHeight": 759,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 188,
+          "scrollWidth": 188,
+          "clientHeight": 305,
+          "scrollHeight": 305,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "after",
+      "state": "idle",
+      "theme": "light",
+      "width": 1440,
+      "actualTheme": "light",
+      "themeToggle": "Switch to dark theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1408,
+          "scrollWidth": 1408,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 606,
+          "scrollHeight": 606,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 832,
+          "scrollWidth": 832,
+          "clientHeight": 954,
+          "scrollHeight": 1014,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 64,
+          "scrollHeight": 64,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 296,
+          "scrollWidth": 296,
+          "clientHeight": 759,
+          "scrollHeight": 759,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 290,
+          "scrollHeight": 290,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    },
+    {
+      "phase": "after",
+      "state": "idle",
+      "theme": "light",
+      "width": 1920,
+      "actualTheme": "light",
+      "themeToggle": "Switch to dark theme",
+      "pageErrors": [],
+      "apiWrites": [],
+      "pageHorizontalOverflow": false,
+      "containers": {
+        ".layout": {
+          "clientWidth": 1888,
+          "scrollWidth": 1888,
+          "clientHeight": 954,
+          "scrollHeight": 954,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".tree-content": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 606,
+          "scrollHeight": 606,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".center": {
+          "clientWidth": 1214,
+          "scrollWidth": 1214,
+          "clientHeight": 954,
+          "scrollHeight": 1014,
+          "horizontalOverflow": false,
+          "verticalOverflow": true,
+          "visible": true
+        },
+        ".inspector-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 46,
+          "scrollHeight": 46,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".github-scroll": {
+          "clientWidth": 394,
+          "scrollWidth": 394,
+          "clientHeight": 777,
+          "scrollHeight": 777,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        },
+        ".usage-dock": {
+          "clientWidth": 246,
+          "scrollWidth": 246,
+          "clientHeight": 290,
+          "scrollHeight": 290,
+          "horizontalOverflow": false,
+          "verticalOverflow": false,
+          "visible": true
+        }
+      }
+    }
+  ],
+  "openPrGateInteractions": [
+    {
+      "scenario": "unpromoted-matching",
+      "disabled": true,
+      "reason": "Promote the approved result before opening a pull request.",
+      "clickOutcome": "browser refused disabled click",
+      "dialog": false,
+      "writes": []
+    },
+    {
+      "scenario": "promoted-missing",
+      "disabled": true,
+      "reason": "Push the promoted result branch and refresh status before opening a pull request.",
+      "clickOutcome": "browser refused disabled click",
+      "dialog": false,
+      "writes": []
+    },
+    {
+      "scenario": "promoted-different",
+      "disabled": true,
+      "reason": "The remote branch differs from the promoted result. Push the result branch and refresh status.",
+      "clickOutcome": "browser refused disabled click",
+      "dialog": false,
+      "writes": []
+    },
+    {
+      "scenario": "promoted-matching",
+      "disabled": false,
+      "reason": null,
+      "clickOutcome": "confirmation dialog opened",
+      "dialog": true,
+      "writes": []
+    }
+  ],
+  "keyboardFocusProbe": {
+    "dark": {
+      "tag": "BUTTON",
+      "ariaLabel": "Switch to light theme",
+      "text": "Light",
+      "outlineStyle": "solid",
+      "outlineWidth": "2px",
+      "outlineColor": "rgb(255, 241, 122)",
+      "focusVisible": true
+    },
+    "light": {
+      "tag": "BUTTON",
+      "ariaLabel": "Switch to dark theme",
+      "text": "Dark",
+      "outlineStyle": "solid",
+      "outlineWidth": "2px",
+      "outlineColor": "rgb(105, 117, 0)",
+      "focusVisible": true
+    }
+  },
+  "contrast": {
+    "basis": "Static CSS token-pair calculations; not a comprehensive WCAG or rendered-state audit.",
+    "ratios": {
+      "text/surface": {
+        "dark": 14.87,
+        "light": 12.63
+      },
+      "dim/surface": {
+        "dark": 9.44,
+        "light": 7.0
+      },
+      "muted/surface": {
+        "dark": 6.33,
+        "light": 4.76
+      },
+      "semantic badge foreground/background minimum": {
+        "dark": 7.65,
+        "light": 5.85
+      },
+      "quota fill/rail": {
+        "dark": 6.33,
+        "light": 4.76
+      },
+      "focus ring/surface": {
+        "dark": 16.16,
+        "light": 4.15
+      }
+    }
+  }
+}
