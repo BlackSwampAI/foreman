@@ -13,10 +13,12 @@ const node=(name:string,code:string)=>({name,command:process.execPath,args:['-e'
 const check=(name:string,passed:boolean,failsOnBase?:boolean):ValidationCheck=>({name,command:'x',args:[],exitCode:passed?0:1,timedOut:false,output:'',outputTruncated:false,startedAt:'',finishedAt:'',passed,...(failsOnBase===undefined?{}:{failsOnBase})});
 
 describe('baseline validation on the unchanged base commit',()=>{
-  it('reruns only setup commands and the failed checks, in configured order',()=>{
+  it('reruns every configured command up to the last failed check, so its prerequisites run too',()=>{
     const commands=[{name:'install',command:'pnpm',args:['install']},{name:'lint',command:'pnpm',args:['lint']},{name:'fetch',command:'node',args:['fetch.js'],network:true},{name:'offline install',command:'pnpm',args:['install'],network:false},{name:'test',command:'pnpm',args:['test']},{name:'smoke',command:'pnpm',args:['run','smoke:install']}];
-    expect(baselineCommandsFor(commands,new Set(['smoke'])).map(c=>c.name)).toEqual(['install','fetch','smoke']);
-    expect(baselineCommandsFor(commands,new Set(['offline install','test'])).map(c=>c.name)).toEqual(['install','fetch','offline install','test']);
+    expect(baselineCommandsFor(commands,new Set(['smoke'])).map(c=>c.name)).toEqual(['install','lint','fetch','offline install','test','smoke']);
+    expect(baselineCommandsFor(commands,new Set(['offline install','test'])).map(c=>c.name)).toEqual(['install','lint','fetch','offline install','test']);
+    expect(baselineCommandsFor(commands,new Set(['lint'])).map(c=>c.name)).toEqual(['install','lint']);
+    expect(baselineCommandsFor(commands,new Set())).toEqual([]);
   });
 
   it('runs the checks on the pinned base without the Worker change and caches the result by base and command digest',async()=>{
@@ -29,9 +31,9 @@ describe('baseline validation on the unchanged base commit',()=>{
     const again=await ensureBaseline({repoPath:dir,pinnedBaseCommit:sha,allowedScope:['README.md'],commands,failedNames:['fails on base'],cached:first.baseline,sandbox:{mode:'none'}});
     expect(again.ran).toEqual([]);expect(again.baseline).toBe(first.baseline);
     const extended=await ensureBaseline({repoPath:dir,pinnedBaseCommit:sha,allowedScope:['README.md'],commands,failedNames:['not needed'],cached:first.baseline,sandbox:{mode:'none'}});
-    expect(extended.ran).toEqual(['not needed']);expect(extended.baseline.checks.map(c=>c.name)).toEqual(['passes on base','fails on base','not needed']);
+    expect(extended.ran).toEqual(['passes on base','fails on base','not needed']);expect(extended.baseline.checks.map(c=>c.name)).toEqual(['passes on base','fails on base','not needed']);
     const changed=await ensureBaseline({repoPath:dir,pinnedBaseCommit:sha,allowedScope:['README.md'],commands:[...commands,node('another','process.exit(0)')],failedNames:['fails on base'],cached:first.baseline,sandbox:{mode:'none'}});
-    expect(changed.ran).toEqual(['fails on base']);
+    expect(changed.ran).toEqual(['passes on base','fails on base']);
   });
 
   it('marks failed checks, never passing ones, and leaves checks the baseline did not run unmarked',()=>{

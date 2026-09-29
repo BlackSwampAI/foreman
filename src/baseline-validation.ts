@@ -1,15 +1,14 @@
 import { createHash } from 'node:crypto';
 import { snapshotGitCommit } from './git-workspace.js';
-import { defaultNetworkAccess, type ValidationSandboxConfig } from './validation-sandbox.js';
+import { type ValidationSandboxConfig } from './validation-sandbox.js';
 import { validateWorkerOutput, type ValidationCommand, type VerifiedWorkerWorkspace } from './verified-workspace.js';
 import type { BaselineValidation, ValidationCheck } from './domain.js';
 
 /** Identity of a configured command list. Any change to a command's name, argv, cwd or network setting invalidates a cached baseline. */
 export const baselineCommandDigest=(commands:readonly ValidationCommand[]):string=>createHash('sha256').update(JSON.stringify(commands.map(c=>[c.name,c.command,c.args,c.cwd??null,c.network??null]))).digest('hex');
-/** A setup command (package-manager install or anything explicitly given network access) prepares the workspace for the checks that follow, so a baseline run always includes it. */
-export const isSetupCommand=(c:ValidationCommand):boolean=>c.network??defaultNetworkAccess(c.command,c.args);
-/** The commands a baseline run needs, in configured order: every setup command plus the named checks. */
-export const baselineCommandsFor=(commands:readonly ValidationCommand[],names:ReadonlySet<string>):ValidationCommand[]=>commands.filter(c=>names.has(c.name)||isSetupCommand(c));
+
+/** The commands a baseline run needs, in configured order: every command up to the last named check, since a check can depend on any earlier step (an install, a build), not only on setup commands. */
+export const baselineCommandsFor=(commands:readonly ValidationCommand[],names:ReadonlySet<string>):ValidationCommand[]=>{let last=-1;commands.forEach((c,i)=>{if(names.has(c.name))last=i;});return commands.slice(0,last+1);};
 const passedCheck=(c:{exitCode:number|null;timedOut:boolean;outputTruncated:boolean})=>c.exitCode===0&&!c.timedOut&&!c.outputTruncated;
 
 /** The unchanged pinned base as verified evidence with zero changes, so `validateWorkerOutput` materializes and sandboxes it exactly like a Worker snapshot. */
@@ -21,7 +20,7 @@ async function unchangedBaseEvidence(repoPath:string,pinnedBaseCommit:string,all
 /**
  * Run the setup commands plus the named failed checks once against the unchanged pinned base. The result is cached on the run by pinned base + command digest;
  * a check already in the cache is never run on the base again, so with an unchanged set of failing checks the baseline runs once per run.
- * Only a later failure of a check the cache has not seen extends it (setup commands rerun to prepare that workspace).
+ * Only a later failure of a check the cache has not seen extends it (its prerequisites rerun to prepare that workspace).
  */
 export async function ensureBaseline(input:{repoPath:string;pinnedBaseCommit:string;allowedScope:readonly string[];commands:readonly ValidationCommand[];failedNames:readonly string[];cached?:BaselineValidation;timeoutMs?:number;maxOutputBytes?:number;sandbox?:ValidationSandboxConfig}):Promise<{baseline:BaselineValidation;ran:string[]}>{
   const commandDigest=baselineCommandDigest(input.commands),cached=input.cached&&input.cached.pinnedBaseCommit===input.pinnedBaseCommit&&input.cached.commandDigest===commandDigest?input.cached:undefined;
