@@ -178,6 +178,17 @@ export async function parseCiScripts(repoPath: string, knownScripts?: Set<string
   return ordered;
 }
 
+/** Package-manager invocations in a script body that fetch from a registry. */
+const SCRIPT_FETCHES_PACKAGES = /\b(?:npm|pnpm|yarn)\s+(?:install|i|ci|add|dlx)\b|\bnpx\s|\bpnpx\s/;
+
+/**
+ * Validation runs offline unless a check is marked, so a script that installs packages would always fail there, whatever the Worker changed.
+ * Smoke scripts (`smoke:install`, `smoke:load`), scripts named for an install, and scripts whose body runs a package install or npx get network.
+ */
+export function scriptNeedsNetwork(name: string, body: string): boolean {
+  return /^smoke(?::|$)/.test(name) || /(?:^|:)install(?::|$)/.test(name) || SCRIPT_FETCHES_PACKAGES.test(body);
+}
+
 /** Scripts that are commonly part of CI but network-dependent or publish-only — skip as fallback suggestions. */
 const FALLBACK_COMMON_SCRIPTS = ['format:check', 'lint', 'typecheck', 'test', 'build'] as const;
 
@@ -236,6 +247,7 @@ export async function inspectRepository(selectedPath: string): Promise<{
               name: scriptDisplayName(script),
               command: runner,
               args: ['run', script],
+              ...(scriptNeedsNetwork(script, pkgScripts[script]) ? { network: true } : {}),
               source: 'ci',
             });
           }
@@ -252,6 +264,7 @@ export async function inspectRepository(selectedPath: string): Promise<{
                 name: scriptDisplayName(name),
                 command: runner,
                 args: ['run', name],
+                ...(scriptNeedsNetwork(name, pkgScripts[name]!) ? { network: true } : {}),
                 source: 'package-script',
               });
             }

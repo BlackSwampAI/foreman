@@ -1,6 +1,6 @@
 /**
  * Validation command list of the open-repository dialog.
- * Validation runs offline: each command carries a Network switch that is off unless the suggestion needs the network (dependency installs, cargo, go).
+ * Validation runs offline: each command carries a Network switch that is off unless the suggestion needs the network (dependency installs, smoke and install-running scripts, cargo, go).
  */
 import React from 'react';
 import { Badge } from './badge.js';

@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { inspectRepository, parseCiScripts, ciChecksNotConfigured } from '../src/repository-inspector.js';
+import { inspectRepository, parseCiScripts, ciChecksNotConfigured, scriptNeedsNetwork } from '../src/repository-inspector.js';
 
 const dirs: string[] = [];
 const git = (cwd: string, ...args: string[]) =>
@@ -316,6 +316,25 @@ jobs:
       const npm = await inspectRepository(await repoWithFiles({ 'package.json': JSON.stringify({ scripts: { test: 'vitest', build: 'tsc' } }), 'package-lock.json': '{}' }));
       expect(npm.suggestedValidationCommands.map(c => [c.command, c.args.join(' ')])).toEqual([['npm', 'ci'], ['npm', 'run test'], ['npm', 'run build']]);
       expect(networkByName(npm.suggestedValidationCommands)).toEqual({ 'Install dependencies': true, Tests: false, Build: false });
+    });
+
+    it('gives smoke and install-running scripts from CI the network, since they fail offline whatever the Worker changed', async () => {
+      const ci = 'on: [push]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: pnpm run format:check\n      - run: pnpm run smoke:install\n      - run: pnpm run smoke:load\n      - run: pnpm run e2e\n      - run: pnpm test\n';
+      const repo = await repoWithPackage({ scripts: { 'format:check': 'prettier --check .', 'smoke:install': 'node scripts/smoke.mjs', 'smoke:load': 'node -e 1', e2e: 'npx playwright test', test: 'vitest' }, workflowFiles: { 'ci.yml': ci } });
+      const { suggestedValidationCommands } = await inspectRepository(repo);
+      expect(networkByName(suggestedValidationCommands)).toEqual({ 'Install dependencies': true, 'Check formatting': false, 'Smoke: install': true, 'Smoke: load': true, e2e: true, Tests: false });
+    });
+
+    it('decides network from the script name and body', () => {
+      expect(scriptNeedsNetwork('smoke:install', 'node smoke.mjs')).toBe(true);
+      expect(scriptNeedsNetwork('smoke', 'node smoke.mjs')).toBe(true);
+      expect(scriptNeedsNetwork('test:install', 'node t.mjs')).toBe(true);
+      expect(scriptNeedsNetwork('pack-check', 'npm pack && cd tmp && npm install ../x.tgz')).toBe(true);
+      expect(scriptNeedsNetwork('lint', 'pnpm dlx eslint .')).toBe(true);
+      expect(scriptNeedsNetwork('test', 'vitest run')).toBe(false);
+      expect(scriptNeedsNetwork('format:check', 'prettier --check .')).toBe(false);
+      expect(scriptNeedsNetwork('installer-docs', 'node docs.mjs')).toBe(false);
+      expect(scriptNeedsNetwork('smokescreen', 'node x.mjs')).toBe(false);
     });
 
     it('keeps a package repository without a lockfile fully offline', async () => {
