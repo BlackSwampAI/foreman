@@ -22,6 +22,8 @@ export interface StationObservation {
   finishedAt?: string;
   /** True when the check ran with network access (an install, or no sandbox). */
   network?: boolean;
+  /** True on a failed check that also fails on the unchanged base commit, so a Worker retry cannot fix it. */
+  failsOnBase?: boolean;
 }
 
 export interface CiJobFailure {
@@ -125,13 +127,14 @@ export function ChecksPipeline({ observations, running, ciChecks, ciChecksNotCon
         )}
         {localStations.map(({ obs, status, summary }) => {
           const dur = durationLabel(obs.startedAt, obs.finishedAt);
-          const ariaLabel = `${obs.name}: ${statusLabel(status, obs.timedOut)}${summary ? ` — ${summary}` : ''}${obs.network === true ? ' — ran with network access' : ''}`;
+          const ariaLabel = `${obs.name}: ${statusLabel(status, obs.timedOut)}${summary ? ` — ${summary}` : ''}${obs.network === true ? ' — ran with network access' : ''}${obs.failsOnBase === true ? ' — also fails on the base commit' : ''}`;
           return (
             <details className={`check-station check-station-detail ${statusToneClass(status)}`} key={obs.name} role="listitem">
               <summary aria-label={ariaLabel}>
                 <span className="station-name">{obs.name}</span>
                 {dur && <span className="station-duration">{dur}</span>}
                 {obs.network === true && <Badge tone="info" title="This check ran with network access" aria-label="Ran with network access">Network</Badge>}
+                {obs.failsOnBase === true && <Badge tone="warning" title="This check also fails on the unchanged base commit, so the Worker cannot fix it" aria-label="Also fails on the base commit">Fails on base</Badge>}
                 <Badge tone={stationTone(status)} aria-label={`Status: ${statusLabel(status, obs.timedOut)}`}>
                   {statusLabel(status, obs.timedOut)}
                 </Badge>

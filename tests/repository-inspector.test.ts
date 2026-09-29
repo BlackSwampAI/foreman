@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { inspectRepository, parseCiScripts, ciChecksNotConfigured } from '../src/repository-inspector.js';
+import { inspectRepository, parseCiScripts, ciChecksNotConfigured, scriptNeedsNetwork } from '../src/repository-inspector.js';
 
 const dirs: string[] = [];
 const git = (cwd: string, ...args: string[]) =>
@@ -318,6 +318,25 @@ jobs:
       expect(networkByName(npm.suggestedValidationCommands)).toEqual({ 'Install dependencies': true, Tests: false, Build: false });
     });
 
+    it('gives smoke and install-running scripts from CI the network, since they fail offline whatever the Worker changed', async () => {
+      const ci = 'on: [push]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: pnpm run format:check\n      - run: pnpm run smoke:install\n      - run: pnpm run smoke:load\n      - run: pnpm run e2e\n      - run: pnpm test\n';
+      const repo = await repoWithPackage({ scripts: { 'format:check': 'prettier --check .', 'smoke:install': 'node scripts/smoke.mjs', 'smoke:load': 'node -e 1', e2e: 'npx playwright test', test: 'vitest' }, workflowFiles: { 'ci.yml': ci } });
+      const { suggestedValidationCommands } = await inspectRepository(repo);
+      expect(networkByName(suggestedValidationCommands)).toEqual({ 'Install dependencies': true, 'Check formatting': false, 'Smoke: install': true, 'Smoke: load': true, e2e: true, Tests: false });
+    });
+
+    it('decides network from the script name and body', () => {
+      expect(scriptNeedsNetwork('smoke:install', 'node smoke.mjs')).toBe(true);
+      expect(scriptNeedsNetwork('smoke', 'node smoke.mjs')).toBe(true);
+      expect(scriptNeedsNetwork('test:install', 'node t.mjs')).toBe(true);
+      expect(scriptNeedsNetwork('pack-check', 'npm pack && cd tmp && npm install ../x.tgz')).toBe(true);
+      expect(scriptNeedsNetwork('lint', 'pnpm dlx eslint .')).toBe(true);
+      expect(scriptNeedsNetwork('test', 'vitest run')).toBe(false);
+      expect(scriptNeedsNetwork('format:check', 'prettier --check .')).toBe(false);
+      expect(scriptNeedsNetwork('installer-docs', 'node docs.mjs')).toBe(false);
+      expect(scriptNeedsNetwork('smokescreen', 'node x.mjs')).toBe(false);
+    });
+
     it('keeps a package repository without a lockfile fully offline', async () => {
       const { suggestedValidationCommands } = await inspectRepository(await repoWithFiles({ 'package.json': JSON.stringify({ scripts: { test: 'vitest' } }) }));
       expect(suggestedValidationCommands.map(c => c.name)).toEqual(['Tests']);
@@ -363,5 +382,28 @@ jobs:
     it('returns empty when ciScripts is empty', () => {
       expect(ciChecksNotConfigured([], [{ name: 'T', command: 'pnpm', args: ['test'] }])).toEqual([]);
     });
+  });
+});
+
+describe('format step suggestion', () => {
+  it('suggests `<runner> run format` from a format script, offline', async () => {
+    const repo = await repoWithPackage({ scripts: { test: 'vitest', format: 'prettier --write .', 'format:check': 'prettier --check .' } });
+    const result = await inspectRepository(repo);
+    expect(result.suggestedFormatCommand).toEqual({ name: 'Format', command: 'pnpm', args: ['run', 'format'], network: false, source: 'package-script' });
+  });
+
+  it('falls back to format:write, then prettier:write, and prefers format', async () => {
+    expect((await inspectRepository(await repoWithPackage({ scripts: { test: 'x', 'format:write': 'p', 'prettier:write': 'p' } }))).suggestedFormatCommand?.args).toEqual(['run', 'format:write']);
+    expect((await inspectRepository(await repoWithPackage({ scripts: { test: 'x', 'prettier:write': 'p' } }))).suggestedFormatCommand?.args).toEqual(['run', 'prettier:write']);
+    expect((await inspectRepository(await repoWithPackage({ scripts: { test: 'x', 'prettier:write': 'p', format: 'p' } }))).suggestedFormatCommand?.args).toEqual(['run', 'format']);
+  });
+
+  it('uses npm without a pnpm lockfile and suggests nothing for check-only or missing scripts', async () => {
+    const npmRepo = await repoWithPackage({ scripts: { test: 'x', format: 'p' } });
+    git(npmRepo, 'rm', '-q', 'pnpm-lock.yaml');
+    git(npmRepo, 'commit', '-qm', 'no pnpm lock');
+    expect((await inspectRepository(npmRepo)).suggestedFormatCommand).toMatchObject({ command: 'npm', args: ['run', 'format'] });
+    expect((await inspectRepository(await repoWithPackage({ scripts: { test: 'x', 'format:check': 'prettier --check .' } }))).suggestedFormatCommand).toBeUndefined();
+    expect((await inspectRepository(await repoWithPackage())).suggestedFormatCommand).toBeUndefined();
   });
 });

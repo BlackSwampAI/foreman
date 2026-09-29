@@ -16,6 +16,8 @@ export interface WorkspaceSetupConfig {
   repoPath: string;
   allowedScope: string[];
   validationCommands: WorkspaceValidationCommand[];
+  /** Optional formatter Foreman runs over the Worker's changed files before validation. */
+  formatCommand?: WorkspaceValidationCommand;
 }
 
 export interface ValidatedWorkspace {
@@ -24,6 +26,7 @@ export interface ValidatedWorkspace {
   dirty: boolean;
   allowedScope: string[];
   validationCommands: WorkspaceValidationCommand[];
+  formatCommand?: WorkspaceValidationCommand;
 }
 
 const SHA = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
@@ -41,6 +44,7 @@ export async function validateWorkspaceSetup(input: unknown): Promise<ValidatedW
   const repoPath = resolve(value.repoPath);
   const allowedScope = validateAllowedScope(value.allowedScope);
   const validationCommands = validateCommands(value.validationCommands);
+  const formatCommand = validateFormatCommand(value.formatCommand);
   const [inside, head, status] = await Promise.all([
     git(repoPath, ['rev-parse', '--show-toplevel']),
     git(repoPath, ['rev-parse', '--verify', 'HEAD^{commit}']),
@@ -51,7 +55,7 @@ export async function validateWorkspaceSetup(input: unknown): Promise<ValidatedW
   if (repoPath !== top && !repoPath.startsWith(top + sep)) throw new Error('Selected folder is not inside a Git repository');
   const commit = head.trim().toLowerCase();
   if (!SHA.test(commit)) throw new Error('Git did not return a full HEAD commit');
-  return { repoPath: top, head: commit, dirty: status.length > 0, allowedScope, validationCommands };
+  return { repoPath: top, head: commit, dirty: status.length > 0, allowedScope, validationCommands, ...(formatCommand ? { formatCommand } : {}) };
 }
 
 /** Validate repository settings then atomically persist the sanitized form under dataDir. */
@@ -127,21 +131,32 @@ function validateCommands(value: unknown): WorkspaceValidationCommand[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > MAX_COMMANDS) throw new Error(`Configure between 1 and ${MAX_COMMANDS} validation commands`);
   const names = new Set<string>();
   return value.map((item: unknown) => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error('Each validation command must be an object');
-    const command = item as Record<string, unknown>;
-    if (typeof command.name !== 'string' || !command.name.trim() || command.name.length > 120 || names.has(command.name.trim())) throw new Error('Validation command names must be unique and non-empty');
-    if (typeof command.command !== 'string' || !command.command.trim() || command.command.length > 1024 || command.command.includes('\0')) throw new Error('Validation commands require an executable name');
-    if (!Array.isArray(command.args) || command.args.length > MAX_ARGS || command.args.some(arg => typeof arg !== 'string' || arg.length > MAX_ARG_LENGTH || arg.includes('\0'))) throw new Error(`Validation argv must contain at most ${MAX_ARGS} bounded string arguments`);
-    if (command.network !== undefined && typeof command.network !== 'boolean') throw new Error('Validation command network must be true or false');
-    let cwd: string | undefined;
-    if (command.cwd !== undefined) {
-      if (typeof command.cwd !== 'string' || !command.cwd || command.cwd.startsWith('/') || command.cwd.includes('\\') || command.cwd.includes('\0') || command.cwd.split('/').some(part => !part || part === '.' || part === '..')) throw new Error('Validation command cwd must be a safe relative directory');
-      cwd = command.cwd;
-    }
-    names.add(command.name.trim());
-    const executable = command.command.trim(), args = [...command.args] as string[];
-    return { name: command.name.trim(), command: executable, args, ...(cwd ? { cwd } : {}), network: (command.network as boolean | undefined) ?? defaultNetworkAccess(executable, args) };
+    const command = validateCommand(item, names, undefined);
+    names.add(command.name);
+    return command;
   });
+}
+
+/** The optional format step is validated like a validation command, but runs offline unless it says `network: true`. */
+function validateFormatCommand(value: unknown): WorkspaceValidationCommand | undefined {
+  if (value === undefined || value === null) return undefined;
+  return validateCommand(value, new Set(), false);
+}
+
+function validateCommand(item: unknown, names: Set<string>, defaultNetwork: boolean | undefined): WorkspaceValidationCommand {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error('Each validation command must be an object');
+  const command = item as Record<string, unknown>;
+  if (typeof command.name !== 'string' || !command.name.trim() || command.name.length > 120 || names.has(command.name.trim())) throw new Error('Validation command names must be unique and non-empty');
+  if (typeof command.command !== 'string' || !command.command.trim() || command.command.length > 1024 || command.command.includes('\0')) throw new Error('Validation commands require an executable name');
+  if (!Array.isArray(command.args) || command.args.length > MAX_ARGS || command.args.some(arg => typeof arg !== 'string' || arg.length > MAX_ARG_LENGTH || arg.includes('\0'))) throw new Error(`Validation argv must contain at most ${MAX_ARGS} bounded string arguments`);
+  if (command.network !== undefined && typeof command.network !== 'boolean') throw new Error('Validation command network must be true or false');
+  let cwd: string | undefined;
+  if (command.cwd !== undefined) {
+    if (typeof command.cwd !== 'string' || !command.cwd || command.cwd.startsWith('/') || command.cwd.includes('\\') || command.cwd.includes('\0') || command.cwd.split('/').some(part => !part || part === '.' || part === '..')) throw new Error('Validation command cwd must be a safe relative directory');
+    cwd = command.cwd;
+  }
+  const executable = command.command.trim(), args = [...command.args] as string[];
+  return { name: command.name.trim(), command: executable, args, ...(cwd ? { cwd } : {}), network: (command.network as boolean | undefined) ?? defaultNetwork ?? defaultNetworkAccess(executable, args) };
 }
 
 function git(repoPath: string, args: string[]): Promise<string> {

@@ -666,6 +666,83 @@ describe('validation correction',()=>{
     expect(orchPrompt).toContain('Expected: true');
     expect(orchPrompt).not.toContain('\u001b[');
   });
+
+  describe('checks that also fail on the base commit',()=>{
+    const failed=(name:string,output:string)=>({name,command:process.execPath,args:['-e',''],exitCode:1,timedOut:false,output,outputTruncated:false,passed:false});
+    const smoke={name:'Smoke: install',command:process.execPath,args:['-e',"console.error('offline');process.exit(1)"]};
+    // Fails only when the Worker's change ("broken") is present, so it passes on the unchanged base.
+    const unit={name:'unit tests',command:process.execPath,args:['-e',"process.exit(require('fs').readFileSync('README.md','utf8').includes('broken')?1:0)"]};
+    async function baseRepo(){const dir=await mkdtemp(join(tmpdir(),'foreman-baseline-'));dirs.push(dir);const git=(...args:string[])=>execFileSync('git',['-C',dir,...args],{encoding:'utf8'}).trim();git('init','-q');git('config','user.name','Fixture');git('config','user.email','fixture@example.invalid');await writeFile(join(dir,'README.md'),'base\n');git('add','README.md');git('commit','-qm','base');return {dir,sha:git('rev-parse','HEAD')};}
+    async function bridgeUrl(){const bridge=createServer((req,res)=>{let body='';req.on('data',part=>body+=part);req.on('end',()=>{res.setHeader('content-type','application/json');if(req.method==='GET'&&req.url==='/v1/uhp'){res.end(JSON.stringify({capabilities:{extensions:{foreman_workspace_bridge_v1:{version:1,seed:true,complete_snapshot:true,execution_boundary:'bubblewrap'}}}}));return;}if(req.method==='POST'&&req.url==='/extensions/foreman-workspace/v1/workspaces'){const parsed=JSON.parse(body);res.end(JSON.stringify({workspace_id:'baseline-retry-workspace',base_commit:parsed.base_commit}));return;}res.statusCode=404;res.end('{}');});});bridge.listen(0,'127.0.0.1');await once(bridge,'listening');bridgeServers.push(bridge);return `http://127.0.0.1:${(bridge.address() as import('node:net').AddressInfo).port}`;}
+    /** A stopped run whose Worker snapshot failed the given checks, against a real repository so the base can be materialized. */
+    async function seedFailed(controller:Controller,store:JsonStore,runId:string,bridgeBaseUrl:string,commands:Array<{name:string;command:string;args:string[]}>,observations:any[]){
+      const {dir,sha}=await baseRepo();
+      await store.mutate(s=>{const run=s.projects[0]!.tasks[0]!.runs.find(r=>r.id===runId)!,stamp=new Date().toISOString();run.pinnedBaseCommit=sha;run.workspaceId='baseline-workspace';run.allowedScope=['README.md'];run.sessions.orchestrator.uhpSessionId='baseline-orchestrator-session';
+        const orchestrator:Assignment={id:'bl-orchestrator',roleId:'orchestrator',status:'succeeded',requestedConfig:{harnessId:'fixture',model:'model-fixture'},responseId:'bl-orch-response',sessionId:'baseline-orchestrator-session',prompt:'plan',result:JSON.stringify({workerTask:'Update README.md.'}),submissionId:'bl-orch-sub',idempotencyKey:'bl-orch-key',createdAt:stamp};
+        const worker:Assignment={id:'bl-worker',roleId:'worker',status:'succeeded',requestedConfig:{harnessId:'fixture',model:'model-fixture'},responseId:'bl-worker-response',sessionId:'bl-worker-session',prompt:'Update README.md.',submissionId:'bl-worker-sub',idempotencyKey:'bl-worker-key',createdAt:stamp};
+        run.assignments.push(orchestrator,worker);run.workerProposal={id:'bl-wprop',status:'dispatched',text:'Update README.md.',orchestratorAssignmentId:orchestrator.id,workerAssignmentId:worker.id,workspaceId:'baseline-workspace',pinnedBaseCommit:sha,createdAt:stamp};
+        run.workerEvidence={provenance:'bridge_snapshot',workerAssignmentId:worker.id,responseId:worker.responseId!,pinnedBaseCommit:sha,completeSnapshot:{reportedComplete:true,reportedErrors:0,entryCount:1},scopeVerified:true,allowedScope:['README.md'],entries:[],changes:[{path:'README.md',kind:'modify'}],reviewDiff:'diff --git a/README.md b/README.md\n+broken',acceptance:'not_decided'};
+        run.validation={id:'bl-validation',status:'failed',passed:false,reportedPassed:false,checks:observations.map(o=>({name:o.name,passed:o.passed})),observations,policy:{requireAllChecksPass:true,configuredCheckCount:commands.length},gitEvidence:{status:'verified',commit:sha,changedPaths:['README.md'],submittedAt:stamp},createdAt:stamp} as any;
+        run.orchestratorInbox=(controller as any).buildOrchestratorInbox(runId,run);run.status='failed';run.controller={startedAt:stamp,active:false,phase:'stopped',stoppedReason:'Validation failed.',budgets:{roleTurns:{planner:3,orchestrator:3,worker:2,reviewer:2},workerAttempts:2}};});
+      controller.configureVerifiedWorkspace({repoPath:dir,bridgeBaseUrl,allowedScope:['README.md'],commands,sandbox:{mode:'none'}});
+      await store.mutate(s=>{s.projects[0]!.tasks[0]!.runs.find(r=>r.id===runId)!.validationCommands=commands;});
+      return sha;
+    }
+    const currentRun=async(store:JsonStore,runId:string)=>(await store.load()).projects[0]!.tasks[0]!.runs.find(r=>r.id===runId)!;
+
+    it('stops without a Worker follow-up or a spent attempt when every failed check also fails on the base',async()=>{
+      const turns:string[]=[];const {controller,store}=await setup({submit:async input=>{turns.push(input.roleId);return {externalId:`bl-${input.roleId}`,responseId:`bl-resp-${input.roleId}`,sessionId:`bl-session-${input.roleId}`,status:'completed',outputText:'unused',actualModel:'model-fixture',requestedModel:'model-fixture',selectedHarnessId:'fixture'};}});
+      const run=await prepareAutomaticRun(controller,store);
+      await seedFailed(controller,store,run.id,await bridgeUrl(),[smoke],[failed('Smoke: install','offline')]);
+      turns.length=0;
+      const workersBefore=(await currentRun(store,run.id)).assignments.filter(a=>a.roleId==='worker').length;
+      await controller.requestValidationCorrection(run.id);
+      const stopped=await waitForController(store,run.id);await store.flush();
+      expect(turns).toEqual([]);
+      expect(stopped.controller).toMatchObject({active:false,phase:'stopped',stoppedReason:'Checks also fail on the base commit, so a Worker retry cannot fix them: Smoke: install. Fix the check or its network setting, then retry validation.'});
+      expect(stopped.status).toBe('failed');
+      expect(stopped.assignments.filter(a=>a.roleId==='worker')).toHaveLength(workersBefore);
+      expect(stopped.validation?.observations?.[0]?.failsOnBase).toBe(true);
+      // The marker is not part of the digest-bound Orchestrator/Reviewer evidence.
+      expect((controller as any).buildOrchestratorInbox(run.id,stopped).evidenceDigest).toBe(stopped.orchestratorInbox?.evidenceDigest);
+      expect(stopped.baselineValidation?.checks).toEqual([{name:'Smoke: install',passed:false,exitCode:1,timedOut:false}]);
+    });
+
+    it('still follows up on checks that pass on the base, leaving base-failing checks out of the note, and runs the baseline once',async()=>{
+      const prompts:string[]=[];let verifyCalls=0;const {controller,store}=await setup({submit:async input=>{if(input.roleId==='orchestrator')prompts.push(input.prompt);return {externalId:`bl-${input.roleId}`,responseId:`bl-resp-${input.roleId}-${prompts.length}`,sessionId:`bl-session-${input.roleId}`,status:'completed',outputText:input.roleId==='orchestrator'?JSON.stringify({workerTask:'Remove the broken text.',targetFiles:['README.md']}):'Worker done',actualModel:'model-fixture',requestedModel:'model-fixture',selectedHarnessId:'fixture'};}});
+      const run=await prepareAutomaticRun(controller,store);
+      const sha=await seedFailed(controller,store,run.id,await bridgeUrl(),[smoke,unit],[failed('Smoke: install','SMOKE_NETWORK_UNREACHABLE'),failed('unit tests','AssertionError: unit boom')]);
+      // The follow-up Worker's snapshot fails the same two checks again.
+      (controller as any).verifyWorkerOutput=async(runId:string,workerId:string)=>{verifyCalls++;await store.mutate(s=>{const r=s.projects[0]!.tasks[0]!.runs.find(x=>x.id===runId)!,w=r.assignments.find(a=>a.id===workerId)!;r.workerEvidence={provenance:'bridge_snapshot',workerAssignmentId:w.id,responseId:w.responseId??'bl-verify-resp',pinnedBaseCommit:sha,completeSnapshot:{reportedComplete:true,reportedErrors:0,entryCount:1},scopeVerified:true,allowedScope:['README.md'],entries:[],changes:[{path:'README.md',kind:'modify'}],reviewDiff:'diff',acceptance:'not_decided'};const obs=[failed('Smoke: install','SMOKE_NETWORK_UNREACHABLE'),failed('unit tests','AssertionError: unit boom again')];r.validation={id:'bl-validation-2',status:'failed',passed:false,reportedPassed:false,checks:obs.map(o=>({name:o.name,passed:false})),observations:obs,policy:{requireAllChecksPass:true,configuredCheckCount:2},gitEvidence:{status:'verified',commit:sha,changedPaths:['README.md'],submittedAt:new Date().toISOString()},createdAt:new Date().toISOString()} as any;r.sessions.orchestrator.uhpSessionId=r.assignments.filter(a=>a.roleId==='orchestrator').at(-1)?.sessionId;r.orchestratorInbox=(controller as any).buildOrchestratorInbox(runId,r);});return {};};
+      await controller.requestValidationCorrection(run.id);
+      const stopped=await waitForController(store,run.id);await store.flush();
+      expect(verifyCalls).toBe(1);
+      expect(prompts).toHaveLength(1);
+      expect(prompts[0]).toContain('AssertionError: unit boom');
+      // The digest-bound result inbox still carries every observation; the correction note itself must not.
+      const note=prompts[0]!.slice(prompts[0]!.indexOf('Operator question:'));
+      expect(note).toContain('AssertionError: unit boom');
+      expect(note).not.toContain('SMOKE_NETWORK_UNREACHABLE');
+      expect(prompts[0]).toContain("Also fails on base, not the Worker's to fix (ignore): Smoke: install.");
+      // Attempt budget (2 Worker attempts) is now spent, so the run stops for the ordinary budget reason, not the base-failure one.
+      expect(stopped.controller?.stoppedReason).toMatch(/Worker attempt budget exhausted/);
+      expect(stopped.validation?.observations?.map(o=>[o.name,o.failsOnBase])).toEqual([['Smoke: install',true],['unit tests',false]]);
+      const baselineEvents=(await store.load()).events.filter(e=>e.type==='validation.baseline_observed'&&e.entityId===run.id);
+      expect(baselineEvents).toHaveLength(1);
+      expect(baselineEvents[0]!.data.ran).toEqual(['Smoke: install','unit tests']);
+    });
+
+    it('drops the cached baseline when validation is retried, so a fixed environment is measured again',async()=>{
+      const {controller,store}=await setup();
+      const run=await prepareAutomaticRun(controller,store);
+      const sha=await seedFailed(controller,store,run.id,await bridgeUrl(),[smoke],[failed('Smoke: install','offline')]);
+      await store.mutate(s=>{s.projects[0]!.tasks[0]!.runs.find(r=>r.id===run.id)!.baselineValidation={pinnedBaseCommit:sha,commandDigest:'x',ranAt:new Date().toISOString(),checks:[{name:'Smoke: install',passed:false,exitCode:1,timedOut:false}]};});
+      workspaceMocks.useValidate=true;workspaceMocks.validate.mockResolvedValue({passed:false,checks:[{name:'Smoke: install',command:process.execPath,args:[],exitCode:1,timedOut:false,output:'still offline',outputTruncated:false,startedAt:new Date().toISOString(),finishedAt:new Date().toISOString(),sandbox:'none',network:true}]});
+      const record:any=await controller.retryValidation(run.id);
+      expect(record.observations[0].failsOnBase).toBeUndefined();
+      expect((await currentRun(store,run.id)).baselineValidation).toBeUndefined();
+    });
+  });
 });
 
 describe('store EventEmitter for SSE push',()=>{

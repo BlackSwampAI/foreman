@@ -742,3 +742,5 @@ main>footer .foot-right{float:right;margin:0;color:var(--muted)}
   .chat{overflow-x:hidden}
   main>footer{flex-direction:column}
 }
+.repo-format-step{display:flex;flex-direction:column;gap:4px;margin-top:10px}
+.repo-format-step>code{font-size:var(--fs-xs);color:var(--dim)}
