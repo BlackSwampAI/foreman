@@ -1,7 +1,7 @@
 import { createElement, type ReactElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { App, debounce, type State, type TaskStartPreview } from '../ui/main.js';
+import { App, debounce, mergePrUnavailableReason, openPrUnavailableReason, pushResultUnavailableReason, type State, type TaskStartPreview } from '../ui/main.js';
 import { DecisionPanel, DecisionDigestNotice, type DecisionPanelProps } from '../ui/decision-panel.js';
 import type { DecisionDigestView } from '../ui/decision-digest.js';
 import { ChecksPipeline, type StationObservation, type GithubCheckEntry } from '../ui/checks-pipeline.js';
@@ -49,6 +49,30 @@ describe('debounce helper',()=>{
   });
 });
 
+describe('GitHub action availability explanations',()=>{
+  const openPrBase={promotionApplied:true,account:'reviewer',taskBranch:'foreman/task',taskCommit:'abc123',remoteBranchStatus:'matching' as const,busy:false};
+  it('requires promotion even when stale GitHub branch and commit data match',()=>{
+    expect(openPrUnavailableReason({...openPrBase,promotionApplied:false})).toMatch(/Promote the approved result/);
+  });
+  it('explains remote mismatch, busy state, and success using the same availability decision',()=>{
+    expect(openPrUnavailableReason({...openPrBase,remoteBranchStatus:'different'})).toMatch(/differs from the promoted result/);
+    expect(openPrUnavailableReason({...openPrBase,busy:true})).toMatch(/current GitHub action/);
+    expect(openPrUnavailableReason(openPrBase)).toBeUndefined();
+  });
+  it('blocks both push surfaces until promotion and allows a promoted mismatched branch to be pushed',()=>{
+    expect(pushResultUnavailableReason({...openPrBase,promotionApplied:false})).toMatch(/Promote the approved result/);
+    expect(pushResultUnavailableReason({...openPrBase,remoteBranchStatus:'different'})).toBeUndefined();
+    expect(pushResultUnavailableReason({...openPrBase,remoteBranchStatus:'matching'})).toMatch(/already matches/);
+  });
+  it('explains disabled merge prerequisites and reports availability when all gates pass',()=>{
+    const base={busy:false,diffAvailable:true,diffTruncated:false,state:'OPEN',queueRequired:false,mergeQueue:false,headMatchesResult:true};
+    expect(mergePrUnavailableReason({...base,headMatchesResult:false})).toMatch(/head must match/);
+    expect(mergePrUnavailableReason({...base,queueRequired:null})).toMatch(/Refresh GitHub status/);
+    expect(mergePrUnavailableReason({...base,busy:true})).toMatch(/current GitHub action/);
+    expect(mergePrUnavailableReason(base)).toBeUndefined();
+  });
+});
+
 describe('project Planner UI',()=>{
   it('shows the continuing Planner, task tree, start controls, and named navigation with inline icons',()=>{
     const state:State={projects:[{id:'prj_fixture',name:'Opened repository',plannerSession:{localId:'planner-session-fixture',roleId:'planner',generation:1,status:'active',config:{harnessId:'fixture',model:'simulated'},startedAt:'2026-01-01T00:00:00.000Z'},plannerMessages:[{id:'pmsg_user',role:'user',text:'Update the node README and add a REST endpoint.',createdAt:'2026-01-01T00:00:00.000Z'},{id:'pmsg_planner',role:'planner',text:'I split this into two tasks.',createdAt:'2026-01-01T00:01:00.000Z'}],tasks:[{id:'tsk_readme_fixture',title:'Update README',goal:'Document the node behavior.',suggestedAllowedPaths:['README.md'],validationCriteria:['README check passes'],status:'ready',runs:[]},{id:'tsk_endpoint_fixture',title:'Add REST endpoint',goal:'Implement the requested API endpoint.',suggestedAllowedPaths:['src/http/'],validationCriteria:['Endpoint tests pass'],status:'ready',runs:[]}]}],roles:[...['planner','orchestrator','worker','reviewer'].map(id=>({id,name:id,enabled:true,config:{harnessId:'fixture',model:'simulated'},availableConfigs:[{harnessId:'fixture',model:'simulated'}]}))]};
@@ -84,7 +108,7 @@ describe('project Planner UI',()=>{
     const state:State={projects:[{id:'prj_blocked',name:'Blocked project',tasks:[{id:'tsk_blocked',title:'Update report',goal:'Update the report.',validationCriteria:['Report lint passes'],status:'ready'}]}],roles:[]};
     const preview:TaskStartPreview={taskId:'tsk_blocked',scope:[],roleConfigs:{},validationCriteria:['Report lint passes'],validationCommands:[],requiresExplicitBase:true,reasons:['Choose at least one allowed path before starting this task','Dependency tsk_prior must be completed and promoted'],dependencyTaskIds:['tsk_prior'],canStart:false};
     const html=renderToStaticMarkup(createElement(App,{initialState:state,initialTaskStartPreview:preview}));
-    expect(html).toContain('Resolve these blockers before starting');expect(html).toContain('Choose at least one allowed path before starting this task');expect(html).toContain('Dependency tsk_prior must be completed and promoted');expect(html).toContain('Related work must be integrated first');expect(html).toContain('pins the updated current HEAD automatically');expect(html).toContain('Approve task &amp; start work');expect(html).toMatch(/<button class="primary task-approve-button" disabled="">Approve task &amp; start work<\/button>/);
+    expect(html).toContain('Resolve these blockers before starting');expect(html).toContain('Choose at least one allowed path before starting this task');expect(html).toContain('Dependency tsk_prior must be completed and promoted');expect(html).toContain('Related work must be integrated first');expect(html).toContain('pins the updated current HEAD automatically');expect(html).toContain('Approve task &amp; start work');expect(html).toMatch(/<button class="primary task-approve-button"[^>]*disabled="">Approve task &amp; start work<\/button>/);expect(html).toContain('aria-describedby="task-start-reason"');
   });
   it('shows a persisted task plan approval separately from later result approval',()=>{
     const state:State={projects:[{id:'prj_approved',name:'Approved project',tasks:[{id:'tsk_approved',title:'Document API',goal:'Document the API.',validationCriteria:['Docs build passes'],status:'in progress',planApproval:{status:'approved',approvedAt:'2026-01-02T00:00:00.000Z',specDigest:'digest',runId:'run_approved'},runs:[]}]}],roles:[]};
