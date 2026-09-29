@@ -205,6 +205,7 @@ export async function inspectRepository(selectedPath: string): Promise<{
   suggestedAllowedScope: string[];
   suggestedValidationCommands: ValidationSuggestion[];
   ciScripts: string[];
+  suggestedFormatCommand?: ValidationSuggestion;
 }> {
   const selected = resolve(selectedPath);
   const options = { timeout: 10_000, maxBuffer: 2 * 1024 * 1024 };
@@ -280,6 +281,7 @@ export async function inspectRepository(selectedPath: string): Promise<{
   } else if (allFiles.includes('pyproject.toml')) {
     suggestedValidationCommands.push({ name: 'Tests', command: 'python', args: ['-m', 'pytest'], source: 'package-script' });
   }
+  const suggestedFormatCommand = await suggestFormatCommand(repoPath, allFiles);
   return {
     repoPath,
     head: head.trim().toLowerCase(),
@@ -289,7 +291,28 @@ export async function inspectRepository(selectedPath: string): Promise<{
     suggestedAllowedScope: scope,
     suggestedValidationCommands,
     ciScripts,
+    ...(suggestedFormatCommand ? { suggestedFormatCommand } : {}),
   };
+}
+
+/** Package scripts that rewrite files with the formatter, in order of preference. `format:check` and other read-only checks are not formatters. */
+const FORMAT_SCRIPTS = ['format', 'format:write', 'prettier:write'] as const;
+
+/**
+ * Format step Foreman can run on the Worker's changed files: `<runner> run format` when package.json has that script, else `format:write` or `prettier:write`.
+ * It runs offline (network false); dependencies come from the install command in the validation list.
+ */
+export async function suggestFormatCommand(repoPath: string, trackedFiles: readonly string[]): Promise<ValidationSuggestion | undefined> {
+  const packagePath = join(repoPath, 'package.json');
+  const packageStat = await stat(packagePath).catch(() => undefined);
+  if (!packageStat?.isFile() || packageStat.size >= 512_000) return undefined;
+  try {
+    const pkg = JSON.parse(await readFile(packagePath, 'utf8')) as { packageManager?: string; scripts?: Record<string, unknown> };
+    const script = FORMAT_SCRIPTS.find(name => typeof pkg.scripts?.[name] === 'string');
+    if (!script) return undefined;
+    const runner = pkg.packageManager?.startsWith('pnpm@') || trackedFiles.includes('pnpm-lock.yaml') ? 'pnpm' : 'npm';
+    return { name: 'Format', command: runner, args: ['run', script], network: false, source: 'package-script' };
+  } catch { return undefined; }
 }
 
 /** Compute which CI scripts are not covered by a configured validation command list. */

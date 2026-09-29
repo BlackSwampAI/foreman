@@ -384,3 +384,26 @@ jobs:
     });
   });
 });
+
+describe('format step suggestion', () => {
+  it('suggests `<runner> run format` from a format script, offline', async () => {
+    const repo = await repoWithPackage({ scripts: { test: 'vitest', format: 'prettier --write .', 'format:check': 'prettier --check .' } });
+    const result = await inspectRepository(repo);
+    expect(result.suggestedFormatCommand).toEqual({ name: 'Format', command: 'pnpm', args: ['run', 'format'], network: false, source: 'package-script' });
+  });
+
+  it('falls back to format:write, then prettier:write, and prefers format', async () => {
+    expect((await inspectRepository(await repoWithPackage({ scripts: { test: 'x', 'format:write': 'p', 'prettier:write': 'p' } }))).suggestedFormatCommand?.args).toEqual(['run', 'format:write']);
+    expect((await inspectRepository(await repoWithPackage({ scripts: { test: 'x', 'prettier:write': 'p' } }))).suggestedFormatCommand?.args).toEqual(['run', 'prettier:write']);
+    expect((await inspectRepository(await repoWithPackage({ scripts: { test: 'x', 'prettier:write': 'p', format: 'p' } }))).suggestedFormatCommand?.args).toEqual(['run', 'format']);
+  });
+
+  it('uses npm without a pnpm lockfile and suggests nothing for check-only or missing scripts', async () => {
+    const npmRepo = await repoWithPackage({ scripts: { test: 'x', format: 'p' } });
+    git(npmRepo, 'rm', '-q', 'pnpm-lock.yaml');
+    git(npmRepo, 'commit', '-qm', 'no pnpm lock');
+    expect((await inspectRepository(npmRepo)).suggestedFormatCommand).toMatchObject({ command: 'npm', args: ['run', 'format'] });
+    expect((await inspectRepository(await repoWithPackage({ scripts: { test: 'x', 'format:check': 'prettier --check .' } }))).suggestedFormatCommand).toBeUndefined();
+    expect((await inspectRepository(await repoWithPackage())).suggestedFormatCommand).toBeUndefined();
+  });
+});

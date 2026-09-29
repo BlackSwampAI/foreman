@@ -51,3 +51,39 @@ export function RepoChecksEditor({ checks, onChange, ciScripts = [] }: { checks:
     </div>
   );
 }
+
+/** The format step of the open-repository dialog: the inspector's suggestion plus whether it is switched on. */
+export interface RepoFormatStep { name: string; command: string; args: string[]; enabled: boolean }
+export interface RepoFormatSuggestion { name: string; command: string; args: string[] }
+export interface SubmittedFormatCommand { name: string; command: string; args: string[]; network: false }
+export interface WorkerFormattingSummary { status: 'applied' | 'unchanged' | 'failed'; formattedPaths?: string[]; observation?: { exitCode: number | null; timedOut?: boolean }; error?: string }
+
+/** A suggested formatter starts switched on. */
+export const formatStepFromSuggestion = (suggestion: RepoFormatSuggestion | undefined): RepoFormatStep | undefined =>
+  suggestion ? { name: suggestion.name || 'Format', command: suggestion.command, args: [...suggestion.args], enabled: true } : undefined;
+
+/** The format command submitted with the workspace setup; nothing when it is off. It always runs offline. */
+export const formatCommandPayload = (step: RepoFormatStep | undefined): SubmittedFormatCommand | undefined =>
+  step?.enabled && step.command.trim() ? { name: step.name || 'Format', command: step.command.trim(), args: [...step.args], network: false } : undefined;
+
+export function FormatStepToggle({ step, onChange }: { step: RepoFormatStep; onChange: (next: RepoFormatStep) => void }): React.ReactElement {
+  return (
+    <div className="repo-format-step">
+      <label className="repo-check-network" title="Foreman runs this on the files the Worker changed, before the checks">
+        <input type="checkbox" aria-label="Format changed files" checked={step.enabled} onChange={e => onChange({ ...step, enabled: e.target.checked })} />
+        <b>Format changed files</b>
+      </label>
+      <code>{step.command} {step.args.join(' ')}</code>
+      <small>Workers that only edit files cannot run the formatter. Foreman runs it offline on the files they changed, before the checks, and keeps the formatted result. Turn it off if the checks do not include formatting.</small>
+    </div>
+  );
+}
+
+/** One line for a run's evidence, or nothing when the format step did not run. */
+export function formattingSummary(formatting: WorkerFormattingSummary | undefined): string | undefined {
+  if (!formatting) return undefined;
+  const count = formatting.formattedPaths?.length ?? 0;
+  if (formatting.status === 'applied') return `Foreman formatted ${count} file${count === 1 ? '' : 's'}`;
+  if (formatting.status === 'unchanged') return 'Foreman ran the formatter; no file needed formatting';
+  return 'Foreman could not run the formatter; validation reports any formatting problems';
+}

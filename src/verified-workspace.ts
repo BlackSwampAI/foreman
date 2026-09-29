@@ -219,7 +219,7 @@ export async function validateWorkerOutput(input:{repoPath:string;evidence:Verif
   } finally {await cleanup();}
 }
 
-async function runOne(root:string,repoPath:string,command:ValidationCommand,timeoutMs:number,maxBytes:number,sandbox:ValidationSandboxConfig):Promise<ValidationObservation>{
+export async function runOne(root:string,repoPath:string,command:ValidationCommand,timeoutMs:number,maxBytes:number,sandbox:ValidationSandboxConfig):Promise<ValidationObservation>{
   if(!Number.isSafeInteger(timeoutMs)||timeoutMs<1||!Number.isSafeInteger(maxBytes)||maxBytes<1)throw new Error('Invalid validation bounds');
   if(command.network!==undefined&&typeof command.network!=='boolean')throw new Error('Validation command network must be a boolean');
   const cwd=command.cwd?resolve(root,command.cwd):root;if(cwd!==root&&!cwd.startsWith(root+sep))throw new Error('Validation cwd escapes disposable workspace');

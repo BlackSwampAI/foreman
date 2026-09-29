@@ -34,3 +34,24 @@ describe('FOREMAN_WORKSPACE_BRIDGE_TOKEN', () => {
     }
   });
 });
+
+describe('FOREMAN_FORMAT_COMMAND', () => {
+  const saved = process.env.FOREMAN_FORMAT_COMMAND;
+  afterEach(() => { if (saved === undefined) delete process.env.FOREMAN_FORMAT_COMMAND; else process.env.FOREMAN_FORMAT_COMMAND = saved; });
+
+  it('is optional, parsed as one command and offline unless network is true', () => {
+    delete process.env.FOREMAN_FORMAT_COMMAND;
+    expect(loadConfig().formatCommand).toBeUndefined();
+    process.env.FOREMAN_FORMAT_COMMAND = JSON.stringify({ name: 'Format', command: 'pnpm', args: ['run', 'format'] });
+    expect(loadConfig().formatCommand).toEqual({ name: 'Format', command: 'pnpm', args: ['run', 'format'], network: false });
+    process.env.FOREMAN_FORMAT_COMMAND = JSON.stringify({ name: 'Format', command: 'pnpm', args: ['install'], network: true });
+    expect(loadConfig().formatCommand?.network).toBe(true);
+  });
+
+  it('rejects anything that is not a command object', () => {
+    for (const bad of ['[]', '"pnpm"', 'not json', JSON.stringify({ command: 'pnpm', args: [] }), JSON.stringify({ name: 'F', command: 'pnpm', args: [], network: 'yes' })]) {
+      process.env.FOREMAN_FORMAT_COMMAND = bad;
+      expect(() => loadConfig(), bad).toThrow('FOREMAN_FORMAT_COMMAND must be a JSON object');
+    }
+  });
+});

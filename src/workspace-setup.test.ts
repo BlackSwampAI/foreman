@@ -118,4 +118,36 @@ describe('workspace setup', () => {
       }
     });
   });
+
+  describe('format command', () => {
+    const validation = [{ name: 'Tests', command: 'pnpm', args: ['run', 'test'] }];
+
+    it('is optional, validated like a validation command, and offline unless it says otherwise', async () => {
+      const repoPath = await gitRepo();
+      const base = { repoPath, allowedScope: ['src/'], validationCommands: validation };
+      expect((await validateWorkspaceSetup(base)).formatCommand).toBeUndefined();
+      expect((await validateWorkspaceSetup({ ...base, formatCommand: null })).formatCommand).toBeUndefined();
+      expect((await validateWorkspaceSetup({ ...base, formatCommand: { name: ' Format ', command: 'pnpm', args: ['run', 'format'] } })).formatCommand).toEqual({ name: 'Format', command: 'pnpm', args: ['run', 'format'], network: false });
+      // Even an install-shaped command gets no network unless the setup says so explicitly.
+      expect((await validateWorkspaceSetup({ ...base, formatCommand: { name: 'Format', command: 'pnpm', args: ['install'] } })).formatCommand?.network).toBe(false);
+      expect((await validateWorkspaceSetup({ ...base, formatCommand: { name: 'Format', command: 'x', args: [], network: true } })).formatCommand?.network).toBe(true);
+    });
+
+    it('rejects a malformed format command', async () => {
+      const base = { repoPath: '/path/that/does/not/exist', allowedScope: ['src/'], validationCommands: validation };
+      await expect(validateWorkspaceSetup({ ...base, formatCommand: 'pnpm run format' })).rejects.toThrow('must be an object');
+      await expect(validateWorkspaceSetup({ ...base, formatCommand: { command: 'pnpm', args: [] } })).rejects.toThrow('names must be unique and non-empty');
+      await expect(validateWorkspaceSetup({ ...base, formatCommand: { name: 'Format', command: 'pnpm', args: 'run format' } })).rejects.toThrow('argv');
+      await expect(validateWorkspaceSetup({ ...base, formatCommand: { name: 'Format', command: 'pnpm', args: [], network: 'no' } })).rejects.toThrow('network must be true or false');
+      await expect(validateWorkspaceSetup({ ...base, formatCommand: { name: 'Format', command: 'pnpm', args: [], cwd: '../x' } })).rejects.toThrow('safe relative directory');
+    });
+
+    it('is persisted with the saved setup and reloaded', async () => {
+      const repoPath = await gitRepo();
+      const dataDir = join(await temp(), 'data');
+      const saved = await saveWorkspaceSetup(dataDir, 'project-format', { repoPath, allowedScope: ['src/'], validationCommands: validation, formatCommand: { name: 'Format', command: 'pnpm', args: ['run', 'format'] } });
+      expect(JSON.parse(await readFile(join(dataDir, 'workspaces', 'project-format.json'), 'utf8')).formatCommand).toEqual({ name: 'Format', command: 'pnpm', args: ['run', 'format'], network: false });
+      expect(await loadWorkspaceSetup(dataDir, 'project-format')).toEqual(saved);
+    });
+  });
 });

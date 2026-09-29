@@ -19,6 +19,8 @@ export interface ForemanConfig {
   workspaceBridgeToken?: string;
   workspaceAllowedScope: string[];
   validationCommands: Array<{name:string;command:string;args:string[];cwd?:string;network:boolean}>;
+  /** Optional formatter Foreman runs over the Worker's changed files before validation; offline unless it sets network true. */
+  formatCommand?: {name:string;command:string;args:string[];cwd?:string;network:boolean};
   validationTimeoutMs: number;
   validationMaxOutputBytes: number;
   validationSandbox: { mode: ValidationSandboxMode; roPaths: string[]; dataDir: string; cacheDir: string };
@@ -64,6 +66,9 @@ export function loadConfig(): ForemanConfig {
   let validationCommands: ForemanConfig['validationCommands'] = [];
   const rawCommands=process.env.FOREMAN_VALIDATION_COMMANDS?.trim();
   if(rawCommands){try{const value=JSON.parse(rawCommands);if(!Array.isArray(value))throw new Error();validationCommands=value.map((item:unknown)=>{if(!item||typeof item!=='object')throw new Error();const x=item as Record<string,unknown>;if(typeof x.name!=='string'||!x.name.trim()||typeof x.command!=='string'||!x.command||!Array.isArray(x.args)||x.args.some(arg=>typeof arg!=='string')||(x.cwd!==undefined&&typeof x.cwd!=='string')||(x.network!==undefined&&typeof x.network!=='boolean'))throw new Error();return {name:x.name,command:x.command,args:x.args as string[],...(typeof x.cwd==='string'?{cwd:x.cwd}:{}),network:(x.network as boolean|undefined)??defaultNetworkAccess(x.command,x.args as string[])};});}catch{throw new Error('FOREMAN_VALIDATION_COMMANDS must be a JSON array of {name,command,args,cwd?,network?} where network is true or false');}}
+  let formatCommand: ForemanConfig['formatCommand'];
+  const rawFormat=process.env.FOREMAN_FORMAT_COMMAND?.trim();
+  if(rawFormat){try{const x=JSON.parse(rawFormat) as Record<string,unknown>;if(!x||typeof x!=='object'||Array.isArray(x)||typeof x.name!=='string'||!x.name.trim()||typeof x.command!=='string'||!x.command||!Array.isArray(x.args)||x.args.some(arg=>typeof arg!=='string')||(x.cwd!==undefined&&typeof x.cwd!=='string')||(x.network!==undefined&&typeof x.network!=='boolean'))throw new Error();formatCommand={name:x.name,command:x.command,args:x.args as string[],...(typeof x.cwd==='string'?{cwd:x.cwd}:{}),network:x.network===true};}catch{throw new Error('FOREMAN_FORMAT_COMMAND must be a JSON object {name,command,args,cwd?,network?} where network is true or false');}}
   const workspaceAllowedScope=(process.env.FOREMAN_WORKSPACE_ALLOWED_SCOPE??'').split(',').map(x=>x.trim()).filter(Boolean);
   const sandboxMode = parseSandboxMode(process.env.FOREMAN_VALIDATION_SANDBOX);
   if (!sandboxMode) throw new Error('FOREMAN_VALIDATION_SANDBOX must be "bwrap" or "none"');
@@ -87,6 +92,7 @@ export function loadConfig(): ForemanConfig {
     workspaceBridgeToken,
     workspaceAllowedScope,
     validationCommands,
+    ...(formatCommand ? { formatCommand } : {}),
     validationTimeoutMs: integer('FOREMAN_VALIDATION_TIMEOUT_MS', 120000, 1, 600000),
     validationMaxOutputBytes: integer('FOREMAN_VALIDATION_MAX_OUTPUT_BYTES', 1048576, 1, 16777216),
     validationSandbox: { mode: sandboxMode, roPaths: sandboxRoPaths.map(path => resolve(path)), dataDir, cacheDir: resolve(dataDir, 'validation-cache') }

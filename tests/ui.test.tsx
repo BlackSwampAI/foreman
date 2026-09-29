@@ -7,7 +7,7 @@ import type { DecisionDigestView } from '../ui/decision-digest.js';
 import { ChecksPipeline, type StationObservation, type GithubCheckEntry } from '../ui/checks-pipeline.js';
 import { parseChecksSummary } from '../ui/check-output.js';
 import { PrDraftPanel, type PrDraftData } from '../ui/pr-draft.js';
-import { NetworkToggle, RepoChecksEditor, checksFromSuggestions, validationCommandsPayload, type RepoCheck } from '../ui/repo-checks.js';
+import { FormatStepToggle, NetworkToggle, RepoChecksEditor, checksFromSuggestions, formatCommandPayload, formatStepFromSuggestion, formattingSummary, validationCommandsPayload, type RepoCheck } from '../ui/repo-checks.js';
 import { Badge, toneForStatus } from '../ui/badge.js';
 
 describe('debounce helper',()=>{
@@ -785,6 +785,28 @@ describe('open-repository validation commands',()=>{
     expect(validationCommandsPayload(checks)).toEqual([{name:'Fetch',command:'cargo',args:['fetch'],network:true}]);
     // Commands left blank are not submitted.
     expect(validationCommandsPayload([...checks,{name:'',command:'  ',args:'',network:true}])).toHaveLength(1);
+  });
+
+  it('offers a suggested format step that is on by default, submitted offline, and omitted when switched off',()=>{
+    expect(formatStepFromSuggestion(undefined)).toBeUndefined();
+    let step=formatStepFromSuggestion({name:'Format',command:'pnpm',args:['run','format']})!;
+    expect(step.enabled).toBe(true);
+    expect(formatCommandPayload(step)).toEqual({name:'Format',command:'pnpm',args:['run','format'],network:false});
+    const html=renderToStaticMarkup(createElement(FormatStepToggle,{step,onChange:()=>{}}));
+    expect(html).toContain('aria-label="Format changed files" checked=""');
+    expect(html).toContain('pnpm run format');
+    findElements(FormatStepToggle({step,onChange:next=>{step=next;}}),'input')[0]!.props.onChange({target:{checked:false}});
+    expect(step.enabled).toBe(false);
+    expect(formatCommandPayload(step)).toBeUndefined();
+    expect(JSON.stringify({formatCommand:formatCommandPayload(step)})).toBe('{}');
+  });
+
+  it('summarises what the format step did to a run',()=>{
+    expect(formattingSummary(undefined)).toBeUndefined();
+    expect(formattingSummary({status:'applied',formattedPaths:['a.ts','b.ts']})).toBe('Foreman formatted 2 files');
+    expect(formattingSummary({status:'applied',formattedPaths:['a.ts']})).toBe('Foreman formatted 1 file');
+    expect(formattingSummary({status:'unchanged',formattedPaths:[]})).toContain('no file needed formatting');
+    expect(formattingSummary({status:'failed',formattedPaths:[]})).toContain('could not run the formatter');
   });
 });
 
