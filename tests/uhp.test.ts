@@ -6,6 +6,19 @@ const fixtures: UhpFixture[] = [];
 async function fixture(options: Parameters<typeof startUhpFixture>[0] = {}): Promise<UhpFixture> {
   const server = await startUhpFixture(options); fixtures.push(server); return server;
 }
+
+describe("shared UTF-8 handoff limits", () => {
+  it("accepts a prompt exactly at the configured byte limit and rejects a multibyte prompt over it", async () => {
+    const server = await fixture();
+    const client = new UhpClient({ baseUrl: server.baseUrl, harnessId: "chrn_fixture", model: "model-fixture" });
+    const common = { submissionId: "limit-sub", assignmentId: "limit-as", runId: "limit-run", roleId: "planner", taskId: "task", projectId: "project", config: {}, idempotencyKey: "limit-key" };
+    const exact = "é".repeat(65_536); // 131,072 UTF-8 bytes, but only 65,536 JS characters.
+    await client.submit({ ...common, prompt: exact });
+    expect(JSON.parse(server.requests.find((request) => request.path === "/v1/responses")?.body ?? "{}").input).toBe(exact);
+    await expect(client.submit({ ...common, idempotencyKey: "over-limit-key", prompt: `${exact}é` })).rejects.toThrow(/131072-byte UTF-8 limit/);
+    expect(server.requests.filter((request) => request.path === "/v1/responses")).toHaveLength(1);
+  });
+});
 afterEach(async () => { await Promise.all(fixtures.splice(0).map((server) => server.close())); });
 
 describe("UHP adapter", () => {
@@ -146,11 +159,11 @@ describe("UHP adapter", () => {
     await expect(unsupportedClient.submit({ submissionId: "s", assignmentId: "a", runId: "r", roleId: "reviewer", taskId: "t", projectId: "p", prompt: "Review", config: { reviewMode: "read_only", reviewEvidence: { reviewDiff: "diff" } }, idempotencyKey: "key" })).rejects.toThrow("read-only Reviewer capability");
     expect(unsupported.executionCount).toBe(0);
 
-    const evidence = { validation: "verified_by_foreman_git_comparison", scopeVerified: true, baseCommit: "a".repeat(40), allowedScope: ["README.md"], workerResponseId: "resp_worker", reviewDiff: "bounded diff", controllerValidation: { passed: true, observations: [{ name: "check", passed: true }] } };
+    const evidence = { validation: "verified_by_foreman_git_comparison", scopeVerified: true, baseCommit: "a".repeat(40), allowedScope: ["README.md"], workerResponseId: "resp_worker", reviewDiff: "bounded diff", controllerValidation: { passed: true, observations: [{ name: "check", passed: true }] }, reviewContextDigest: "e".repeat(64) };
     const server = await fixture({ capabilities: { readOnlyReviewer: true } });
     const client = new UhpClient({ baseUrl: server.baseUrl, harnessId: "chrn_fixture", model: "model-fixture" });
     const result = await client.submit({ submissionId: "s", assignmentId: "a", runId: "r", roleId: "reviewer", taskId: "t", projectId: "p", prompt: "Read-only review", config: { reviewMode: "read_only", reviewEvidence: evidence }, idempotencyKey: "key" });
-    expect(result).toMatchObject({ status: "completed", actualModel: "model-fixture", responseId: "resp_fixture", sessionId: "hsess_fixture", reviewerExecution: { mode: "read_only", mutationAttempted: false, validation: evidence.controllerValidation } });
+    expect(result).toMatchObject({ status: "completed", actualModel: "model-fixture", responseId: "resp_fixture", sessionId: "hsess_fixture", reviewerExecution: { mode: "read_only", mutationAttempted: false, validation: evidence.controllerValidation, contextDigest:evidence.reviewContextDigest } });
     expect(JSON.parse(server.requests.find((request) => request.path === "/v1/responses")?.body ?? "{}")).toMatchObject({ input: "Read-only review", metadata: { foreman_role_id: "reviewer", foreman_review_mode: "read_only", review_evidence: evidence } });
   });
 

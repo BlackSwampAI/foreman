@@ -2,19 +2,23 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Controller, type UhpAdapter } from '../src/controller.js';
 import { buildRepoDigest } from '../src/repo-digest.js';
 import { JsonStore } from '../src/store.js';
 
-const LIMIT = 15_000;
+// Exercise the bounded digest path with a valid locally configured safe limit.
+// Normal bridge requests use the shared 128 KiB default, covered by prompt-guard.
+const LIMIT = 16_000;
 const bytes = (text: string) => Buffer.byteLength(text, 'utf8');
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map(dir => rm(dir, { recursive: true, force: true }))); });
+beforeEach(() => vi.stubEnv('FOREMAN_PROMPT_BYTES', String(LIMIT)));
+afterEach(() => vi.unstubAllEnvs());
 
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
-/** A repository big enough that an unbounded digest overflows the 15,000 byte prompt limit: many files plus a long README. */
+/** A repository whose digest exceeds the constrained test prompt limit: many files plus a long README. */
 async function makeBigRepo() {
   const repo = await mkdtemp(join(tmpdir(), 'foreman-digest-budget-repo-')); dirs.push(repo);
   git(repo, 'init', '-q', '-b', 'main'); git(repo, 'config', 'user.email', 'test@test.com'); git(repo, 'config', 'user.name', 'Test');
@@ -47,7 +51,7 @@ async function setup(reply: string) {
 vi.setConfig({ testTimeout: 30_000 });
 
 describe('repo digest is sized from the remaining prompt budget', () => {
-  it('fixture: an unbounded digest alone overflows the prompt limit', async () => {
+  it('fixture: an unbounded digest alone overflows the configured prompt limit', async () => {
     const { repo, head } = await makeBigRepo();
     const digest = await buildRepoDigest({ repoPath: repo, commit: head, allowedScope: [], keywords: ['retry', 'bridge'] });
     expect(bytes(digest.text)).toBeGreaterThan(LIMIT);
@@ -84,20 +88,20 @@ describe('repo digest is sized from the remaining prompt budget', () => {
     expect(conversation).toContain('Message 3.');
   });
 
-  it('Planner omits the digest and says so when a near-maximum human message leaves no room for it', async () => {
+  it('Planner preserves a near-maximum human message while fitting the bounded digest', async () => {
     const { repo } = await makeBigRepo();
     const { store, controller, submissions } = await setup('{"reply":"ok"}');
     const scope = ['src/', 'README.md', 'package.json', ...Array.from({ length: 40 }, (_, i) => `docs/generated-section-number-${i}/`)];
     controller.configureVerifiedWorkspace({ repoPath: repo, allowedScope: scope, commands: [{ name: 't', command: 'true', args: [] }] });
     const project: any = await controller.createProject('Digest budget');
-    await controller.sendProjectPlannerMessage(project.id, `Plan this. ${'x'.repeat(11_989)}`);
+    await controller.sendProjectPlannerMessage(project.id, `Plan this. ${'x'.repeat(7_980)}`);
     const prompt: string = submissions.find(s => s.roleId === 'planner').prompt;
     expect(bytes(prompt)).toBeLessThanOrEqual(LIMIT);
-    expect(prompt).toContain('Repository digest omitted: prompt budget exhausted');
-    expect(prompt).not.toContain('## Repository file tree');
+    expect(prompt).toContain('## Repository file tree');
+    expect(prompt).toContain('Plan this.');
     const assignment = (await store.load()).projects[0]!.plannerAssignments!.at(-1)!;
     expect(assignment.repoAccess).toMatchObject({ mode: 'digest' });
-    expect(assignment.repoAccess!.reason).toContain('Repository digest omitted: prompt budget exhausted');
+    expect(assignment.repoAccess!.reason).not.toContain('omitted');
   });
 
   async function orchestratorFixture(options: { note?: string; guidance?: string[] } = {}) {
@@ -137,15 +141,11 @@ describe('repo digest is sized from the remaining prompt budget', () => {
     expect(current.guidance.some(g => g.status === 'delivered')).toBe(true);
   });
 
-  it('Orchestrator omits the digest and says so when the operator note leaves no room for it', async () => {
+  it('refuses a note that cannot fit alongside the complete frozen task contract', async () => {
     const note = `Prepare a bounded task. ${'n'.repeat(11_976)}`;
     const { store, controller, submissions, run } = await orchestratorFixture({ note });
-    const result: any = await controller.orchestrate(run.id, note);
-    const prompt: string = submissions.find(s => s.roleId === 'orchestrator').prompt;
-    expect(bytes(prompt)).toBeLessThanOrEqual(LIMIT);
-    expect(prompt).toContain('Repository digest omitted: prompt budget exhausted');
-    const assignment = (await store.load()).projects[0]!.tasks[0]!.runs[0]!.assignments.find(a => a.id === result.assignment.id)!;
-    expect(assignment.repoAccess).toMatchObject({ mode: 'digest' });
-    expect(assignment.repoAccess!.reason).toContain('Repository digest omitted: prompt budget exhausted');
+    await expect(controller.orchestrate(run.id, note)).rejects.toMatchObject({ statusCode: 413 });
+    expect(submissions.filter(s => s.roleId === 'orchestrator')).toHaveLength(0);
+    expect((await store.load()).projects[0]!.tasks[0]!.runs[0]!.assignments.filter(a => a.roleId === 'orchestrator')).toHaveLength(0);
   });
 });

@@ -13,7 +13,7 @@ const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, 
 const commit = (cwd: string, message: string) => { git(cwd, 'add', '-A'); git(cwd, 'commit', '-qm', message); return git(cwd, 'rev-parse', 'HEAD'); };
 const sha = (char: string) => char.repeat(40);
 
-async function fixture(options: { auth?: boolean; pr?: boolean; ownPr?: boolean; checks?: 'none'|'pending'|'failed'|'passed'; changedHead?: boolean; mergeRefused?: boolean; queueRequired?: boolean; queueState?: string|null; emptyDiff?: boolean } = {}) {
+async function fixture(options: { auth?: boolean; pr?: boolean; ownPr?: boolean; checks?: 'none'|'pending'|'failed'|'passed'; changedHead?: boolean; mergeRefused?: boolean; queueRequired?: boolean; queueState?: string|null; emptyDiff?: boolean; mergeNotConfirmed?:boolean; allowSquash?:boolean; allowRebase?:boolean; allowMergeCommit?:boolean; merged?:boolean; closedUnmerged?:boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'foreman-github-fixture-')); dirs.push(root);
   const repo = join(root, 'repo'), remote = join(root, 'remote.git'), data = join(root, 'data');
   const fake = join(root, 'fake-gh');
@@ -31,10 +31,10 @@ async function fixture(options: { auth?: boolean; pr?: boolean; ownPr?: boolean;
   state.projects.push({ id: projectId, name: 'Fixture', status: 'active', defaultRoleConfigs: {}, createdAt: new Date().toISOString(), tasks: [{ id: taskId, title: 'Fixture task', status: 'completed', createdAt: new Date().toISOString(), runs: [{ id: runId, status: 'completed', createdAt: new Date().toISOString(), sessions: {} as any, sessionHistory: [], roleConfigs: {}, guidance: [], assignments: [], reviews: [], pinnedBaseCommit: base, approval: { id: 'approval', approved: true, decision: 'approved', createdAt: new Date().toISOString() }, promotion: { status: 'applied', destinationBranch: 'foreman/results/run_fixture', resultCommit: result, resultTree: git(repo, 'rev-parse', `${result}^{tree}`), updatedAt: new Date().toISOString() } }] }] });
   const store = new JsonStore(join(data, 'state.json')); await store.mutate(s => Object.assign(s, state));
   await saveWorkspaceSetup(data, projectId, { repoPath: repo, allowedScope: ['README.md'], validationCommands: [{ name: 'fixture', command: 'true', args: [] }] });
-  const config = { auth: options.auth ?? true, pr: options.pr ?? false, checks: options.checks ?? 'none', changedHead: options.changedHead ?? false, mergeRefused: options.mergeRefused ?? false, ownPr: options.ownPr ?? false, queueRequired: options.queueRequired ?? false, queueState: options.queueState ?? null, emptyDiff: options.emptyDiff ?? false };
+  const config = { auth: options.auth ?? true, pr: options.pr ?? false, checks: options.checks ?? 'none', changedHead: options.changedHead ?? false, mergeRefused: options.mergeRefused ?? false, ownPr: options.ownPr ?? false, queueRequired: options.queueRequired ?? false, queueState: options.queueState ?? null, emptyDiff: options.emptyDiff ?? false, mergeNotConfirmed:options.mergeNotConfirmed??false, allowSquash:options.allowSquash??true, allowRebase:options.allowRebase??true, allowMergeCommit:options.allowMergeCommit??true, merged:options.merged??false, closedUnmerged:options.closedUnmerged??false };
   const nodePath = process.execPath;
-  const script = `#!${nodePath}\nconst fs=require('fs');const config=JSON.parse(fs.readFileSync(${JSON.stringify(join(root, 'gh-config.json'))},'utf8'));const log=${JSON.stringify(join(root, 'gh-calls.json'))};const a=process.argv.slice(2);fs.appendFileSync(log,JSON.stringify(a)+'\\n');const out=x=>{fs.writeSync(1,JSON.stringify(x)+'\\n');process.exitCode=0};const fail=m=>{process.stderr.write(m+'\\n');process.exitCode=1};\nif(a[0]==='auth') {if(!config.auth) fail('not logged in');else process.exitCode=0}\nif(a[0]==='api'&&a.includes('user')){if(!config.auth)fail('not logged in');out({login:'fixture-user'})}\nif(a[0]==='api'&&a.some(x=>x==='repos/acme/project')&&!a.includes('user')&&!a.some(x=>x.includes('pulls'))){out({default_branch:'main'})}\nif(a[0]==='api'&&a.some(x=>x==='repos/acme/project/pulls')&&!a.includes('repos/acme/project/pulls/17')){const pr={number:17,html_url:'https://github.com/acme/project/pull/17',title:'Fixture PR',state:'open',node_id:'PR_kwDOFixture',head:{sha:config.changedHead?'${sha('c')}':'${result}',ref:'foreman/results/run_fixture',repo:{full_name:'acme/project'}},base:{ref:'main'},user:{login:config.ownPr?'fixture-user':'someone'}};out(config.pr?[pr]:[])}
-if(a[0]==='api'&&a.some(x=>x==='repos/acme/project/pulls/17')){out({number:17,html_url:'https://github.com/acme/project/pull/17',title:'Fixture PR',state:'open',node_id:'PR_kwDOFixture',head:{sha:config.changedHead?'${sha('c')}':'${result}',ref:'foreman/results/run_fixture',repo:{full_name:'acme/project'}},base:{ref:'main'},user:{login:config.ownPr?'fixture-user':'someone'}});process.exitCode=0}
+  const script = `#!${nodePath}\nconst fs=require('fs');const config=JSON.parse(fs.readFileSync(${JSON.stringify(join(root, 'gh-config.json'))},'utf8'));const log=${JSON.stringify(join(root, 'gh-calls.json'))};const a=process.argv.slice(2),endpoint=a.find(x=>x.startsWith('repos/'));fs.appendFileSync(log,JSON.stringify(a)+'\\n');const out=x=>{fs.writeSync(1,JSON.stringify(x)+'\\n');process.exitCode=0};const fail=m=>{process.stderr.write(m+'\\n');process.exitCode=1};\nif(a[0]==='auth') {if(!config.auth) fail('not logged in');else process.exitCode=0}\nif(a[0]==='api'&&a.includes('user')){if(!config.auth)fail('not logged in');out({login:'fixture-user'})}\nif(a[0]==='api'&&a.some(x=>x==='repos/acme/project')&&!a.includes('user')&&!a.some(x=>x.includes('pulls'))){out({default_branch:'main',allow_squash_merge:config.allowSquash,allow_rebase_merge:config.allowRebase,allow_merge_commit:config.allowMergeCommit})}\nif(a[0]==='api'&&a.some(x=>x==='repos/acme/project/pulls')&&!a.includes('repos/acme/project/pulls/17')){const pr={number:17,html_url:'https://github.com/acme/project/pull/17',title:'Fixture PR',state:config.merged||config.closedUnmerged?'closed':'open',merged:config.merged,merge_commit_sha:config.merged?'${result}':null,node_id:'PR_kwDOFixture',head:{sha:config.changedHead?'${sha('c')}':'${result}',ref:'foreman/results/run_fixture',repo:{full_name:'acme/project'}},base:{ref:'main'},user:{login:config.ownPr?'fixture-user':'someone'}};out(config.pr?[pr]:[])}
+if(a[0]==='api'&&a.some(x=>x==='repos/acme/project/pulls/17')){out({number:17,html_url:'https://github.com/acme/project/pull/17',title:'Fixture PR',state:config.merged||config.closedUnmerged?'closed':'open',merged:config.merged,merge_commit_sha:config.merged?'${result}':null,node_id:'PR_kwDOFixture',head:{sha:config.changedHead?'${sha('c')}':'${result}',ref:'foreman/results/run_fixture',repo:{full_name:'acme/project'}},base:{ref:'main'},user:{login:config.ownPr?'fixture-user':'someone'}});process.exitCode=0}
 if(a[0]==='pr'&&a[1]==='view'){out({reviewDecision:null,mergeStateStatus:'CLEAN'});process.exitCode=0}
 if(a[0]==='api'&&a.some(x=>x.includes('/rules/branches/'))){out(config.queueRequired?[{type:'merge_queue'}]:[])}
 if(a[0]==='api'&&a[1]==='graphql'){
@@ -42,13 +42,13 @@ if(a[0]==='api'&&a[1]==='graphql'){
  if(query.includes('mutation')){config.queueState='QUEUED';fs.writeFileSync(${JSON.stringify(join(root, 'gh-config.json'))},JSON.stringify(config));out({data:{enqueuePullRequest:{mergeQueueEntry:{state:'QUEUED'}}}})}
  else out({data:{node:{mergeQueueEntry:config.queueState?{state:config.queueState}:null}}})
 }
-if(a[0]==='api'&&a.some(x=>x.includes('/check-runs'))){const runs=config.checks==='none'?[]:[{name:'CI',status:config.checks==='pending'?'in_progress':'completed',conclusion:config.checks==='pending'?null:config.checks==='failed'?'failure':'success',html_url:'https://ci.example/check/1',output:{summary:config.checks==='pending'?'Waiting for runner':config.checks==='failed'?'Compilation failed':'All good'}}];out({check_runs:runs})}\nif(a[0]==='api'&&a.some(x=>x.includes('/status'))){out({statuses:[]})}\nif(a[0]==='api'&&a.some(x=>x.includes('/reviews?'))){out([])}\nif(a[0]==='pr'&&a[1]==='diff'){if(!config.emptyDiff)fs.writeSync(1,'diff --git a/README.md b/README.md\\n+approved result\\n');process.exitCode=0}\nif(a[0]==='api'&&a.some(x=>x.endsWith('/merge'))){if(config.mergeRefused)fail('protected branch update failed');else out({merged:true})}\nif(a[0]==='pr'&&a[1]==='create'){out({number:18})}\nif(a[0]==='api'&&a.some(x=>x.endsWith('/reviews'))){out({})}\nif(process.exitCode===undefined)fail('unhandled fake gh: '+a.join(' '));`;
+if(a[0]==='api'&&a.some(x=>x.includes('/check-runs'))){const runs=config.checks==='none'?[]:[{name:'CI',status:config.checks==='pending'?'in_progress':'completed',conclusion:config.checks==='pending'?null:config.checks==='failed'?'failure':'success',html_url:'https://ci.example/check/1',output:{summary:config.checks==='pending'?'Waiting for runner':config.checks==='failed'?'Compilation failed':'All good'}}];out({check_runs:runs})}\nif(a[0]==='api'&&a.some(x=>x.includes('/status'))){out({statuses:[]})}\nif(a[0]==='api'&&a.some(x=>x.includes('/reviews?'))){out([])}\nif(a[0]==='pr'&&a[1]==='diff'){if(!config.emptyDiff)fs.writeSync(1,'diff --git a/README.md b/README.md\\n+approved result\\n');process.exitCode=0}\nif(a[0]==='api'&&a.some(x=>x.endsWith('/merge'))){if(config.mergeRefused)fail('protected branch update failed');else out({merged:!config.mergeNotConfirmed,message:config.mergeNotConfirmed?'Not mergeable':'Pull Request successfully merged'})}\nif(a[0]==='pr'&&a[1]==='create'){out({number:18})}\nif(a[0]==='api'&&a.some(x=>x.endsWith('/reviews'))){out({})}\nif(process.exitCode===undefined)fail('unhandled fake gh: '+a.join(' '));`;
   await writeFile(fake, script, { mode: 0o700 }); await chmod(fake, 0o700);
   const statePath = join(root, 'gh-calls.json'); await writeFile(join(root, 'gh-config.json'), JSON.stringify(config)); await writeFile(statePath, '');
   return { root, repo, remote, data, store, fake, statePath, base, result, integration: new GitHubIntegration(store, data, { ghPath: fake }) };
 }
 async function readCalls(f: Awaited<ReturnType<typeof fixture>>): Promise<string[]> { const text=await import('node:fs/promises').then(fs=>fs.readFile(f.statePath,'utf8'));return text.trim()?text.trim().split('\n').map(line=>JSON.parse(line).join(' ')):[]; }
-afterEach(async () => { if (process.env.KEEP_GH_FIXTURES !== '1') await Promise.all(dirs.map(path => rm(path, { recursive: true, force: true }))); });
+afterEach(async () => { await Promise.all(dirs.map(path => rm(path, { recursive: true, force: true }))); });
 
 describe('GitHub integration with fake gh and disposable repositories', () => {
   it('reports a linked result branch and no PR, while pinning every query to the configured repository', async () => {
@@ -66,6 +66,13 @@ describe('GitHub integration with fake gh and disposable repositories', () => {
     expect((await failed.integration.getRunStatus('run_fixture')).pullRequest).toMatchObject({ checksSummary: 'failed', checks: [{ conclusion: 'failure', summary: 'Compilation failed' }] });
     const passed = await fixture({ pr: true, checks: 'passed' });
     expect((await passed.integration.getRunStatus('run_fixture')).pullRequest).toMatchObject({ checksSummary: 'passed', checks: [{ conclusion: 'success', summary: 'All good' }] });
+  });
+  it('treats a closed PR as merged only when GitHub sets merged=true and reports local readiness',async()=>{
+    const merged=await fixture({pr:true,merged:true});
+    expect(await merged.integration.getRunStatus('run_fixture')).toMatchObject({pullRequest:{state:'MERGED'},localReadiness:{integrated:true,currentHead:merged.result,mergedCommit:merged.result}});
+    const closed=await fixture({pr:true,closedUnmerged:true});
+    const closedStatus=await closed.integration.getRunStatus('run_fixture');
+    expect(closedStatus.pullRequest?.state).toBe('CLOSED');expect(closedStatus.localReadiness).toBeUndefined();
   });
   it('detects an existing PR and does not create a duplicate', async () => {
     const f = await fixture({ pr: true });
@@ -100,6 +107,37 @@ describe('GitHub integration with fake gh and disposable repositories', () => {
     await expect(f.integration.refreshLocal('run_fixture')).rejects.toThrow(/uncommitted changes/);
     expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(head);
     expect(await import('node:fs/promises').then(fs=>fs.readFile(join(f.repo,'README.md'),'utf8'))).toBe('operator edits\n');
+  });
+  it('reports an unchanged local update and fast-forwards only the verified clean base branch', async()=>{
+    const unchanged=await fixture();
+    git(unchanged.repo,'branch','-M','main');git(unchanged.repo,'push','origin','main');
+    const unchangedHead=git(unchanged.repo,'rev-parse','HEAD');
+    const unchangedResult=await unchanged.integration.refreshLocal('run_fixture');
+    expect(unchangedResult.actionResult).toMatch(/already current|No changes were needed/);
+    expect(git(unchanged.repo,'rev-parse','HEAD')).toBe(unchangedHead);
+
+    const advancing=await fixture();
+    git(advancing.repo,'checkout','-q','--detach',advancing.base);
+    git(advancing.repo,'branch','-f','main',advancing.base);
+    const remoteHead=advancing.result;
+    git(advancing.repo,'push','origin',`${remoteHead}:refs/heads/main`);
+    git(advancing.repo,'checkout','-q','main');
+    const updated=await advancing.integration.refreshLocal('run_fixture');
+    expect(updated.actionResult).toMatch(/Updated clean local main checkout/);
+    expect(git(advancing.repo,'rev-parse','HEAD')).toBe(remoteHead);
+  });
+  it('refuses to update from a different local branch',async()=>{
+    const f=await fixture();git(f.repo,'branch','-M','operator-work');git(f.repo,'push','origin',`${f.base}:refs/heads/main`);
+    await expect(f.integration.refreshLocal('run_fixture')).rejects.toThrow(/Local checkout is on operator-work/);
+  });
+  it('refuses a divergent update instead of creating a merge commit',async()=>{
+    const f=await fixture();
+    git(f.repo,'checkout','-q','--detach',f.base);git(f.repo,'branch','-f','main',f.base);
+    git(f.repo,'push','origin',`${f.result}:refs/heads/main`);git(f.repo,'checkout','-q','main');
+    await writeFile(join(f.repo,'README.md'),'local divergent change\n');const localHead=commit(f.repo,'local divergent change');
+    await expect(f.integration.refreshLocal('run_fixture')).rejects.toThrow(/Could not fast-forward/);
+    expect(git(f.repo,'rev-parse','HEAD')).toBe(localHead);
+    expect(git(f.repo,'rev-parse','HEAD^')).toBe(f.base);
   });
   it('reports queue-required branch rules and explicitly enqueues only the reviewed, passing PR', async () => {
     const f = await fixture({ pr: true, checks: 'passed', queueRequired: true });
@@ -148,6 +186,26 @@ describe('GitHub integration with fake gh and disposable repositories', () => {
     const f = await fixture({ pr: true, changedHead: true });
     await expect(f.integration.mergePullRequest('run_fixture', { reviewedHeadSha: f.result })).rejects.toThrow(/head changed|no longer matches/);
     expect((await readCalls(f)).some(x => x.includes('/merge'))).toBe(false);
+  });
+  it('defaults to squash, honors a selected merge method, and rejects repository-disabled methods', async () => {
+    const squash=await fixture({pr:true});
+    await squash.integration.mergePullRequest('run_fixture',{reviewedHeadSha:squash.result});
+    expect((await readCalls(squash)).some(x=>x.includes('merge_method=squash'))).toBe(true);
+    const rebase=await fixture({pr:true});
+    await rebase.integration.mergePullRequest('run_fixture',{reviewedHeadSha:rebase.result,method:'rebase'});
+    expect((await readCalls(rebase)).some(x=>x.includes('merge_method=rebase'))).toBe(true);
+    const mergeCommit=await fixture({pr:true});
+    await mergeCommit.integration.mergePullRequest('run_fixture',{reviewedHeadSha:mergeCommit.result,method:'merge'});
+    expect((await readCalls(mergeCommit)).some(x=>x.includes('merge_method=merge'))).toBe(true);
+    const disabled=await fixture({pr:true,allowRebase:false});
+    await expect(disabled.integration.mergePullRequest('run_fixture',{reviewedHeadSha:disabled.result,method:'rebase'})).rejects.toThrow(/does not allow rebase/);
+    expect((await readCalls(disabled)).some(x=>x.endsWith('/merge'))).toBe(false);
+    const disabledCommit=await fixture({pr:true,allowMergeCommit:false});
+    await expect(disabledCommit.integration.mergePullRequest('run_fixture',{reviewedHeadSha:disabledCommit.result,method:'merge'})).rejects.toThrow(/does not allow merge/);
+  });
+  it('does not report success when GitHub returns merged false',async()=>{
+    const f=await fixture({pr:true,mergeNotConfirmed:true});
+    await expect(f.integration.mergePullRequest('run_fixture',{reviewedHeadSha:f.result})).rejects.toThrow(/refused the merge|did not confirm/);
   });
   it('surfaces branch protection or merge queue refusal without bypassing it', async () => {
     const f = await fixture({ pr: true, mergeRefused: true });
@@ -207,7 +265,7 @@ describe('CI failure log excerpts', () => {
     const callsLog = join(root, 'gh-calls.json');
     await writeFile(callsLog, '');
     const nodePath = process.execPath;
-    const script = `#!${nodePath}\nconst fs=require('fs'),a=process.argv.slice(2);fs.appendFileSync(${JSON.stringify(callsLog)},JSON.stringify(a)+'\\n');\nif(a[0]==='auth')process.exitCode=0;\nif(a[0]==='api'&&a.some(x=>x==='user')){process.stdout.write(JSON.stringify({login:'u'})+'\\n');process.exitCode=0;}\nif(a[0]==='api'&&a.some(x=>x.includes('repos/acme/project'))&&!a.some(x=>x.includes('pulls'))&&!a.some(x=>x.includes('check-runs'))&&!a.some(x=>x.includes('status'))&&!a.some(x=>x.includes('reviews'))){process.stdout.write(JSON.stringify({default_branch:'main'})+'\\n');process.exitCode=0;}\nif(a[0]==='api'&&a.some(x=>x.includes('/pulls'))&&a[1]==='--method'&&a[2]==='GET'&&!a.some(x=>x.includes('/pulls/17'))){process.stdout.write(JSON.stringify([{number:17,html_url:'https://github.com/acme/project/pull/17',title:'T',state:'open',node_id:'PR_x',head:{sha:'${result}',ref:'foreman/results/run_cifail',repo:{full_name:'acme/project'}},base:{ref:'main'},user:{login:'u'}}])+'\\n');process.exitCode=0;}\nif(a[0]==='api'&&a.some(x=>x.includes('/pulls/17'))&&!a.some(x=>x.includes('/reviews'))&&!a.some(x=>x.includes('check-runs'))){process.stdout.write(JSON.stringify({number:17,html_url:'https://github.com/acme/project/pull/17',title:'T',state:'open',node_id:'PR_x',head:{sha:'${result}',ref:'foreman/results/run_cifail',repo:{full_name:'acme/project'}},base:{ref:'main'},user:{login:'u'}})+'\\n');process.exitCode=0;}\nif(a[0]==='pr'&&a[1]==='view'){process.stdout.write(JSON.stringify({reviewDecision:null,mergeStateStatus:'CLEAN'})+'\\n');process.exitCode=0;}\nif(a[0]==='api'&&a.some(x=>x.includes('/check-runs'))){process.stdout.write(JSON.stringify({check_runs:[{name:'Check formatting',status:'completed',conclusion:'failure',html_url:${JSON.stringify(checkUrl)},output:{summary:'Code style issues'}}]})+'\\n');process.exitCode=0;}\nif(a[0]==='api'&&a.some(x=>x.includes('/status'))){process.stdout.write(JSON.stringify({statuses:[]})+'\\n');process.exitCode=0;}\nif(a[0]==='api'&&a.some(x=>x.includes('/reviews'))){process.stdout.write(JSON.stringify([])+'\\n');process.exitCode=0;}\nif(a[0]==='pr'&&a[1]==='diff'){process.stdout.write('diff --git a/README.md b/README.md\\n+r\\n');process.exitCode=0;}\nif(a[0]==='api'&&a.some(x=>x.includes('/rules/branches/'))){process.stdout.write(JSON.stringify([])+'\\n');process.exitCode=0;}\nif(a[0]==='api'&&a[1]==='graphql'){process.stdout.write(JSON.stringify({data:{node:{mergeQueueEntry:null}}})+'\\n');process.exitCode=0;}\nif(a[0]==='run'&&a[1]==='view'){process.stdout.write(${JSON.stringify(logLines)}+'\\n');process.exitCode=0;}\nif(process.exitCode===undefined){process.stderr.write('unhandled: '+a.join(' ')+'\\n');process.exitCode=1;}`;
+    const script = `#!${nodePath}\nconst fs=require('fs'),a=process.argv.slice(2),endpoint=a.find(x=>x.startsWith('repos/'));fs.appendFileSync(${JSON.stringify(callsLog)},JSON.stringify(a)+'\\n');\nif(a[0]==='auth')process.exitCode=0;\nif(a[0]==='api'&&a.some(x=>x==='user')){fs.writeSync(1,JSON.stringify({login:'u'})+'\\n');process.exitCode=0;}\nif(a[0]==='api'&&a.some(x=>x.includes('repos/acme/project'))&&!a.some(x=>x.includes('pulls'))&&!a.some(x=>x.includes('check-runs'))&&!a.some(x=>x.includes('status'))&&!a.some(x=>x.includes('reviews'))){fs.writeSync(1,JSON.stringify({default_branch:'main'})+'\\n');process.exitCode=0;}\nif(a[0]==='api'&&endpoint==='repos/acme/project/pulls'){fs.writeSync(1,JSON.stringify([{number:17,html_url:'https://github.com/acme/project/pull/17',title:'T',state:'open',node_id:'PR_x',head:{sha:'${result}',ref:'foreman/results/run_cifail',repo:{full_name:'acme/project'}},base:{ref:'main'},user:{login:'u'}}])+'\\n');process.exitCode=0;}\nif(a[0]==='api'&&endpoint==='repos/acme/project/pulls/17'&&!a.some(x=>x.includes('/reviews'))&&!a.some(x=>x.includes('check-runs'))){fs.writeSync(1,JSON.stringify({number:17,html_url:'https://github.com/acme/project/pull/17',title:'T',state:'open',node_id:'PR_x',head:{sha:'${result}',ref:'foreman/results/run_cifail',repo:{full_name:'acme/project'}},base:{ref:'main'},user:{login:'u'}})+'\\n');process.exitCode=0;}\nif(a[0]==='pr'&&a[1]==='view'){fs.writeSync(1,JSON.stringify({reviewDecision:null,mergeStateStatus:'CLEAN'})+'\\n');process.exitCode=0;}\nif(a[0]==='api'&&a.some(x=>x.includes('/check-runs'))){fs.writeSync(1,JSON.stringify({check_runs:[{name:'Check formatting',status:'completed',conclusion:'failure',html_url:${JSON.stringify(checkUrl)},output:{summary:'Code style issues'}}]})+'\\n');process.exitCode=0;}\nif(a[0]==='api'&&a.some(x=>x.includes('/status'))){fs.writeSync(1,JSON.stringify({statuses:[]})+'\\n');process.exitCode=0;}\nif(a[0]==='api'&&a.some(x=>x.includes('/reviews'))){fs.writeSync(1,JSON.stringify([])+'\\n');process.exitCode=0;}\nif(a[0]==='pr'&&a[1]==='diff'){fs.writeSync(1,'diff --git a/README.md b/README.md\\n+r\\n');process.exitCode=0;}\nif(a[0]==='api'&&a.some(x=>x.includes('/rules/branches/'))){fs.writeSync(1,JSON.stringify([])+'\\n');process.exitCode=0;}\nif(a[0]==='api'&&a[1]==='graphql'){fs.writeSync(1,JSON.stringify({data:{node:{mergeQueueEntry:null}}})+'\\n');process.exitCode=0;}\nif(a[0]==='run'&&a[1]==='view'){fs.writeSync(1,${JSON.stringify(logLines)}+'\\n');process.exitCode=0;}\nif(process.exitCode===undefined){process.stderr.write('unhandled: '+a.join(' ')+'\\n');process.exitCode=1;}`;
     await writeFile(fake, script, { mode: 0o700 }); await chmod(fake, 0o700);
 
     const state = initialState();
@@ -232,7 +290,7 @@ describe('CI failure log excerpts', () => {
     git(repo, 'remote', 'add', 'origin', 'https://github.com/acme/project.git');
     const fake = join(root, 'fake-gh');
     const nodePath = process.execPath;
-    const script = `#!${nodePath}\nconst a=process.argv.slice(2);\nif(a[0]==='auth')process.exitCode=0;\nif(a[0]==='api'&&a.some(x=>x==='user')){process.stdout.write(JSON.stringify({login:'u'})+'\\n');process.exitCode=0;}\nif(a[0]==='api'&&a.some(x=>x.includes('repos/acme/project'))&&!a.some(x=>x.includes('pulls'))){process.stdout.write(JSON.stringify({default_branch:'main'})+'\\n');process.exitCode=0;}\nif(a[0]==='api'&&a.some(x=>x.includes('/pulls'))){process.stdout.write(JSON.stringify([])+'\\n');process.exitCode=0;}\nif(process.exitCode===undefined){process.stderr.write('unhandled: '+a.join(' '));process.exitCode=1;}`;
+    const script = `#!${nodePath}\nconst fs=require('fs'),a=process.argv.slice(2),endpoint=a.find(x=>x.startsWith('repos/'));\nif(a[0]==='auth')process.exitCode=0;\nif(a[0]==='api'&&a.some(x=>x==='user')){fs.writeSync(1,JSON.stringify({login:'u'})+'\\n');process.exitCode=0;}\nif(a[0]==='api'&&a.some(x=>x.includes('repos/acme/project'))&&!a.some(x=>x.includes('pulls'))){fs.writeSync(1,JSON.stringify({default_branch:'main'})+'\\n');process.exitCode=0;}\nif(a[0]==='api'&&a.some(x=>x.includes('/pulls'))){fs.writeSync(1,JSON.stringify([])+'\\n');process.exitCode=0;}\nif(process.exitCode===undefined){process.stderr.write('unhandled: '+a.join(' '));process.exitCode=1;}`;
     await writeFile(fake, script, { mode: 0o700 }); await chmod(fake, 0o700);
     const state = initialState();
     state.projects.push({ id: 'project_nopr', name: 'NP', status: 'active', defaultRoleConfigs: {}, createdAt: new Date().toISOString(), tasks: [{ id: 'task_nopr', title: 'T', status: 'completed', createdAt: new Date().toISOString(), runs: [{ id: 'run_nopr', status: 'completed', createdAt: new Date().toISOString(), sessions: {} as any, sessionHistory: [], roleConfigs: {}, guidance: [], assignments: [], reviews: [], pinnedBaseCommit: base, approval: { id: 'a', approved: true, decision: 'approved', createdAt: new Date().toISOString() }, promotion: { status: 'applied', destinationBranch: 'foreman/results/run_nopr', resultCommit: result, resultTree: git(repo, 'rev-parse', `${result}^{tree}`), updatedAt: new Date().toISOString() } }] }] });

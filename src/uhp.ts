@@ -1,3 +1,5 @@
+import { getResearchLimits } from "./research-limits.js";
+
 export const UHP_VERSION = "2026-09-12";
 export const UHP_SUPPORTED_VERSIONS = [UHP_VERSION, "2026-08-11"] as const;
 
@@ -43,7 +45,7 @@ export interface UhpSubmitResult {
   runtimeMs?: number;
   cliFailureCategory?: string;
   response?: UhpResponse;
-  reviewerExecution?: { mode?: string; mutationAttempted?: boolean; validation?: unknown };
+  reviewerExecution?: { mode?: string; mutationAttempted?: boolean; validation?: unknown; contextDigest?:string };
 }
 
 export interface UhpUsage { inputTokens?: number; outputTokens?: number; totalTokens?: number; thinkingTokens?: number; cachedInputTokens?: number; requestCount?: number }
@@ -167,6 +169,9 @@ export class UhpClient implements UhpAdapter {
   }
 
   async submit(input: UhpSubmitInput): Promise<UhpSubmitResult> {
+    const limits = getResearchLimits().handoff;
+    const promptBytes = Buffer.byteLength(input.prompt, "utf8");
+    if (promptBytes > limits.promptBytes) throw new UhpError(`UHP prompt exceeds the ${limits.promptBytes}-byte UTF-8 limit (${promptBytes} bytes)`);
     const discovery = await this.discover();
     if (discovery.capabilities.idempotency !== true) throw new UhpError("UHP server does not advertise idempotency; refusing a non-idempotent task submission");
     if (discovery.capabilities.streaming !== true) throw new UhpError("UHP server does not advertise streaming; refusing a task submission that requires progress and live cancellation");
@@ -193,10 +198,7 @@ export class UhpClient implements UhpAdapter {
       if (input.roleId === "reviewer" && (input.config.workspaceId !== undefined || input.config.previousResponseId !== undefined || input.config.reviewMode !== "read_only" || !reviewEvidence || typeof reviewEvidence !== "object")) throw new UhpError("Reviewer requires a fresh read-only request with controller evidence and no workspace");
       if (previousResponseId !== undefined && (typeof previousResponseId !== "string" || !previousResponseId.trim())) throw new Error("config.previousResponseId must be a non-empty response id when provided");
       if (typeof previousResponseId === "string" && discovery.capabilities.sessions !== true) throw new UhpError("UHP server does not advertise sessions; refusing response continuation");
-      const response = await this.fetchImpl(this.url("v1/responses"), {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json", Accept: "text/event-stream", "Idempotency-Key": input.idempotencyKey, "UHP-Version": discovery.version }),
-        body: JSON.stringify({
+      const requestPayload = {
           input: input.prompt,
           model: model.id,
           metadata: { harness_id: harness.id, foreman_submission_id: input.submissionId, foreman_assignment_id: input.assignmentId, foreman_run_id: input.runId, foreman_role_id: input.roleId, foreman_task_id: input.taskId, foreman_project_id: input.projectId, ...(input.roleId==='worker'&&typeof input.config.workspaceId==='string'?{workspace_id:input.config.workspaceId}:{}), ...(input.roleId==='worker'&&typeof input.config.workerCheckRounds==='number'&&input.config.workerCheckRounds>0?{foreman_worker_gate:{max_rounds:input.config.workerCheckRounds}}:{}), ...(input.roleId==='reviewer'?{foreman_review_mode:'read_only',review_evidence:reviewEvidence}:{}), ...((input.roleId==='planner'||input.roleId==='orchestrator')&&typeof input.config.readOnlyWorkspaceId==='string'?{foreman_read_only_workspace_id:input.config.readOnlyWorkspaceId}:{}) },
@@ -206,7 +208,14 @@ export class UhpClient implements UhpAdapter {
           max_step: maxStep,
           ...(optionalBounded(input.config.maxOutputTokens, undefined, 32_768, "maxOutputTokens") !== undefined ? { max_output_tokens: optionalBounded(input.config.maxOutputTokens, undefined, 32_768, "maxOutputTokens") } : {}),
           ...(typeof previousResponseId === "string" ? { previous_response_id: previousResponseId } : {}),
-        }),
+      };
+      const requestBody = JSON.stringify(requestPayload);
+      const requestBytes = Buffer.byteLength(requestBody, "utf8");
+      if (requestBytes > limits.apiBodyBytes) throw new UhpError(`UHP request body exceeds the ${limits.apiBodyBytes}-byte UTF-8 limit (${requestBytes} bytes)`);
+      const response = await this.fetchImpl(this.url("v1/responses"), {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json", Accept: "text/event-stream", "Idempotency-Key": input.idempotencyKey, "UHP-Version": discovery.version }),
+        body: requestBody,
         signal: controller.signal,
       });
       clearTimeout(timer);
@@ -239,6 +248,7 @@ export class UhpClient implements UhpAdapter {
         mode: typeof responseMetadata.foreman_review_mode === "string" ? responseMetadata.foreman_review_mode : undefined,
         mutationAttempted: typeof responseMetadata.reviewer_mutation_attempted === "boolean" ? responseMetadata.reviewer_mutation_attempted : undefined,
         validation: responseMetadata.reviewer_validation,
+        contextDigest: typeof responseMetadata.reviewer_context_digest === "string" ? responseMetadata.reviewer_context_digest : undefined,
       } : undefined;
       if (input.roleId === "reviewer" && status !== "completed") return {
         externalId: final.id, responseId: final.id, ...(sessionId ? { sessionId } : {}), status,
@@ -355,7 +365,7 @@ export class UhpClient implements UhpAdapter {
     if (!response.body) throw new UhpError("UHP stream had no response body");
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
-    const limit = this.options.maxStreamBytes ?? 4 * 1024 * 1024;
+    const limit = this.options.maxStreamBytes ?? getResearchLimits().handoff.apiBodyBytes;
     const idleTimeoutMs = boundedInteger(this.options.streamInactivityTimeoutMs ?? 45_000, 1_000, 300_000, "UHP streamInactivityTimeoutMs");
     let idleTimer: ReturnType<typeof setTimeout> | undefined;
     let byteCount = 0;

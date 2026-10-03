@@ -1,0 +1,25 @@
+{
+  "network": {
+    "defaultRequestsPerRun": 24,
+    "maximumRequestsPerRun": 128,
+    "defaultRequestsPerBatch": 6,
+    "maximumRequestsPerBatch": 6,
+    "maxResponseBytes": 8388608,
+    "maximumResponseBytes": 67108864,
+    "defaultTotalResponseBytes": 67108864,
+    "maximumTotalResponseBytes": 1073741824,
+    "defaultExcerptBytes": 16384,
+    "maximumExcerptBytes": 65536,
+    "timeoutMs": 15000,
+    "maximumTimeoutMs": 60000
+  },
+  "handoff": {
+    "promptBytes": 131072,
+    "workerResearchBytes": 98304,
+    "reviewPackageBytes": 1048576,
+    "reviewDiffBytes": 262144,
+    "apiBodyBytes": 4194304,
+    "cliOutputBytes": 524288,
+    "proposalBytes": 65536
+  }
+}

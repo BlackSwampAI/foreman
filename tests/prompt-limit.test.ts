@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Controller, workerProposalScopeIssue, type UhpAdapter } from '../src/controller.js';
 import { JsonStore } from '../src/store.js';
+import { getResearchLimits } from '../src/research-limits.js';
 
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map(dir => rm(dir, { recursive: true, force: true }))); });
@@ -32,6 +33,7 @@ async function setup(adapter: Partial<UhpAdapter> = {}) {
   });
   return { controller, store, run };
 }
+async function bindReviewerContext(controller:Controller,store:JsonStore,runId:string,assignmentId:string){const snapshot=await store.load(),run=snapshot.projects.flatMap(p=>p.tasks.flatMap(t=>t.runs)).find(item=>item.id===runId)!;const digest=(controller as any).reviewerEvidencePackage(run).reviewContextDigest;await store.mutate(state=>{const current=state.projects.flatMap(p=>p.tasks.flatMap(t=>t.runs)).find(item=>item.id===runId)!,reviewer=current.assignments.find(item=>item.id===assignmentId)!;reviewer.reviewerContextDigest=digest;reviewer.reviewerExecution!.contextDigest=digest;});}
 
 describe('UHP prompt size and stopped-run recovery', () => {
   it('enforces scope via targetFiles and ignores prose; legacy fallback passes non-AGY and uses Target file: lines for AGY', () => {
@@ -72,9 +74,10 @@ describe('UHP prompt size and stopped-run recovery', () => {
         requestedModel: 'model-fixture', selectedHarnessId: 'fixture', reportedHarnessId: 'fixture',
         responseId: 'resp-reviewer-long', sessionId: 'session-reviewer-long',
         result: JSON.stringify({ verdict: 'request_changes', rationale }),
-        reviewerExecution: { mode: 'read_only', mutationAttempted: false, validation: evidence.controllerValidation },
+        reviewerExecution: { mode: 'read_only', mutationAttempted: false, contextDigest: evidence.reviewContextDigest, validation: evidence.controllerValidation }, reviewerContextDigest: evidence.reviewContextDigest,
       } as any);
     });
+    await bindReviewerContext(controller,store,run.id,'reviewer-long-rationale');
     const recommendation: any = await controller.recordReviewerRecommendation(run.id, 'reviewer-long-rationale');
     expect(Buffer.byteLength(rationale, 'utf8')).toBeGreaterThan(4_000);
     expect(recommendation.rationale).toBe(rationale);
@@ -101,21 +104,40 @@ describe('UHP prompt size and stopped-run recovery', () => {
     const result = await controller.followUpOrchestrator(run.id, operatorQuestion);
     expect(result.assignment.status).toBe('succeeded');
     expect(submissions).toHaveLength(1);
-    expect(Buffer.byteLength(submissions[0]!, 'utf8')).toBeLessThan(16_000);
-    expect(submissions[0]).toMatch(/truncat/i);
+    expect(Buffer.byteLength(submissions[0]!, 'utf8')).toBeLessThanOrEqual(getResearchLimits().handoff.promptBytes);
     expect(submissions[0]).toContain(operatorQuestion);
     const saved = (await store.load()).projects[0]!.tasks[0]!.runs[0]!;
     expect(saved.orchestratorInbox?.reviewDiff).toContain('+large diff line');
+    const inboxText=submissions[0]!.split('Controller result inbox (digest binds the complete stored evidence):\n')[1]!.split('\n\nOperator question:')[0]!;
+    const promptInbox=JSON.parse(inboxText) as {reviewDiff:string;reviewDiffTruncated?:boolean};
+    expect(promptInbox.reviewDiff).toBe(saved.orchestratorInbox!.reviewDiff);
+    expect(promptInbox.reviewDiffTruncated).toBeUndefined();
+    expect(submissions[0]).toContain('Preserve this final instruction: return a JSON object with verdict and rationale.');
     expect(saved.orchestratorInbox?.validation.observations[0]?.output).toContain('validation output');
+  });
+
+  it('fits composed follow-up context to an explicit smaller prompt cap and keeps the operator question', async () => {
+    const priorLimit=process.env.FOREMAN_PROMPT_BYTES;process.env.FOREMAN_PROMPT_BYTES='16000';
+    try {
+      const submissions:string[]=[];
+      const {controller,run}=await setup({submit:async input=>{submissions.push(input.prompt);return {externalId:'resp-small-cap',responseId:'resp-small-cap',sessionId:'session-orchestrator',status:'completed',outputText:'bounded follow-up'};}});
+      const operatorQuestion=`Please inspect this verified result. ${'question detail '.repeat(180)} Keep the required JSON instructions at the end.`;
+      const result=await controller.followUpOrchestrator(run.id,operatorQuestion);
+      expect(result.assignment.status).toBe('succeeded');expect(submissions).toHaveLength(1);
+      expect(Buffer.byteLength(submissions[0]!, 'utf8')).toBeLessThanOrEqual(16_000);
+      expect(submissions[0]).toMatch(/truncat/i);expect(submissions[0]).toContain(operatorQuestion);
+      expect(submissions[0]).toContain('Keep the required JSON instructions at the end.');
+    } finally { if(priorLimit===undefined)delete process.env.FOREMAN_PROMPT_BYTES;else process.env.FOREMAN_PROMPT_BYTES=priorLimit; }
   });
 
   it('records a deterministic prompt_limit rejection and does not replay it during recovery', async () => {
     let calls = 0;
-    const { controller, store, run } = await setup({ submit: async input => { calls++; expect(Buffer.byteLength(input.prompt, 'utf8')).toBeLessThan(16_000); throw Object.assign(new Error('UHP request failed (400): prompt_limit'), { statusCode: 400 }); } });
+    const { controller, store, run } = await setup({ submit: async input => { calls++; expect(Buffer.byteLength(input.prompt, 'utf8')).toBeLessThanOrEqual(getResearchLimits().handoff.promptBytes); throw Object.assign(new Error('UHP request failed (400): prompt_limit'), { statusCode: 400 }); } });
     await expect(controller.followUpOrchestrator(run.id, `Review this result. ${'detail '.repeat(300)} Keep the required JSON instructions at the end.`)).rejects.toThrow('prompt_limit');
     const before = (await store.load()).projects[0]!.tasks[0]!.runs[0]!;
     expect(before.assignments.at(-1)).toMatchObject({ roleId: 'orchestrator', status: 'failed', error: expect.stringContaining('prompt_limit') });
     expect(before.orchestratorInbox?.reviewDiff).toContain('+large diff line');
+    expect(before.orchestratorInbox?.reviewDiff).toBe(before.workerEvidence?.reviewDiff);
     await controller.recover();
     const after = (await store.load()).projects[0]!.tasks[0]!.runs[0]!;
     expect(calls).toBe(1);
@@ -135,7 +157,7 @@ describe('UHP prompt size and stopped-run recovery', () => {
     const recommendation: any = { id: 'recommendation-fixture', status: 'proposed', provenance: 'uhp_response', reviewerAssignmentId: 'reviewer-fixture', harnessId: 'fixture', model: 'model-fixture', responseId: 'resp-reviewer', sessionId: 'session-reviewer', reviewMode: 'read_only', mutationAttempted: false, verdict: 'request_changes', rationale: `Please make the requested edit. ${'Issue detail needs a concrete fix. '.repeat(130)} Final issue: downgrade every claim without captured evidence. FINAL MARKER beyond 3500 bytes.`, createdAt: recommendationAt };
     await store.mutate(state => {
       const current = state.projects[0]!.tasks[0]!.runs[0]!;
-      current.assignments.push({ id: 'reviewer-fixture', roleId: 'reviewer', status: 'succeeded', requestedConfig: { harnessId: 'fixture', model: 'model-fixture' }, actualConfig: { harnessId: 'fixture', model: 'model-fixture' }, requestedModel: 'model-fixture', selectedHarnessId: 'fixture', reportedHarnessId: 'fixture', responseId: 'resp-reviewer', sessionId: 'session-reviewer', reviewerExecution: { mode: 'read_only', mutationAttempted: false, validation: reviewEvidence.controllerValidation }, prompt: 'review', submissionId: 'review-sub', idempotencyKey: 'review-key', createdAt: stamp } as any);
+      current.assignments.push({ id: 'reviewer-fixture', roleId: 'reviewer', status: 'succeeded', requestedConfig: { harnessId: 'fixture', model: 'model-fixture' }, actualConfig: { harnessId: 'fixture', model: 'model-fixture' }, requestedModel: 'model-fixture', selectedHarnessId: 'fixture', reportedHarnessId: 'fixture', responseId: 'resp-reviewer', sessionId: 'session-reviewer', reviewerContextDigest:reviewEvidence.reviewContextDigest, reviewerExecution: { mode: 'read_only', mutationAttempted: false, contextDigest:reviewEvidence.reviewContextDigest, validation: reviewEvidence.controllerValidation }, prompt: 'review', submissionId: 'review-sub', idempotencyKey: 'review-key', createdAt: stamp } as any);
       current.reviewerRecommendation = recommendation;
       current.reviewerRecommendationHistory = [recommendation];
       current.controller = { startedAt: stamp, active: false, phase: 'stopped', stoppedReason: 'UHP request failed (400): prompt_limit', budgets: { roleTurns: { planner: 2, orchestrator: 3, worker: 2, reviewer: 2 }, workerAttempts: 2 } };
@@ -176,7 +198,7 @@ describe('UHP prompt size and stopped-run recovery', () => {
     const stoppedAgain = (await store.load()).projects[0]!.tasks[0]!.runs[0]!;
     expect(calls).toBe(1);
     expect(resumedPrompts).toHaveLength(1);
-    expect(Buffer.byteLength(resumedPrompts[0]!, 'utf8')).toBeLessThanOrEqual(12_000);
+    expect(Buffer.byteLength(resumedPrompts[0]!, 'utf8')).toBeLessThanOrEqual(getResearchLimits().handoff.promptBytes);
     expect(Buffer.byteLength(recommendation.rationale, 'utf8')).toBeGreaterThan(2_000);
     expect(Buffer.byteLength(recommendation.rationale, 'utf8')).toBeGreaterThan(3_500);
     expect(resumedPrompts[0]).toContain('Final issue: downgrade every claim without captured evidence.');
@@ -214,7 +236,7 @@ describe('UHP prompt size and stopped-run recovery', () => {
       const current = state.projects[0]!.tasks[0]!.runs[0]!;
       current.allowedScope = ['docs/api-matrix.md']; current.workerEvidence!.allowedScope = ['docs/api-matrix.md'];
       current.workerProposal = { id: 'proposal-original', status: 'dispatched', text: 'Original Worker task', orchestratorAssignmentId: 'orchestrator-original', createdAt: stamp, workerAssignmentId: 'worker-fixture' };
-      current.assignments.push({ id: 'reviewer-saved-plan', roleId: 'reviewer', status: 'succeeded', requestedConfig: { harnessId: 'fixture', model: 'model-fixture' }, actualConfig: { harnessId: 'fixture', model: 'model-fixture' }, requestedModel: 'model-fixture', selectedHarnessId: 'fixture', reportedHarnessId: 'fixture', responseId: 'resp-reviewer', sessionId: 'session-reviewer', reviewerExecution: { mode: 'read_only', mutationAttempted: false, validation: reviewEvidence.controllerValidation }, prompt: 'review', submissionId: 'review-sub-saved-plan', idempotencyKey: 'review-key-saved-plan', createdAt: stamp } as any);
+      current.assignments.push({ id: 'reviewer-saved-plan', roleId: 'reviewer', status: 'succeeded', requestedConfig: { harnessId: 'fixture', model: 'model-fixture' }, actualConfig: { harnessId: 'fixture', model: 'model-fixture' }, requestedModel: 'model-fixture', selectedHarnessId: 'fixture', reportedHarnessId: 'fixture', responseId: 'resp-reviewer', sessionId: 'session-reviewer', reviewerContextDigest:reviewEvidence.reviewContextDigest, reviewerExecution: { mode: 'read_only', mutationAttempted: false, contextDigest:reviewEvidence.reviewContextDigest, validation: reviewEvidence.controllerValidation }, prompt: 'review', submissionId: 'review-sub-saved-plan', idempotencyKey: 'review-key-saved-plan', createdAt: stamp } as any);
       current.reviewerRecommendation = recommendation;
       current.reviewerRecommendationHistory = [recommendation];
       current.assignments.push({ id: 'orchestrator-saved-plan', roleId: 'orchestrator', status: 'succeeded', requestedConfig: { harnessId: 'fixture', model: 'model-fixture' }, prompt: 'bounded correction', submissionId: 'orch-sub-saved-plan', idempotencyKey: 'orch-key-saved-plan', result: JSON.stringify({ workerTask: 'Use the /state/nba sample endpoint as context. Target file: docs/api-matrix.md. Update the coverage table.' }), createdAt: orchestratorAt } as any);

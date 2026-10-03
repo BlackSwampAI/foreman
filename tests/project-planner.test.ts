@@ -93,7 +93,7 @@ describe('project Planner workflow',()=>{
       ['test/','tests/','README.md','docs/'],
     ]);
     expect(result.createdTasks[1]!.dependsOn).toEqual([result.createdTasks[0]!.id]);expect(result.createdTasks[2]!.dependsOn).toEqual([result.createdTasks[1]!.id]);
-    const saved=(await store.load()).projects.find(item=>item.id===project.id)!;expect(saved.plannerAssignments?.[0]?.result).toBe(raw);expect(prompts[0]).toContain('validationCriteria (an array of non-empty strings)');expect(prompts[0]).toContain('Configured repository allowed scope:');expect(prompts[0]).toContain('nodes/');expect(Buffer.byteLength(prompts[0]!, 'utf8')).toBeLessThanOrEqual(24_000);
+    const saved=(await store.load()).projects.find(item=>item.id===project.id)!;expect(saved.plannerAssignments?.[0]?.result).toBe(raw);expect(prompts[0]).toContain('validationCriteria (non-empty strings)');expect(prompts[0]).toContain('scope criteria to public documentation or GET evidence captured during execution');expect(prompts[0]).toContain('The Orchestrator can capture bounded, dated HTTPS research');expect(prompts[0]).toContain('Configured repository allowed scope:');expect(prompts[0]).toContain('nodes/');expect(Buffer.byteLength(prompts[0]!, 'utf8')).toBeLessThanOrEqual(24_000);
     const recovered=await controller.recoverProjectPlannerTasks(project.id,saved.plannerAssignments![0]!.id);expect(recovered.alreadyRecovered).toBe(true);expect(recovered.createdTasks.map(task=>task.id)).toEqual(result.createdTasks.map(task=>task.id));expect((await store.load()).projects.find(item=>item.id===project.id)?.tasks).toHaveLength(3);
   });
 

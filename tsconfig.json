@@ -8,6 +8,7 @@
     "skipLibCheck": true,
     "types": ["node", "vitest/globals"],
     "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
     "noEmit": true
   },
   "include": ["src/**/*.ts", "tests/**/*.ts"]
