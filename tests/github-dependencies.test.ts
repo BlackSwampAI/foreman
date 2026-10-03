@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -11,6 +11,7 @@ import { saveWorkspaceSetup } from '../src/workspace-setup.js';
 
 const roots: string[] = [];
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const gitInit = (cwd: string, defaultBranch: 'master'|'main', ...args: string[]) => execFileSync('git', ['-C', cwd, '-c', `init.defaultBranch=${defaultBranch}`, 'init', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const commit = (cwd: string, message: string) => { git(cwd, 'add', '-A'); git(cwd, 'commit', '-qm', message); return git(cwd, 'rev-parse', 'HEAD'); };
 const fullSha = /^[a-f0-9]{40}$/;
 const hasCommit = (cwd: string, sha: string) => { try { git(cwd, 'cat-file', '-e', `${sha}^{commit}`); return true; } catch { return false; } };
@@ -21,22 +22,31 @@ afterEach(async () => { await Promise.all(roots.splice(0).map(path => rm(path, {
  * as GitHub creates for squash and rebase merges. Every GitHub response comes from a
  * disposable fake `gh` executable, while the local checkout is a real temporary repo.
  */
-async function fixture(options: { method?: 'squash'|'rebase'; mergeState?: 'merged'|'open'|'closed-unmerged'; head?: 'promoted'|'changed'; detailHead?: 'promoted'|'changed'; prRepo?: string; prBranch?: string; mergeSha?: 'integrated'|'test-merge'|'missing'|'unfetched' } = {}) {
+async function fixture(options: { method?: 'squash'|'rebase'; initDefaultBranch?: 'master'|'main'; mergeState?: 'merged'|'open'|'closed-unmerged'; head?: 'promoted'|'changed'; detailHead?: 'promoted'|'changed'; prRepo?: string; prBranch?: string; mergeSha?: 'integrated'|'test-merge'|'missing'|'unfetched' } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'foreman-github-dependency-')); roots.push(root);
   const repo = join(root, 'repo'), remote = join(root, 'remote.git'), integrationRepo = join(root, 'integration-repo'), data = join(root, 'data'), configPath = join(root, 'gh.json'), fakeGh = join(root, 'fake-gh');
+  const initDefaultBranch = options.initDefaultBranch ?? 'main';
   await mkdir(repo);
-  git(repo, 'init', '-q'); git(repo, 'config', 'user.name', 'Fixture'); git(repo, 'config', 'user.email', 'fixture@example.invalid');
+  gitInit(repo, initDefaultBranch, '-q'); git(repo, 'config', 'user.name', 'Fixture'); git(repo, 'config', 'user.email', 'fixture@example.invalid');
   await writeFile(join(repo, 'README.md'), 'base\n'); await writeFile(join(repo, 'unrelated.txt'), 'base\n');
   const base = commit(repo, 'base');
   await writeFile(join(repo, 'README.md'), 'promoted result\n'); const promoted = commit(repo, 'Foreman promoted result');
   git(repo, 'branch', 'foreman/results/run_prior', promoted);
-  await mkdir(remote); git(remote, 'init', '--bare', '-q');
+  await mkdir(remote); gitInit(remote, initDefaultBranch, '--bare', '-q');
   git(repo, 'remote', 'add', 'origin', 'https://github.com/acme/project.git');
   git(repo, 'config', `url.file://${remote}.insteadOf`, 'https://github.com/acme/project.git');
   git(repo, 'push', '-q', 'origin', `${base}:refs/heads/main`, `${promoted}:refs/heads/foreman/results/run_prior`);
   // GitHub merges in a separate repository. Keep the resulting commit on that remote
-  // until the test explicitly fetches it into the Foreman checkout.
-  git(repo, 'clone', '-q', remote, integrationRepo);
+  // until the test explicitly fetches it into the Foreman checkout. Bare-repository
+  // HEAD defaults vary by Git configuration, so pin both its advertised branch and
+  // the clone's selected branch instead of relying on init.defaultBranch.
+  git(remote, 'symbolic-ref', 'HEAD', 'refs/heads/main');
+  git(repo, 'clone', '-q', '--branch', 'main', remote, integrationRepo);
+  const integrationBase = git(integrationRepo, 'rev-parse', 'HEAD');
+  const integrationBaseReadme = await readFile(join(integrationRepo, 'README.md'), 'utf8');
+  if (integrationBase !== base || integrationBaseReadme !== 'base\n') {
+    throw new Error(`GitHub integration clone did not start at the remote main base (${integrationBase} != ${base})`);
+  }
   git(integrationRepo, 'config', 'user.name', 'GitHub fixture'); git(integrationRepo, 'config', 'user.email', 'github-fixture@example.invalid');
   await writeFile(join(integrationRepo, 'unrelated.txt'), 'base branch advanced\n'); commit(integrationRepo, 'advance base branch');
   if (options.method === 'rebase') git(integrationRepo, 'cherry-pick', promoted);
@@ -73,12 +83,14 @@ else {process.stderr.write('unhandled fake gh: '+a.join(' '));process.exitCode=1
   controller.setMergedResultResolver((runId, expected) => integration.mergedResultInHead(runId, expected));
   // Start eligibility reaches the normal task-start path while workspace isolation stays local.
   (controller as any).prepareWorkerWorkspace = async (runId: string, pinned: string) => store.mutate(s => { const run = s.projects.flatMap(p => p.tasks.flatMap(t => t.runs)).find(r => r.id === runId)!; run.pinnedBaseCommit = pinned; run.workspaceId = `fixture-${runId}`; });
-  return { repo, remote, store, controller, integration, promoted, integrated, base, mergeSha, setCheckout:(sha: string) => git(repo, 'reset', '--hard', sha), hasCommit:(sha:string) => hasCommit(repo, sha), fetchIntegrated:() => { git(repo, 'fetch', '-q', 'origin', 'refs/heads/main'); git(repo, 'reset', '--hard', 'FETCH_HEAD'); }, remoteHasCommit:(sha:string) => git(remote, 'cat-file', '-e', `${sha}^{commit}`) === '' };
+  return { repo, remote, store, controller, integration, promoted, integrated, base, integrationBase, integrationBaseReadme, mergeSha, setCheckout:(sha: string) => git(repo, 'reset', '--hard', sha), hasCommit:(sha:string) => hasCommit(repo, sha), fetchIntegrated:() => { git(repo, 'fetch', '-q', 'origin', 'refs/heads/main'); git(repo, 'reset', '--hard', 'FETCH_HEAD'); }, remoteHasCommit:(sha:string) => git(remote, 'cat-file', '-e', `${sha}^{commit}`) === '' };
 }
 
 describe('GitHub merged dependency proof', () => {
-  it.each(['squash', 'rebase'] as const)('allows preview and actual task start after a %s result commit is integrated locally', async method => {
-    const f = await fixture({ method }); f.fetchIntegrated();
+  it.each([['squash','master'],['rebase','main']] as const)('allows preview and actual task start after a %s result commit is integrated locally with init.defaultBranch=%s', async (method, initDefaultBranch) => {
+    const f = await fixture({ method, initDefaultBranch }); f.fetchIntegrated();
+    expect(f.integrationBase).toBe(f.base);
+    expect(f.integrationBaseReadme).toBe('base\n');
     // This test uses real Git ancestry; the scenario's resulting SHA is deliberately distinct
     // from Foreman's promoted SHA, as it is after both GitHub squash and rebase merges.
     expect(f.integrated).not.toBe(f.promoted); expect(fullSha.test(f.mergeSha!)).toBe(true);
