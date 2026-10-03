@@ -6,6 +6,7 @@ import { access, readFile, rm, stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from './config.js';
 import { Controller } from './controller.js';
+import { getResearchLimits } from './research-limits.js';
 import { JsonStore } from './store.js';
 import { UhpClient } from './uhp.js';
 import { HindsightClient } from './hindsight.js';
@@ -30,6 +31,7 @@ const uhp=config.uhpBaseUrl ? new UhpClient({baseUrl:config.uhpBaseUrl,...(uhpTo
 };
 const hindsight=config.hindsightBaseUrl?new HindsightClient({baseUrl:config.hindsightBaseUrl,token:process.env.HINDSIGHT_TOKEN}):undefined;
 const controller=new Controller(store,uhp,!!config.hindsightBaseUrl,!!config.uhpBaseUrl,config.uhpHarnessId&&config.uhpModel?{harnessId:config.uhpHarnessId,model:config.uhpModel}:undefined,hindsight,Math.ceil(config.taskTimeoutMs/1000),Math.ceil(config.workerTimeoutMs/1000),300);
+controller.setMergedResultResolver((runId,commit)=>github.mergedResultInHead(runId,commit));
 if(config.workspaceSourceRepo&&config.workspaceAllowedScope.length&&config.validationCommands.length)controller.configureVerifiedWorkspace({repoPath:config.workspaceSourceRepo,allowedScope:config.workspaceAllowedScope,commands:config.validationCommands,formatCommand:config.formatCommand,bridgeBaseUrl:config.workspaceBridgeUrl,timeoutMs:config.validationTimeoutMs,maxOutputBytes:config.validationMaxOutputBytes,sandbox:config.validationSandbox,bridgeToken:config.workspaceBridgeToken});
 const projectControllers=new Map<string,{controller:Controller;bridge:LocalBridge;workspace:Awaited<ReturnType<typeof validateWorkspaceSetup>>}>();
 const createProjectRuntime=async(projectId:string,workspace:Awaited<ReturnType<typeof validateWorkspaceSetup>>)=>{
@@ -38,14 +40,15 @@ const createProjectRuntime=async(projectId:string,workspace:Awaited<ReturnType<t
     const status=await bridge.start(workspace.repoPath,projectId);
     const projectUhp=new UhpClient({baseUrl:status.baseUrl,token:status.token,fetch:bearerFetch(status.token),timeoutMs:Math.max(config.requestTimeoutMs,45_000)});
     const scoped=new Controller(store,projectUhp,!!config.hindsightBaseUrl,true,undefined,hindsight,Math.ceil(config.taskTimeoutMs/1000),Math.ceil(config.workerTimeoutMs/1000),300,projectId);
+    scoped.setMergedResultResolver((runId,commit)=>github.mergedResultInHead(runId,commit));
     scoped.configureVerifiedWorkspace({repoPath:workspace.repoPath,allowedScope:workspace.allowedScope,commands:workspace.validationCommands,formatCommand:workspace.formatCommand,bridgeBaseUrl:status.baseUrl,timeoutMs:config.validationTimeoutMs,maxOutputBytes:config.validationMaxOutputBytes,sandbox:config.validationSandbox,bridgeToken:status.token});
     projectControllers.set(projectId,{controller:scoped,bridge,workspace});
     return {scoped,bridge,status};
   } catch(error) { await bridge.stop(); throw error; }
 };
 const uiRoot=resolve(fileURLToPath(new URL('../dist/ui/',import.meta.url)));
-const maxBodyBytes=1_000_000;
 const body=async(req:IncomingMessage):Promise<any>=>{
+  const maxBodyBytes=getResearchLimits().handoff.apiBodyBytes;
   const tooLarge=()=>Object.assign(new Error('Request body too large'),{statusCode:413});
   if(Number(req.headers['content-length'])>maxBodyBytes)throw tooLarge();
   const chunks:Buffer[]=[];let size=0;
@@ -92,7 +95,7 @@ const server=createServer(async(req,res)=>{
         if(action==='push'){json(res,200,await github.pushResult(runId));return;}
         if(action==='pr'){json(res,200,await github.openPullRequest(runId));return;}
         if(action==='review'){json(res,200,await github.submitReview(runId,{event:b.event,body:b.body,reviewedHeadSha:b.reviewedHeadSha}));return;}
-        if(action==='merge'){json(res,200,await github.mergePullRequest(runId,{reviewedHeadSha:b.reviewedHeadSha}));return;}
+        if(action==='merge'){json(res,200,await github.mergePullRequest(runId,{reviewedHeadSha:b.reviewedHeadSha,method:b.method}));return;}
         if(action==='enqueue'){json(res,200,await github.enqueuePullRequest(runId,{reviewedHeadSha:b.reviewedHeadSha}));return;}
         json(res,200,await github.refreshLocal(runId));return;
       }
@@ -201,6 +204,7 @@ const server=createServer(async(req,res)=>{
     m=path.match(/^\/api\/runs\/([^/]+)\/start$/);if(req.method==='POST'&&m){json(res,202,await activeController.startWork(decodeURIComponent(m[1]!),await body(req)));return;}
     m=path.match(/^\/api\/runs\/([^/]+)\/guidance$/);if(req.method==='POST'&&m){const b=await body(req);json(res,201,await activeController.addGuidance(decodeURIComponent(m[1]!),String(b.text??'')));return;}
     m=path.match(/^\/api\/runs\/([^/]+)\/orchestrator$/);if(req.method==='POST'&&m){const b=await body(req);json(res,201,await activeController.orchestrate(decodeURIComponent(m[1]!),String(b.prompt??'')));return;}
+    m=path.match(/^\/api\/runs\/([^/]+)\/orchestrator-block\/resume$/);if(req.method==='POST'&&m){const b=await body(req);if(typeof b.guidance!=='string'){json(res,400,{error:'guidance must be a string with the explicit next step or evidence to provide'});return;}for(const key of ['additionalResearchRequests','additionalOrchestratorTurns'])if(b[key]!==undefined&&(!Number.isSafeInteger(b[key])||b[key]<0)){json(res,400,{error:`${key} must be a non-negative whole number`});return;}const run=await activeController.resumeOrchestratorBlock(decodeURIComponent(m[1]!),b.guidance,{additionalResearchRequests:b.additionalResearchRequests,additionalOrchestratorTurns:b.additionalOrchestratorTurns});json(res,202,{run,resumed:true,effectiveResearchBudget:run.researchBudget,effectiveOrchestratorTurns:run.controller?.budgets.roleTurns.orchestrator});return;}
     m=path.match(/^\/api\/runs\/([^/]+)\/orchestrator\/follow-up$/);if(req.method==='POST'&&m){const b=await body(req);json(res,201,await activeController.followUpOrchestrator(decodeURIComponent(m[1]!),String(b.prompt??'')));return;}
     m=path.match(/^\/api\/runs\/([^/]+)\/worker-dispatch$/);if(req.method==='POST'&&m){const b=await body(req);json(res,201,await activeController.dispatchWorkerProposal(decodeURIComponent(m[1]!),String(b.proposalId??'')));return;}
     m=path.match(/^\/api\/runs\/([^/]+)\/worker-retry$/);if(req.method==='POST'&&m){const b=await body(req);json(res,201,await activeController.retryWorkerProposal(decodeURIComponent(m[1]!),String(b.proposalId??'')));return;}

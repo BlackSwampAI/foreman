@@ -69,7 +69,7 @@ describe('Planner task approval and default Start work flow', () => {
           actualModel: 'model-fixture',
           requestedModel: 'model-fixture',
           selectedHarnessId: 'fixture',
-          ...(input.roleId === 'reviewer' ? { reviewerExecution: { mode: 'read_only', mutationAttempted: false, validation } } : {}),
+          ...(input.roleId === 'reviewer' ? { reviewerExecution: { mode: 'read_only', mutationAttempted: false, validation, contextDigest: (input.config.reviewEvidence as any)?.reviewContextDigest } } : {}),
         };
       },
       cancel: async () => ({ status: 'cancelled' }),

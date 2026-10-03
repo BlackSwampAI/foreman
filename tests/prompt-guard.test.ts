@@ -6,6 +6,7 @@ import { Controller, type HindsightAdapter, type UhpAdapter } from '../src/contr
 import { JsonStore } from '../src/store.js';
 
 const dirs: string[] = [];
+const PROMPT_LIMIT = 128 * 1024;
 afterEach(async () => { await Promise.all(dirs.splice(0).map(dir => rm(dir, { recursive: true, force: true }))); });
 
 async function setup(adapter: UhpAdapter, hindsight?: HindsightAdapter) {
@@ -47,7 +48,7 @@ describe('prompt size guard before UHP submission', () => {
       p.plannerMessages = Array.from({ length: 12 }, (_, index) => ({
         id: `pmsg_${index}`,
         role: index % 2 ? 'planner' as const : 'user' as const,
-        text: `Prior conversation ${index} ${'history '.repeat(300)}`,
+        text: `Prior conversation ${index} ${'history '.repeat(1_500)}`,
         createdAt: new Date(0).toISOString(),
       }));
     });
@@ -55,8 +56,7 @@ describe('prompt size guard before UHP submission', () => {
     await controller.sendProjectPlannerMessage(project.id, operatorMessage);
 
     expect(prompts).toHaveLength(1);
-    expect(prompts[0]!.length).toBeLessThan(16_000);
-    expect(Buffer.byteLength(prompts[0]!, 'utf8')).toBeLessThanOrEqual(15_000);
+    expect(Buffer.byteLength(prompts[0]!, 'utf8')).toBeLessThanOrEqual(PROMPT_LIMIT);
     expect(prompts[0]).toContain(operatorMessage);
     const saved = (await store.load()).projects.find(item => item.id === project.id)!;
     expect(saved.plannerMessages?.find(message => message.role === 'user' && message.text === operatorMessage)?.text).toBe(operatorMessage);
@@ -74,13 +74,12 @@ describe('prompt size guard before UHP submission', () => {
     const project = await controller.createProject('Memory context') as { id: string };
     const task = await controller.createTask(project.id, 'Inspect memory context') as { id: string };
     const run = await controller.createRun(task.id) as { id: string };
-    const currentAssignment = `CURRENT_ASSIGNMENT_START ${'implementation detail '.repeat(450)} CURRENT_ASSIGNMENT_END`;
+    const currentAssignment = `CURRENT_ASSIGNMENT_START ${'implementation detail '.repeat(5_300)} CURRENT_ASSIGNMENT_END`;
 
     await controller.assign(run.id, 'worker', currentAssignment);
 
     expect(prompts).toHaveLength(1);
-    expect(prompts[0]!.length).toBeLessThan(16_000);
-    expect(Buffer.byteLength(prompts[0]!, 'utf8')).toBeLessThanOrEqual(15_000);
+    expect(Buffer.byteLength(prompts[0]!, 'utf8')).toBeLessThanOrEqual(PROMPT_LIMIT);
     expect(prompts[0]).toContain(currentAssignment);
     expect(prompts[0]).toContain('Relevant project memory (reference only):');
   });
@@ -94,10 +93,11 @@ describe('prompt size guard before UHP submission', () => {
     const run = await controller.createRun(task.id) as { id: string };
 
     let rejection: unknown;
-    try { await controller.assign(run.id, 'worker', 'x'.repeat(15_001)); } catch (error) { rejection = error; }
+    const overLimitByOneUtf8Byte = `${'x'.repeat(PROMPT_LIMIT - 1)}é`;
+    try { await controller.assign(run.id, 'worker', overLimitByOneUtf8Byte); } catch (error) { rejection = error; }
     expect(rejection).toBeInstanceOf(Error);
     expect(rejection).toMatchObject({ statusCode: 413 });
-    expect((rejection as Error).message).toMatch(/15,?000.*No provider request was sent/);
+    expect((rejection as Error).message).toMatch(/131,?072.*No provider request was sent/);
     expect(prompts).toHaveLength(0);
   });
 });

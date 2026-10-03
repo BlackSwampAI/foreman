@@ -1,4 +1,5 @@
 import { type State, type WorkerEvidence } from './domain.js';
+import { getResearchLimits, defaultRunResearchBudget } from './research-limits.js';
 import { type SnapshotEntry, type SnapshotChange } from './workspace-snapshot.js';
 
 // Strip binary content from evidence before sending state to the UI.
@@ -41,6 +42,13 @@ export function stateForUi(state:State):State{
         ...t,
         runs:t.runs.map(r=>({
           ...r,
+          researchBudget:r.researchBudget??{...defaultRunResearchBudget(),maxRequests:6,maxBatchSize:3},
+          researchBudgetMaximum:{maxRequests:getResearchLimits().network.maximumRequestsPerRun,maxBatchSize:getResearchLimits().network.maximumRequestsPerBatch,maxResponseBytes:getResearchLimits().network.maximumResponseBytes,maxTotalResponseBytes:getResearchLimits().network.maximumTotalResponseBytes,maxExcerptBytes:getResearchLimits().network.maximumExcerptBytes,timeoutMs:getResearchLimits().network.maximumTimeoutMs},
+          researchLimits:getResearchLimits(),
+          roleTurnMaximum:50,
+          researchHttpRequests:r.researchHttpRequests??r.researchEvidence?.length??0,
+          researchBytesCaptured:r.researchBytesCaptured??(r.researchEvidence??[]).reduce((total,item)=>total+(item.capturedBytes??0),0),
+          researchCacheHits:r.researchCacheHits??0,
           ...(r.workerEvidence?{workerEvidence:stripEvidence(r.workerEvidence)}:{}),
           ...(r.workerEvidenceHistory?.length?{workerEvidenceHistory:r.workerEvidenceHistory.map(stripEvidence)}:{}),
         })),
