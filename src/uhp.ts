@@ -201,7 +201,7 @@ export class UhpClient implements UhpAdapter {
       const requestPayload = {
           input: input.prompt,
           model: model.id,
-          metadata: { harness_id: harness.id, foreman_submission_id: input.submissionId, foreman_assignment_id: input.assignmentId, foreman_run_id: input.runId, foreman_role_id: input.roleId, foreman_task_id: input.taskId, foreman_project_id: input.projectId, ...(input.roleId==='worker'&&typeof input.config.workspaceId==='string'?{workspace_id:input.config.workspaceId}:{}), ...(input.roleId==='reviewer'?{foreman_review_mode:'read_only',review_evidence:reviewEvidence}:{}), ...((input.roleId==='planner'||input.roleId==='orchestrator')&&typeof input.config.readOnlyWorkspaceId==='string'?{foreman_read_only_workspace_id:input.config.readOnlyWorkspaceId}:{}) },
+          metadata: { harness_id: harness.id, foreman_submission_id: input.submissionId, foreman_assignment_id: input.assignmentId, foreman_run_id: input.runId, foreman_role_id: input.roleId, foreman_task_id: input.taskId, foreman_project_id: input.projectId, ...(input.roleId==='worker'&&typeof input.config.workspaceId==='string'?{workspace_id:input.config.workspaceId}:{}), ...(input.roleId==='worker'&&typeof input.config.workerCheckRounds==='number'&&input.config.workerCheckRounds>0?{foreman_worker_gate:{max_rounds:input.config.workerCheckRounds}}:{}), ...(input.roleId==='reviewer'?{foreman_review_mode:'read_only',review_evidence:reviewEvidence}:{}), ...((input.roleId==='planner'||input.roleId==='orchestrator')&&typeof input.config.readOnlyWorkspaceId==='string'?{foreman_read_only_workspace_id:input.config.readOnlyWorkspaceId}:{}) },
           stream: true,
           store: true,
           timeout_seconds: timeoutSeconds,

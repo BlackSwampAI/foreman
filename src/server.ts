@@ -31,8 +31,10 @@ const uhp=config.uhpBaseUrl ? new UhpClient({baseUrl:config.uhpBaseUrl,...(uhpTo
 };
 const hindsight=config.hindsightBaseUrl?new HindsightClient({baseUrl:config.hindsightBaseUrl,token:process.env.HINDSIGHT_TOKEN}):undefined;
 const controller=new Controller(store,uhp,!!config.hindsightBaseUrl,!!config.uhpBaseUrl,config.uhpHarnessId&&config.uhpModel?{harnessId:config.uhpHarnessId,model:config.uhpModel}:undefined,hindsight,Math.ceil(config.taskTimeoutMs/1000),Math.ceil(config.workerTimeoutMs/1000),300);
+
 controller.setMergedResultResolver((runId,commit)=>github.mergedResultInHead(runId,commit));
-if(config.workspaceSourceRepo&&config.workspaceAllowedScope.length&&config.validationCommands.length)controller.configureVerifiedWorkspace({repoPath:config.workspaceSourceRepo,allowedScope:config.workspaceAllowedScope,commands:config.validationCommands,formatCommand:config.formatCommand,bridgeBaseUrl:config.workspaceBridgeUrl,timeoutMs:config.validationTimeoutMs,maxOutputBytes:config.validationMaxOutputBytes,sandbox:config.validationSandbox,bridgeToken:config.workspaceBridgeToken});
+if(config.workspaceSourceRepo&&config.workspaceAllowedScope.length&&config.validationCommands.length)controller.configureVerifiedWorkspace({repoPath:config.workspaceSourceRepo,allowedScope:config.workspaceAllowedScope,commands:config.validationCommands,formatCommand:config.formatCommand,bridgeBaseUrl:config.workspaceBridgeUrl,timeoutMs:config.validationTimeoutMs,maxOutputBytes:config.validationMaxOutputBytes,sandbox:config.validationSandbox,bridgeToken:config.workspaceBridgeToken,workerCheckRounds:config.workerCheckRounds});
+
 const projectControllers=new Map<string,{controller:Controller;bridge:LocalBridge;workspace:Awaited<ReturnType<typeof validateWorkspaceSetup>>}>();
 const createProjectRuntime=async(projectId:string,workspace:Awaited<ReturnType<typeof validateWorkspaceSetup>>)=>{
   const bridge=new LocalBridge({dataDir:resolve(config.dataDir,'local-bridges'),onHealthChange:health=>process.stderr.write(`Local bridge for ${projectId} is ${health.state}${health.message?`: ${health.message}`:''}\n`)});
@@ -40,8 +42,10 @@ const createProjectRuntime=async(projectId:string,workspace:Awaited<ReturnType<t
     const status=await bridge.start(workspace.repoPath,projectId);
     const projectUhp=new UhpClient({baseUrl:status.baseUrl,token:status.token,fetch:bearerFetch(status.token),timeoutMs:Math.max(config.requestTimeoutMs,45_000)});
     const scoped=new Controller(store,projectUhp,!!config.hindsightBaseUrl,true,undefined,hindsight,Math.ceil(config.taskTimeoutMs/1000),Math.ceil(config.workerTimeoutMs/1000),300,projectId);
+
     scoped.setMergedResultResolver((runId,commit)=>github.mergedResultInHead(runId,commit));
-    scoped.configureVerifiedWorkspace({repoPath:workspace.repoPath,allowedScope:workspace.allowedScope,commands:workspace.validationCommands,formatCommand:workspace.formatCommand,bridgeBaseUrl:status.baseUrl,timeoutMs:config.validationTimeoutMs,maxOutputBytes:config.validationMaxOutputBytes,sandbox:config.validationSandbox,bridgeToken:status.token});
+    scoped.configureVerifiedWorkspace({repoPath:workspace.repoPath,allowedScope:workspace.allowedScope,commands:workspace.validationCommands,formatCommand:workspace.formatCommand,bridgeBaseUrl:status.baseUrl,timeoutMs:config.validationTimeoutMs,maxOutputBytes:config.validationMaxOutputBytes,sandbox:config.validationSandbox,bridgeToken:status.token,workerCheckRounds:config.workerCheckRounds});
+
     projectControllers.set(projectId,{controller:scoped,bridge,workspace});
     return {scoped,bridge,status};
   } catch(error) { await bridge.stop(); throw error; }
@@ -135,7 +139,7 @@ const server=createServer(async(req,res)=>{
         if(runtime&&runtime.bridge.health.state==='unavailable'){await runtime.bridge.stop();projectControllers.delete(existingId);runtime=undefined;}
         if(runtime){
           const bridgeBaseUrl=runtime.bridge.status?.baseUrl;if(!bridgeBaseUrl)throw Object.assign(new Error(`Local repository bridge is ${runtime.bridge.health.state}; retry shortly`),{statusCode:503});
-          runtime.controller.configureVerifiedWorkspace({repoPath:workspace.repoPath,allowedScope:workspace.allowedScope,commands:workspace.validationCommands,formatCommand:workspace.formatCommand,bridgeBaseUrl,timeoutMs:config.validationTimeoutMs,maxOutputBytes:config.validationMaxOutputBytes,sandbox:config.validationSandbox,bridgeToken:runtime.bridge.status?.token});
+          runtime.controller.configureVerifiedWorkspace({repoPath:workspace.repoPath,allowedScope:workspace.allowedScope,commands:workspace.validationCommands,formatCommand:workspace.formatCommand,bridgeBaseUrl,timeoutMs:config.validationTimeoutMs,maxOutputBytes:config.validationMaxOutputBytes,sandbox:config.validationSandbox,bridgeToken:runtime.bridge.status?.token,workerCheckRounds:config.workerCheckRounds});
           const saved=await saveWorkspaceSetup(config.dataDir,existingId,{repoPath:workspace.repoPath,allowedScope:workspace.allowedScope,validationCommands:workspace.validationCommands,formatCommand:workspace.formatCommand});
           projectControllers.set(existingId,{...runtime,workspace:saved});
         }else{
